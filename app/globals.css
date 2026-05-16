@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+:root {
+  --surface-0: #030306;
+  --surface-1: #0a0a0f;
+  --surface-2: #12121a;
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-glow: rgba(37, 244, 238, 0.35);
+  --accent-cyan: #25f4ee;
+  --accent-magenta: #fe2c55;
+  --text-primary: #fafafa;
+  --text-muted: #a1a1aa;
+  --text-dim: #52525b;
+}
+
+@theme inline {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-accent-cyan: var(--accent-cyan);
+  --color-accent-magenta: var(--accent-magenta);
+  --font-sans: var(--font-outfit);
+}
+
+@keyframes float-glow {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    opacity: 0.75;
+    transform: translate(2%, -1%) scale(1.03);
+  }
+}
+
+@keyframes scan-line {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--surface-0);
+  color: var(--text-primary);
+  font-family: var(--font-outfit), system-ui, sans-serif;
+}
+
+/* Subtle grid overlay */
+.bg-grid-fine {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.bg-radial-fade {
+  background: radial-gradient(
+    ellipse 80% 50% at 50% -20%,
+    rgba(37, 244, 238, 0.12),
+    transparent 55%
+  );
+}
+
+.bg-radial-magenta {
+  background: radial-gradient(
+    ellipse 60% 40% at 100% 0%,
+    rgba(254, 44, 85, 0.08),
+    transparent 50%
+  );
+}
+
+.text-gradient-brand {
+  background: linear-gradient(
+    105deg,
+    var(--accent-cyan) 0%,
+    #e4e4e7 45%,
+    var(--accent-magenta) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.ring-glow {
+  box-shadow:
+    0 0 0 1px var(--border-subtle),
+    0 0 40px -12px rgba(37, 244, 238, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* 横スクロールタブのスクロールバー非表示 */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
