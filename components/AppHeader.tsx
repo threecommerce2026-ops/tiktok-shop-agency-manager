@@ -14,26 +14,17 @@ const agencyNav = [
 
 const adminNav = [
   { href: "/dashboard", label: "ダッシュボード" },
-  { href: "/creators", label: "クリエイター売上一覧" },
+  { href: "/creators", label: "クリエイター一覧" },
   { href: "/orders", label: "注文一覧" },
   { href: "/sales-upload", label: "売上CSV" },
   { href: "/sales", label: "売上・収益" },
   { href: "/rewards", label: "代理店報酬" },
   { href: "/csv-logs", label: "CSV履歴" },
   { href: "/admin/agencies", label: "代理店管理" },
-  { href: "/admin/referrers", label: "紹介者管理" },
-  { href: "/admin/creator-referrals", label: "CR紹介者管理" },
-  { href: "/admin/referral-payouts", label: "紹介者報酬" },
-  { href: "/admin/agencies-ranking", label: "代理店ランキング" },
   { href: "/admin/sellers", label: "セラー管理" },
-  { href: "/admin/seller-import-histories", label: "セラー取込履歴" },
   { href: "/admin/creator-assignment", label: "クリエイター振り分け管理" },
   { href: "/admin/creator-assignment-logs", label: "振り分け履歴" },
   { href: "/admin/api-connections", label: "API設定" },
-  { href: "/admin/api-test-sync", label: "APIテスト同期" },
-  { href: "/admin/api-sync", label: "本番API同期" },
-  { href: "/sync-jobs", label: "API同期" },
-  { href: "/notifications", label: "通知ログ" },
 ] as const;
 
 const linkClass =
