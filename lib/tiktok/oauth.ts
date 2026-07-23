@@ -3,7 +3,9 @@ import { createHmac, randomBytes } from "node:crypto";
 const TIKTOK_AUTH_HOST = "https://auth.tiktok-shops.com";
 const TIKTOK_OPEN_API_HOST = "https://open-api.tiktokglobalshop.com";
 const TIKTOK_API_VERSION = "202309";
-const DEFAULT_REDIRECT_URI = "http://localhost:3001/api/tiktok/callback";
+const DEFAULT_REDIRECT_URI =
+  process.env.TIKTOK_SHOP_REDIRECT_URI ??
+  "https://tiktok-shop-agency-manager.vercel.app/api/tiktok/callback";
 
 export type TikTokOAuthTokenData = {
   access_token: string;
