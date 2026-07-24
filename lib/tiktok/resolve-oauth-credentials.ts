@@ -49,8 +49,10 @@ const ENV_APP_KEY = "TIKTOK_SHOP_APP_KEY";
 const ENV_APP_SECRET = "TIKTOK_SHOP_APP_SECRET";
 
 function readEnvValue(name: string): string | null {
-  const value = readRuntimeEnv(name);
-  return value ?? null;
+  const value = process.env[name] ?? readRuntimeEnv(name);
+  const normalizedValue = value?.trim();
+
+  return normalizedValue ? normalizedValue : null;
 }
 
 function buildRuntimeEnvDebug(): TikTokOAuthCredentialsDebug["runtimeEnv"] {
