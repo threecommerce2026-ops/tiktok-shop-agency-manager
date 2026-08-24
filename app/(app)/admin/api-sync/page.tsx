@@ -1,5 +1,6 @@
 import { ApiSyncClient } from "@/app/(app)/admin/api-sync/ApiSyncClient";
 import { fetchActiveTikTokApiConnections } from "@/lib/orders/run-tiktok-orders-sync";
+import { toTikTokApiConnectionSummary } from "@/lib/db/tiktok-api-connection-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
 import Link from "next/link";
@@ -23,6 +24,10 @@ export default async function ApiSyncPage() {
   }
 
   const connectionsResult = await fetchActiveTikTokApiConnections(supabase);
+  // Client Component へは秘密情報を含まないサマリだけを渡す。
+  const connectionSummaries = connectionsResult.data.map(
+    toTikTokApiConnectionSummary,
+  );
 
   return (
     <div className="space-y-8">
@@ -69,7 +74,7 @@ export default async function ApiSyncPage() {
         <SyncErrorAlert error={connectionsResult.error} />
       ) : null}
 
-      <ApiSyncClient connections={connectionsResult.data} />
+      <ApiSyncClient connections={connectionSummaries} />
 
       <div className="flex justify-center">
         <Link

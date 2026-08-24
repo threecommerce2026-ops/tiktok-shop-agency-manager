@@ -5,11 +5,17 @@ import {
   saveTikTokApiConnectionAction,
   type SaveTikTokApiConnectionResult,
 } from "@/app/actions/tiktok-api-connections";
-import type { TikTokApiConnectionRow } from "@/lib/db/tiktok-api-connection-queries";
+import type { TikTokApiConnectionSummary } from "@/lib/db/tiktok-api-connection-queries";
+import {
+  connectionStatusLabel,
+  isCredentialDebugEnabled,
+  resolveConnectionStatus,
+  secretPresenceLabel,
+} from "@/lib/tiktok/secret-display";
 import { useActionState, useState, useTransition } from "react";
 
 type Props = {
-  connections: TikTokApiConnectionRow[];
+  connections: TikTokApiConnectionSummary[];
 };
 
 const inputClass =
@@ -33,13 +39,66 @@ function formatTimestamp(iso: string | null): string {
   return date.toLocaleString("ja-JP");
 }
 
+function SecretBadge({ present }: { present: boolean }) {
+  return (
+    <span
+      className={
+        present
+          ? "rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-200"
+          : "rounded-full border border-zinc-600/40 bg-zinc-600/10 px-2 py-0.5 text-[10px] font-medium text-zinc-400"
+      }
+    >
+      {secretPresenceLabel(present)}
+    </span>
+  );
+}
+
+function SecretField({
+  fieldPrefix,
+  name,
+  label,
+  present,
+  isNew,
+}: {
+  fieldPrefix: string;
+  name: "app_secret" | "access_token" | "refresh_token";
+  label: string;
+  present: boolean;
+  isNew: boolean;
+}) {
+  const id = `${fieldPrefix}-${name}`;
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <label className={labelClass} htmlFor={id}>
+          {label}
+        </label>
+        {isNew ? null : <SecretBadge present={present} />}
+      </div>
+      <input
+        id={id}
+        name={name}
+        type="password"
+        autoComplete="new-password"
+        defaultValue=""
+        required={isNew && name !== "refresh_token"}
+        placeholder={
+          isNew ? "値を入力" : "変更する場合のみ入力（空欄なら現在の値を維持）"
+        }
+        className={inputClass}
+      />
+    </div>
+  );
+}
+
 function ConnectionFields({
   connection,
   fieldPrefix,
 }: {
-  connection?: TikTokApiConnectionRow;
+  connection?: TikTokApiConnectionSummary;
   fieldPrefix: string;
 }) {
+  const isNew = !connection;
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <div>
@@ -54,44 +113,27 @@ function ConnectionFields({
           className={inputClass}
         />
       </div>
-      <div>
-        <label className={labelClass} htmlFor={`${fieldPrefix}-app-secret`}>
-          app_secret
-        </label>
-        <input
-          id={`${fieldPrefix}-app-secret`}
-          name="app_secret"
-          type="password"
-          defaultValue={connection?.app_secret ?? ""}
-          required
-          className={inputClass}
-        />
-      </div>
-      <div>
-        <label className={labelClass} htmlFor={`${fieldPrefix}-access-token`}>
-          access_token
-        </label>
-        <input
-          id={`${fieldPrefix}-access-token`}
-          name="access_token"
-          type="password"
-          defaultValue={connection?.access_token ?? ""}
-          required
-          className={inputClass}
-        />
-      </div>
-      <div>
-        <label className={labelClass} htmlFor={`${fieldPrefix}-refresh-token`}>
-          refresh_token
-        </label>
-        <input
-          id={`${fieldPrefix}-refresh-token`}
-          name="refresh_token"
-          type="password"
-          defaultValue={connection?.refresh_token ?? ""}
-          className={inputClass}
-        />
-      </div>
+      <SecretField
+        fieldPrefix={fieldPrefix}
+        name="app_secret"
+        label="app_secret"
+        present={connection?.has_app_secret ?? false}
+        isNew={isNew}
+      />
+      <SecretField
+        fieldPrefix={fieldPrefix}
+        name="access_token"
+        label="access_token"
+        present={connection?.has_access_token ?? false}
+        isNew={isNew}
+      />
+      <SecretField
+        fieldPrefix={fieldPrefix}
+        name="refresh_token"
+        label="refresh_token"
+        present={connection?.has_refresh_token ?? false}
+        isNew={isNew}
+      />
       <div>
         <label className={labelClass} htmlFor={`${fieldPrefix}-shop-cipher`}>
           shop_cipher
@@ -142,7 +184,7 @@ function ConnectionFields({
 function ConnectionForm({
   connection,
 }: {
-  connection?: TikTokApiConnectionRow;
+  connection?: TikTokApiConnectionSummary;
 }) {
   const [state, formAction, isPending] = useActionState(
     saveTikTokApiConnectionAction,
@@ -180,26 +222,74 @@ function ConnectionForm({
   );
 }
 
+function ConnectionStatusBadge({
+  connection,
+}: {
+  connection: TikTokApiConnectionSummary;
+}) {
+  const status = resolveConnectionStatus({
+    hasAccessToken: connection.has_access_token,
+    tokenExpiredAt: connection.token_expired_at,
+  });
+  const className =
+    status === "connected"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+      : status === "token_expired"
+        ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+        : "border-zinc-600/40 bg-zinc-600/10 text-zinc-400";
+
+  return (
+    <span
+      className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${className}`}
+    >
+      {connectionStatusLabel(status)}
+    </span>
+  );
+}
+
 function ConnectionHeader({
   connection,
 }: {
-  connection?: TikTokApiConnectionRow;
+  connection?: TikTokApiConnectionSummary;
 }) {
   return (
     <div>
-      <h2 className="text-sm font-semibold text-zinc-100">
-        {connection ? `ショップ ${connection.shop_id}` : "新規 API 接続"}
-      </h2>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-zinc-100">
+          {connection ? `ショップ ${connection.shop_id}` : "新規 API 接続"}
+        </h2>
+        {connection ? <ConnectionStatusBadge connection={connection} /> : null}
+        {connection ? (
+          <span
+            className={
+              connection.is_active
+                ? "rounded-full border border-white/[0.08] px-2 py-0.5 text-[10px] text-zinc-300"
+                : "rounded-full border border-white/[0.08] px-2 py-0.5 text-[10px] text-zinc-500"
+            }
+          >
+            {connection.is_active ? "同期対象" : "同期対象外"}
+          </span>
+        ) : null}
+      </div>
       <p className="mt-1 text-xs text-zinc-500">
         {connection
-          ? `最終同期: ${formatTimestamp(connection.last_synced_at)}`
+          ? `トークン期限: ${formatTimestamp(connection.token_expired_at)} / 最終同期: ${formatTimestamp(connection.last_synced_at)}`
           : "TikTok Shop API の認証情報を登録します"}
       </p>
+      {connection ? (
+        <p className="mt-1 text-[11px] text-zinc-600">
+          秘密情報は表示されません。設定状況のみ表示しています。
+        </p>
+      ) : null}
     </div>
   );
 }
 
-function ConnectionCard({ connection }: { connection: TikTokApiConnectionRow }) {
+function ConnectionCard({
+  connection,
+}: {
+  connection: TikTokApiConnectionSummary;
+}) {
   const [isPending, startTransition] = useTransition();
   const [deleteMessage, setDeleteMessage] =
     useState<SaveTikTokApiConnectionResult | null>(null);
@@ -250,12 +340,14 @@ export function ApiConnectionsClient({ connections }: Props) {
             >
               TikTokショップ接続
             </a>
-            <a
-              href="/admin/api-connections?oauth_debug=1"
-              className="inline-flex min-h-[40px] items-center justify-center rounded-lg border border-white/[0.08] px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-white/[0.04]"
-            >
-              認証情報デバッグ
-            </a>
+            {isCredentialDebugEnabled() ? (
+              <a
+                href="/admin/api-connections?oauth_debug=1"
+                className="inline-flex min-h-[40px] items-center justify-center rounded-lg border border-white/[0.08] px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-white/[0.04]"
+              >
+                認証情報デバッグ（開発環境のみ）
+              </a>
+            ) : null}
           </div>
         </div>
       </div>

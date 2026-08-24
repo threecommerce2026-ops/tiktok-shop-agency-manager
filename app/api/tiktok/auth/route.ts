@@ -4,6 +4,7 @@ import {
 } from "@/lib/tiktok/resolve-oauth-credentials";
 import { buildTikTokAuthorizeUrl, createTikTokOAuthState } from "@/lib/tiktok/oauth";
 import { requireAdminApiAccess } from "@/lib/tiktok/require-admin-api";
+import { isCredentialDebugEnabled } from "@/lib/tiktok/secret-display";
 import {
   ensureRuntimeEnvLoaded,
   readRuntimeEnv,
@@ -47,7 +48,17 @@ export async function GET(request: Request) {
 
   const requestUrl = new URL(request.url);
   const connectionId = requestUrl.searchParams.get("connection_id");
-  const debugMode = requestUrl.searchParams.get("debug") === "1";
+  // production では debug モードを受け付けない。
+  const debugMode =
+    requestUrl.searchParams.get("debug") === "1" && isCredentialDebugEnabled();
+
+  if (requestUrl.searchParams.get("debug") === "1" && !debugMode) {
+    return NextResponse.json(
+      { ok: false, error: "デバッグ出力は無効です" },
+      { status: 404 },
+    );
+  }
+
   const credentialsResult = await resolveTikTokOAuthCredentials(
     auth.supabase,
     connectionId,
@@ -58,12 +69,14 @@ export async function GET(request: Request) {
   }
 
   if (credentialsResult.error || !credentialsResult.data) {
+    // エラー応答に credential のデバッグ情報を含めない（開発環境のみ付与）。
     return NextResponse.json(
       {
         ok: false,
         error: credentialsResult.error ?? "認証情報を取得できませんでした",
-        envRuntime: buildEnvRuntimeCheck(),
-        debug: credentialsResult.debug,
+        ...(isCredentialDebugEnabled()
+          ? { envRuntime: buildEnvRuntimeCheck(), debug: credentialsResult.debug }
+          : {}),
       },
       { status: 400 },
     );
