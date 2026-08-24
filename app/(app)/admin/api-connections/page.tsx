@@ -6,6 +6,7 @@ import {
   resolveTikTokOAuthCredentials,
   type TikTokOAuthCredentialsDebug,
 } from "@/lib/tiktok/resolve-oauth-credentials";
+import { isCredentialDebugEnabled } from "@/lib/tiktok/secret-display";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -68,7 +69,9 @@ export default async function ApiConnectionsPage({
   const oauthParams = await searchParams;
   const oauthError = oauthParams.oauth_error?.trim();
   const oauthSuccess = oauthParams.oauth_success?.trim();
-  const oauthDebug = oauthParams.oauth_debug === "1";
+  // production では credential デバッグ情報を一切解決・表示しない。
+  const oauthDebug =
+    oauthParams.oauth_debug === "1" && isCredentialDebugEnabled();
   const credentialsDebug = oauthDebug
     ? await resolveTikTokOAuthCredentials(supabase)
     : null;

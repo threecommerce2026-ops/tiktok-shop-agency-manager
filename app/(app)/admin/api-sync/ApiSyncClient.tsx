@@ -1,12 +1,12 @@
 "use client";
 
 import { tiktokApiSyncAction, type TikTokApiSyncResult } from "@/app/actions/tiktok-api-sync";
-import type { TikTokApiConnectionRow } from "@/lib/db/tiktok-api-connection-queries";
+import type { TikTokApiConnectionSummary } from "@/lib/db/tiktok-api-connection-queries";
 import Link from "next/link";
 import { useState, useTransition } from "react";
 
 type Props = {
-  connections: TikTokApiConnectionRow[];
+  connections: TikTokApiConnectionSummary[];
 };
 
 function formatTimestamp(iso: string | null): string {

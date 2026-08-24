@@ -73,24 +73,38 @@ export async function saveTikTokApiConnectionAction(
   const tokenExpiredAt = readDateTime(formData, "token_expired_at");
   const isActive = readBoolean(formData, "is_active");
 
-  if (!appKey || !appSecret || !accessToken || !shopId) {
+  if (!appKey || !shopId) {
+    return { ok: false, error: "app_key / shop_id は必須です" };
+  }
+
+  // 画面には秘密の値を表示しないため、更新時の空欄は「現在の値を維持」とみなす。
+  // 新規追加時のみ app_secret / access_token を必須にする。
+  if (!connectionId && (!appSecret || !accessToken)) {
     return {
       ok: false,
-      error: "app_key / app_secret / access_token / shop_id は必須です",
+      error: "新規追加では app_secret / access_token は必須です",
     };
   }
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     app_key: appKey,
-    app_secret: appSecret,
-    access_token: accessToken,
-    refresh_token: refreshToken,
     shop_cipher: shopCipher,
     shop_id: shopId,
     token_expired_at: tokenExpiredAt,
     is_active: isActive,
     updated_at: new Date().toISOString(),
   };
+
+  // 空欄で送られた秘密項目は payload に含めない（既存値を保持する）。
+  if (appSecret) {
+    payload.app_secret = appSecret;
+  }
+  if (accessToken) {
+    payload.access_token = accessToken;
+  }
+  if (refreshToken) {
+    payload.refresh_token = refreshToken;
+  }
 
   if (connectionId) {
     const { error } = await auth.supabase
@@ -102,7 +116,10 @@ export async function saveTikTokApiConnectionAction(
       return { ok: false, error: mapSupabaseErrorToJa(error.message) };
     }
   } else {
-    const { error } = await auth.supabase.from("tiktok_api_connections").insert(payload);
+    const { error } = await auth.supabase.from("tiktok_api_connections").insert({
+      ...payload,
+      refresh_token: refreshToken,
+    });
     if (error) {
       return { ok: false, error: mapSupabaseErrorToJa(error.message) };
     }
