@@ -26,6 +26,7 @@ const adminNav = [
   { href: "/admin/referral-payouts", label: "紹介者報酬" },
   { href: "/admin/agencies-ranking", label: "代理店ランキング" },
   { href: "/admin/sellers", label: "セラー管理" },
+  { href: "/admin/shop-performance", label: "ショップ分析/TSP請求" },
   { href: "/admin/seller-import-histories", label: "セラー取込履歴" },
   { href: "/admin/creator-assignment", label: "クリエイター振り分け管理" },
   { href: "/admin/creator-assignment-logs", label: "振り分け履歴" },
