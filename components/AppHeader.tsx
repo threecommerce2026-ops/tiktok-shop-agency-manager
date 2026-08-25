@@ -22,6 +22,7 @@ const adminNav = [
   { href: "/csv-logs", label: "CSV履歴" },
   { href: "/admin/agencies", label: "代理店管理" },
   { href: "/admin/sellers", label: "セラー管理" },
+  { href: "/admin/shop-performance", label: "ショップ分析/TSP請求" },
   { href: "/admin/creator-assignment", label: "クリエイター振り分け管理" },
   { href: "/admin/creator-assignment-logs", label: "振り分け履歴" },
   { href: "/admin/api-connections", label: "API設定" },

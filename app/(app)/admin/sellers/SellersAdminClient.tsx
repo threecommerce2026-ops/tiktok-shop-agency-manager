@@ -54,6 +54,7 @@ function matchesSearch(row: SellerRow, q: string) {
   const hay = [
     row.seller_name,
     row.shop_name,
+    row.shop_id,
     row.category,
     row.sample_condition,
     row.last_meeting_note,
@@ -89,6 +90,18 @@ function SellerFormFields({ seller }: { seller?: SellerRow | null }) {
           ショップ名
         </label>
         <input id="sf-shop_name" name="shop_name" defaultValue={seller?.shop_name ?? ""} className={inputClass} />
+      </div>
+      <div className="sm:col-span-2">
+        <label className={labelClass} htmlFor="sf-shop_id">
+          Shop ID（将来API用・任意）
+        </label>
+        <input
+          id="sf-shop_id"
+          name="shop_id"
+          defaultValue={seller?.shop_id ?? ""}
+          placeholder="TikTok Shop の shop_id"
+          className={inputClass}
+        />
       </div>
       <div>
         <label className={labelClass} htmlFor="sf-contact_person">
@@ -353,6 +366,7 @@ export function SellersAdminClient({ rows }: Props) {
     const header = [
       "セラー名",
       "ショップ名",
+      "Shop ID",
       "担当者",
       "メール",
       "電話",
@@ -371,6 +385,7 @@ export function SellersAdminClient({ rows }: Props) {
     const lines = filtered.map((r) => [
       r.seller_name,
       r.shop_name,
+      r.shop_id ?? "",
       r.contact_person ?? "",
       r.contact_email ?? "",
       r.contact_phone ?? "",

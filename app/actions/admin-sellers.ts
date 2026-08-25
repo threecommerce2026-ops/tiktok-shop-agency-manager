@@ -62,6 +62,7 @@ function parseSellerPayload(
     payload: {
       seller_name,
       shop_name: shop_name.length > 0 ? shop_name : "",
+      shop_id: readOptionalText(formData, "shop_id"),
       contact_person: readOptionalText(formData, "contact_person"),
       contact_email: readOptionalText(formData, "contact_email"),
       contact_phone: readOptionalText(formData, "contact_phone"),

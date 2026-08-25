@@ -4,6 +4,7 @@ export type SellerRow = {
   id: string;
   seller_name: string;
   shop_name: string;
+  shop_id: string | null;
   contact_person: string | null;
   contact_email: string | null;
   contact_phone: string | null;
@@ -28,7 +29,7 @@ export async function fetchSellersForAdmin(
   const { data, error } = await supabase
     .from("sellers")
     .select(
-      "id, seller_name, shop_name, contact_person, contact_email, contact_phone, category, sample_condition, has_smp, tap_rate, tsp_rate, last_meeting_date, last_meeting_note, discount_condition, seller_live_available, status, memo, created_at, updated_at",
+      "id, seller_name, shop_name, shop_id, contact_person, contact_email, contact_phone, category, sample_condition, has_smp, tap_rate, tsp_rate, last_meeting_date, last_meeting_note, discount_condition, seller_live_available, status, memo, created_at, updated_at",
     )
     .order("seller_name", { ascending: true });
 
@@ -41,6 +42,7 @@ export async function fetchSellersForAdmin(
       id: row.id as string,
       seller_name: row.seller_name as string,
       shop_name: (row.shop_name as string) ?? "",
+      shop_id: (row.shop_id as string | null) ?? null,
       contact_person: (row.contact_person as string | null) ?? null,
       contact_email: (row.contact_email as string | null) ?? null,
       contact_phone: (row.contact_phone as string | null) ?? null,
