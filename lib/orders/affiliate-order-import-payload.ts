@@ -37,9 +37,27 @@ export const MAX_CHUNK_PAYLOAD_BYTES = 400_000;
 /** バイト数が小さくても1リクエストの行数はここで頭打ちにする */
 export const MAX_CHUNK_ROWS = 300;
 
-/** 照合（プレビュー）用チャンク。キーと指紋だけなので行数を多く取れる */
-export const MAX_COMPARE_CHUNK_ROWS = 2_000;
-export const MAX_COMPARE_CHUNK_BYTES = 400_000;
+/*
+  照合（プレビュー）は「既存行のダイジェストをページ単位で取り寄せる」方式にした。
+
+  ■ なぜチャンク送信をやめたか
+  以前は source_row_key を大量にサーバーへ送り、サーバーが
+    .in("source_row_key", [2,000キー])
+  で問い合わせていた。supabase-js の select は GET なので、
+  キーがそのまま URL のクエリ文字列に載る。
+  本番の実キーは | 区切り + 日本語を含み URL エンコードで約256バイトに膨らむため、
+  2,000キーで URL が 487.6KB に達し Cloudflare が 414 を返した（実測）。
+  16KB に収まるのは 63キーまでで、この経路はそもそも実用にならない。
+
+  ■ 現在の方式
+  URL に載せるのは「対象月」だけ。既存行のキーと指紋をページングで取得し、
+  突き合わせはブラウザ側のメモリで行う。
+  URL 長はファイルの大きさに一切依存しない。
+*/
+export const COMPARE_DIGEST_PAGE_SIZE = 2_000;
+
+/** 1回の照合で指定できる対象月の上限（URLを短く保つ） */
+export const MAX_COMPARE_MONTHS = 60;
 
 // -----------------------------------------------------------------------------
 // 送信する行の形
@@ -305,15 +323,72 @@ export function fingerprintFromDbRow(row: Record<string, unknown>): string {
 export const FINGERPRINT_DB_COLUMNS =
   "source_row_key, target_month, payment_status, order_status, refund_status, refund_amount, product_price, quantity, commission_gmv, commission_base, creator_revenue_before_split, agency_split_rate, agency_revenue";
 
-export type CompareItem = {
+/**
+ * 既存行のダイジェスト1件。
+ * 金額そのものは載せず、キーと指紋だけを返す。
+ */
+export type CompareDigestRow = {
   /** source_row_key */
   k: string;
   /** fingerprint */
   f: string;
 };
 
-export function toCompareItem(row: AffiliateOrderPayloadRow): CompareItem {
-  return { k: row.sourceRowKey, f: fingerprintFromPayloadRow(row) };
+export function toDigestRow(row: {
+  source_row_key?: unknown;
+  [key: string]: unknown;
+}): CompareDigestRow {
+  return {
+    k: String(row.source_row_key ?? ""),
+    f: fingerprintFromDbRow(row),
+  };
+}
+
+/**
+ * 取込対象の行を、既存行のダイジェストと突き合わせる。
+ *
+ * 新規     … ダイジェストにキーが無い
+ * 更新あり … キーがあり指紋が違う
+ * 変更なし … キーがあり指紋も同じ
+ *
+ * 純粋な関数なのでブラウザ側で実行でき、
+ * source_row_key をサーバーへ送る必要がない。
+ */
+export function compareAgainstDigest(
+  rows: AffiliateOrderPayloadRow[],
+  digest: Map<string, string>,
+): { newRows: number; changedRows: number; unchangedRows: number } {
+  let newRows = 0;
+  let changedRows = 0;
+  let unchangedRows = 0;
+
+  for (const row of rows) {
+    const existing = digest.get(row.sourceRowKey);
+    if (existing === undefined) newRows += 1;
+    else if (existing === fingerprintFromPayloadRow(row)) unchangedRows += 1;
+    else changedRows += 1;
+  }
+
+  return { newRows, changedRows, unchangedRows };
+}
+
+/**
+ * 照合に必要な対象月の一覧。
+ * 対象月が取れなかった行がある場合は null 月も取り寄せる。
+ */
+export function resolveCompareMonths(rows: AffiliateOrderPayloadRow[]): {
+  months: string[];
+  includeNullMonth: boolean;
+} {
+  const months = new Set<string>();
+  let includeNullMonth = false;
+
+  for (const row of rows) {
+    if (row.targetMonth) months.add(row.targetMonth);
+    else includeNullMonth = true;
+  }
+
+  return { months: [...months].sort(), includeNullMonth };
 }
 
 // -----------------------------------------------------------------------------

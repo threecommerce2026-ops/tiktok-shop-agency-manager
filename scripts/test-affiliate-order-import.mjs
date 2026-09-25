@@ -649,7 +649,7 @@ test("全アクションが requireAdminAction を先頭で通している", asy
 
   const actions = [
     "startAffiliateOrderImportAction",
-    "compareAffiliateOrderChunkAction",
+    "fetchAffiliateOrderCompareDigestAction",
     "importAffiliateOrderChunkAction",
     "finishAffiliateOrderImportAction",
   ];
@@ -683,23 +683,207 @@ test("1リクエストの行数に上限がある（巨大な配列を受け付�
 
   assert.match(source, /SERVER_MAX_CHUNK_ROWS/);
   assert.match(source, /1回の送信件数が多すぎます/);
-  assert.match(source, /1回の照合件数が多すぎます/);
+  // 照合は件数ではなく「対象月の数」で上限を設ける（キーを送らないため）
+  assert.match(source, /一度に照合できる対象月が多すぎます/);
 });
 
-test("照合アクションは SELECT のみ（DB WRITE しない）", async () => {
+
+// =============================================================================
+// PART B. 414 Request-URI Too Large の回帰テスト
+// =============================================================================
+
+/*
+  実際に発生した事象:
+    .in("source_row_key", [2,000キー]) が GET のクエリ文字列に載り、
+    URL が 487.6KB に達して Cloudflare が 414 を返した。
+  本番実キーは1件あたり URL エンコードで約256バイト。16KB に収まるのは 63件まで。
+*/
+const CLOUDFLARE_URI_LIMIT = 16 * 1024;
+const BYTES_PER_ENCODED_KEY = 256;
+
+/** 対象月だけを載せたときのURL長（案C） */
+function digestUrlLength(months, page) {
+  const cols =
+    "source_row_key,target_month,payment_status,order_status,refund_status,refund_amount,product_price,quantity,commission_gmv,commission_base,creator_revenue_before_split,agency_split_rate,agency_revenue,id";
+  const u = new URL("https://xxxxxxxxxxxxxxxxxxxx.supabase.co/rest/v1/affiliate_order_lines");
+  u.searchParams.set("select", cols);
+  u.searchParams.set("target_month", `in.(${months.map((m) => `"${m}"`).join(",")})`);
+  u.searchParams.set("order", "id.asc");
+  u.searchParams.set("offset", String(page * payload.COMPARE_DIGEST_PAGE_SIZE));
+  u.searchParams.set("limit", String(payload.COMPARE_DIGEST_PAGE_SIZE));
+  return u.toString().length;
+}
+
+test("照合アクションから source_row_key の IN 句が消えている", async () => {
   const fs = await import("node:fs/promises");
   const source = await fs.readFile(
     path.join(root, "app/actions/import-affiliate-orders.ts"),
     "utf8",
   );
 
-  const start = source.indexOf("export async function compareAffiliateOrderChunkAction");
+  // コメントを除いた実コードに .in("source_row_key" が無いこと
+  const code = source
+    .split("\n")
+    .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+    .join("\n");
+
+  assert.ok(
+    !/\.in\(\s*["']source_row_key["']/.test(code),
+    "source_row_key の IN 句が残っている（414の再発経路）",
+  );
+  assert.match(code, /\.in\(["']target_month["']/);
+});
+
+test("照合は対象月だけをURLに載せる（Excelの大きさに依存しない）", () => {
+  // 単月・複数月・上限月数のいずれでもURLは16KBに遠く及ばない
+  for (const months of [
+    ["2026-07"],
+    ["2026-05", "2026-06", "2026-07", "2026-08"],
+    Array.from({ length: payload.MAX_COMPARE_MONTHS }, (_, i) =>
+      `20${20 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, "0")}`,
+    ),
+  ]) {
+    for (const page of [0, 100, 100_000]) {
+      const len = digestUrlLength(months, page);
+      assert.ok(
+        len < CLOUDFLARE_URI_LIMIT / 4,
+        `months=${months.length} page=${page} URL=${len}`,
+      );
+    }
+  }
+});
+
+test("旧方式のURL長を再現し、414になっていたことを示す", () => {
+  // 63件までしか収まらなかったことの確認（回帰の根拠）
+  const fits = Math.floor(CLOUDFLARE_URI_LIMIT / BYTES_PER_ENCODED_KEY);
+  assert.ok(fits < 100, `旧方式で収まるキー数=${fits}`);
+  assert.ok(
+    2000 * BYTES_PER_ENCODED_KEY > CLOUDFLARE_URI_LIMIT * 20,
+    "2,000キーがCloudflare上限を大きく超えることの確認",
+  );
+});
+
+test("対象月の抽出（単月）", () => {
+  const rows = makeRows(10);
+  const { months, includeNullMonth } = payload.resolveCompareMonths(rows);
+  assert.deepEqual(months, ["2026-05"]);
+  assert.equal(includeNullMonth, false);
+});
+
+test("対象月の抽出（複数月・昇順・重複排除）", () => {
+  const rows = [
+    makeRow({ orderId: "A", targetMonth: "2026-07" }),
+    makeRow({ orderId: "B", targetMonth: "2026-05" }),
+    makeRow({ orderId: "C", targetMonth: "2026-07" }),
+    makeRow({ orderId: "D", targetMonth: "2026-06" }),
+  ];
+  const { months, includeNullMonth } = payload.resolveCompareMonths(rows);
+  assert.deepEqual(months, ["2026-05", "2026-06", "2026-07"]);
+  assert.equal(includeNullMonth, false);
+});
+
+test("target_month が null の行があれば fallback を要求する", () => {
+  const rows = [
+    makeRow({ orderId: "A", targetMonth: "2026-07" }),
+    makeRow({ orderId: "B", targetMonth: null }),
+  ];
+  const { months, includeNullMonth } = payload.resolveCompareMonths(rows);
+  assert.deepEqual(months, ["2026-07"]);
+  assert.equal(includeNullMonth, true);
+});
+
+test("全行が target_month null でも照合できる", () => {
+  const rows = [makeRow({ orderId: "A", targetMonth: null })];
+  const { months, includeNullMonth } = payload.resolveCompareMonths(rows);
+  assert.deepEqual(months, []);
+  assert.equal(includeNullMonth, true);
+});
+
+test("ダイジェスト照合: 新規 / 更新あり / 変更なし", () => {
+  const unchanged = makeRow({ orderId: "U" });
+  const changed = makeRow({ orderId: "C" });
+  const added = makeRow({ orderId: "N" });
+
+  const digest = new Map([
+    [unchanged.sourceRowKey, payload.fingerprintFromPayloadRow(unchanged)],
+    [changed.sourceRowKey, "ffffffff"], // 指紋が違う = 更新あり
+  ]);
+
+  const totals = payload.compareAgainstDigest([unchanged, changed, added], digest);
+  assert.deepEqual(totals, { newRows: 1, changedRows: 1, unchangedRows: 1 });
+});
+
+test("ダイジェスト照合: DBの numeric 文字列でも変更なしと判定される", () => {
+  const row = makeRow();
+  const digest = new Map([[row.sourceRowKey, payload.fingerprintFromDbRow(toDbRow(row))]]);
+  assert.deepEqual(payload.compareAgainstDigest([row], digest), {
+    newRows: 0,
+    changedRows: 0,
+    unchangedRows: 1,
+  });
+});
+
+test("ダイジェスト照合: 支払状態・返金・金額の変更を更新として数える", () => {
+  const row = makeRow();
+  for (const override of [
+    { payment_status: "未払い" },
+    { refund_status: "fully_refunded", refund_amount: "2000.00" },
+    { commission_base: "1999.00" },
+  ]) {
+    const digest = new Map([
+      [row.sourceRowKey, payload.fingerprintFromDbRow(toDbRow(row, override))],
+    ]);
+    assert.deepEqual(
+      payload.compareAgainstDigest([row], digest),
+      { newRows: 0, changedRows: 1, unchangedRows: 0 },
+      JSON.stringify(override),
+    );
+  }
+});
+
+test("4,654行でも照合のリクエスト回数はページ数だけで決まる", () => {
+  const rows = makeRows(4654);
+  const { months } = payload.resolveCompareMonths(rows);
+  assert.equal(months.length, 1);
+
+  // 既存 2026-07 は 4,807 行 → ページ数
+  const existingRows = 4807;
+  const pages = Math.ceil(existingRows / payload.COMPARE_DIGEST_PAGE_SIZE);
+  assert.ok(pages <= 5, `pages=${pages}`);
+  // 取込行数がいくつでも URL 長は一定
+  assert.equal(digestUrlLength(months, 0), digestUrlLength(months, 0));
+});
+
+test("5MB / 10MB / 20MB 相当でも照合のURL長は変わらない", () => {
+  const lengths = new Set();
+  for (const mb of [5, 10, 20]) {
+    const rows = makeRows(Math.round(ROWS_PER_MB * mb));
+    const { months } = payload.resolveCompareMonths(rows);
+    const len = digestUrlLength(months, 0);
+    assert.ok(len < CLOUDFLARE_URI_LIMIT / 4, `${mb}MB: URL=${len}`);
+    lengths.add(len);
+  }
+  // 行数が 17,830 → 71,320 と4倍になっても URL は同一
+  assert.equal(lengths.size, 1);
+});
+
+test("照合アクションは SELECT のみ・admin 判定あり・月数上限あり", async () => {
+  const fs = await import("node:fs/promises");
+  const source = await fs.readFile(
+    path.join(root, "app/actions/import-affiliate-orders.ts"),
+    "utf8",
+  );
+
+  const start = source.indexOf("export async function fetchAffiliateOrderCompareDigestAction");
   const end = source.indexOf("export async function importAffiliateOrderChunkAction");
   const body = source.slice(start, end);
 
+  assert.ok(start >= 0 && end > start);
+  assert.match(body, /requireAdminAction\(\)/);
+  assert.match(body, /MAX_COMPARE_MONTHS/);
+  assert.match(body, /\.order\("id", \{ ascending: true \}\)/);
   assert.ok(!/\.insert\(/.test(body), "insert している");
   assert.ok(!/\.update\(/.test(body), "update している");
   assert.ok(!/\.upsert\(/.test(body), "upsert している");
   assert.ok(!/\.delete\(/.test(body), "delete している");
-  assert.match(body, /\.select\(/);
 });

@@ -4,23 +4,19 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
-  compareAffiliateOrderChunkAction,
+  fetchAffiliateOrderCompareDigestAction,
   finishAffiliateOrderImportAction,
   importAffiliateOrderChunkAction,
   startAffiliateOrderImportAction,
 } from "@/app/actions/import-affiliate-orders";
 import {
   buildPayloadChunks,
+  compareAgainstDigest,
   dedupeAffiliateOrderRows,
-  MAX_COMPARE_CHUNK_BYTES,
-  MAX_COMPARE_CHUNK_ROWS,
-  toCompareItem,
+  resolveCompareMonths,
   type AffiliateOrderPayloadRow,
-  type CompareItem,
 } from "@/lib/orders/affiliate-order-import-payload";
 import {
-  emptyCompareTotals,
-  mergeCompareTotals,
   resolveImportBlockers,
   summarizeAffiliateOrderRows,
   type AffiliateOrderCompareTotals,
@@ -203,37 +199,47 @@ export function AffiliateOrdersImportClient() {
           return;
         }
 
-        // ---- 既存DBとの照合（SELECTのみ。DB WRITE なし）----
+        /*
+          ---- 既存DBとの照合（SELECTのみ。DB WRITE なし）----
+
+          source_row_key はサーバーへ送らない。
+          対象月だけを渡して既存行の「キーと指紋」をページで取り寄せ、
+          突き合わせはこのブラウザのメモリで行う。
+          URL に載るのは対象月だけなので、Excel が何MBでも URL 長は変わらない。
+        */
         setPhase("comparing");
         setStatusText("既存データと照合しています…");
 
-        const compareItems: CompareItem[] = deduped.rows.map(toCompareItem);
-        const compareChunks = buildPayloadChunks(compareItems, {
-          maxBytes: MAX_COMPARE_CHUNK_BYTES,
-          maxRows: MAX_COMPARE_CHUNK_ROWS,
-        }).chunks;
+        const { months, includeNullMonth } = resolveCompareMonths(deduped.rows);
 
-        let totals = emptyCompareTotals();
+        const digest = new Map<string, string>();
         let compareError: string | null = null;
+        let page = 0;
 
-        for (let i = 0; i < compareChunks.length; i += 1) {
-          setStatusText(
-            `既存データと照合しています… ${i + 1} / ${compareChunks.length}`,
-          );
-          const result = await compareAffiliateOrderChunkAction({
-            items: compareChunks[i],
+        for (;;) {
+          const result = await fetchAffiliateOrderCompareDigestAction({
+            months,
+            includeNullMonth,
+            page,
           });
 
           if (!result.ok) {
             compareError = result.error;
             break;
           }
-          totals = mergeCompareTotals(totals, result.totals);
+
+          for (const row of result.rows) digest.set(row.k, row.f);
+          setStatusText(
+            `既存データと照合しています… ${digest.size.toLocaleString("ja-JP")} 件読込`,
+          );
+
+          if (!result.hasMore) break;
+          page = result.nextPage;
         }
 
         setPreview({
           ...base,
-          compare: compareError ? null : totals,
+          compare: compareError ? null : compareAgainstDigest(deduped.rows, digest),
           compareError,
         });
         setPhase("preview");
@@ -353,7 +359,8 @@ export function AffiliateOrdersImportClient() {
             ブラウザ内で解析
           </span>
           し、サーバーへは小分けしたデータだけを送ります。
-          大きなファイルでもアップロード上限に当たりません。
+          既存データとの照合も対象月だけを指定して行うため、
+          大きなファイルでもアップロード上限やURL長の上限に当たりません。
         </p>
 
         <p className="mt-2 text-sm text-zinc-400">

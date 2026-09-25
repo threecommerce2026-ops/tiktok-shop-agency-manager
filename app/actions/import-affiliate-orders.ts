@@ -10,15 +10,15 @@ import { requireAdminAction } from "@/lib/db/admin-access";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
 import {
+  COMPARE_DIGEST_PAGE_SIZE,
   FINGERPRINT_DB_COLUMNS,
-  fingerprintFromDbRow,
   MAX_CHUNK_ROWS,
-  MAX_COMPARE_CHUNK_ROWS,
+  MAX_COMPARE_MONTHS,
+  toDigestRow,
   validateAffiliateOrderPayloadRow,
   type AffiliateOrderPayloadRow,
-  type CompareItem,
+  type CompareDigestRow,
 } from "@/lib/orders/affiliate-order-import-payload";
-import type { AffiliateOrderCompareTotals } from "@/lib/orders/affiliate-order-preview";
 
 /*
   Partner Center 注文Excelの取込（チャンク方式）。
@@ -47,8 +47,15 @@ export type StartImportResult =
   | { ok: true; batchId: string }
   | { ok: false; error: string };
 
-export type CompareChunkResult =
-  | { ok: true; totals: AffiliateOrderCompareTotals }
+export type CompareDigestResult =
+  | {
+      ok: true;
+      rows: CompareDigestRow[];
+      /** 次のページがあるか */
+      hasMore: boolean;
+      /** 次に要求すべきページ番号（0始まり） */
+      nextPage: number;
+    }
   | { ok: false; error: string };
 
 export type ImportChunkResult =
@@ -124,71 +131,107 @@ export async function startAffiliateOrderImportAction(input: {
 }
 
 // =============================================================================
-// 2. プレビュー用の既存行照合（DB WRITE なし）
+// 2. プレビュー用の既存行ダイジェスト（DB WRITE なし）
 // =============================================================================
 
+const MONTH_PATTERN = /^\d{4}-\d{2}$/;
+
 /**
- * source_row_key と指紋だけを受け取り、
- * 新規 / 更新あり / 変更なし を数える。
+ * 対象月の既存行から「キーと指紋」だけをページ単位で返す。
  *
- * 明細そのものは送らないので、1リクエストで2,000件ほど照合できる。
- * このアクションは SELECT しか行わない。
+ * ■ なぜ source_row_key で引かないのか
+ * supabase-js の select は GET なので .in("source_row_key", [...]) は
+ * キーをそのまま URL のクエリ文字列へ載せる。
+ * 本番の実キーは URL エンコードで1件あたり約256バイトに膨らみ、
+ * 2,000件で URL が 487.6KB に達して Cloudflare が 414 を返した（実測）。
+ * 16KB に収まるのは 63件までで、この経路は実用にならない。
+ *
+ * ここでは URL に載せるのは対象月だけにして、突き合わせは呼び出し側で行う。
+ * URL 長は Excel の大きさに一切依存しない。
+ *
+ * ■ このアクションは SELECT しか行わない
  */
-export async function compareAffiliateOrderChunkAction(input: {
-  items: CompareItem[];
-}): Promise<CompareChunkResult> {
+export async function fetchAffiliateOrderCompareDigestAction(input: {
+  months: string[];
+  includeNullMonth?: boolean;
+  page?: number;
+}): Promise<CompareDigestResult> {
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const items = Array.isArray(input?.items) ? input.items : null;
-  if (!items) return { ok: false, error: "照合データの形式が不正です" };
-  if (items.length === 0) {
-    return { ok: true, totals: { newRows: 0, changedRows: 0, unchangedRows: 0 } };
-  }
-  if (items.length > MAX_COMPARE_CHUNK_ROWS * 2) {
-    return { ok: false, error: "1回の照合件数が多すぎます" };
-  }
+  const months = Array.isArray(input?.months) ? input.months : null;
+  if (!months) return { ok: false, error: "対象月の形式が不正です" };
 
-  const fingerprintByKey = new Map<string, string>();
-  for (const item of items) {
-    const key = String(item?.k ?? "");
-    const fingerprint = String(item?.f ?? "");
-    if (!key || !fingerprint) {
-      return { ok: false, error: "照合データの形式が不正です" };
+  const normalized = [...new Set(months.map((m) => String(m ?? "").trim()))].filter(
+    Boolean,
+  );
+
+  for (const month of normalized) {
+    if (!MONTH_PATTERN.test(month)) {
+      return { ok: false, error: `対象月の形式が不正です: ${month}` };
     }
-    fingerprintByKey.set(key, fingerprint);
   }
 
-  const keys = [...fingerprintByKey.keys()];
+  if (normalized.length > MAX_COMPARE_MONTHS) {
+    return { ok: false, error: "一度に照合できる対象月が多すぎます" };
+  }
 
-  const { data, error } = await auth.supabase
+  const includeNullMonth = input?.includeNullMonth === true;
+
+  if (normalized.length === 0 && !includeNullMonth) {
+    return { ok: true, rows: [], hasMore: false, nextPage: 0 };
+  }
+
+  const page = Number(input?.page ?? 0);
+  if (!Number.isInteger(page) || page < 0 || page > 100_000) {
+    return { ok: false, error: "ページ指定が不正です" };
+  }
+
+  const from = page * COMPARE_DIGEST_PAGE_SIZE;
+  const to = from + COMPARE_DIGEST_PAGE_SIZE - 1;
+
+  /*
+    ページ間で行順がぶれないよう、一意列（id）で必ず並べる。
+    order 無しで range を繰り返すと重複取得と取りこぼしが同時に起きる。
+  */
+  let query = auth.supabase
     .from("affiliate_order_lines")
-    .select(FINGERPRINT_DB_COLUMNS)
-    .in("source_row_key", keys);
+    .select(FINGERPRINT_DB_COLUMNS + ", id")
+    .order("id", { ascending: true })
+    .range(from, to);
+
+  /*
+    対象月が取れなかった行への保険。
+    本番の target_month NULL は 0 件だが、
+    Excel 側で作成日時が読めない行があっても照合が壊れないようにする。
+  */
+  if (normalized.length > 0 && includeNullMonth) {
+    const list = normalized.map((m) => `"${m}"`).join(",");
+    query = query.or(`target_month.in.(${list}),target_month.is.null`);
+  } else if (normalized.length > 0) {
+    query = query.in("target_month", normalized);
+  } else {
+    query = query.is("target_month", null);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     return { ok: false, error: mapSupabaseErrorToJa(error.message) };
   }
 
-  let changedRows = 0;
-  let unchangedRows = 0;
-
-  for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-    const key = String(row.source_row_key ?? "");
-    const incoming = fingerprintByKey.get(key);
-    if (!incoming) continue;
-
-    if (fingerprintFromDbRow(row) === incoming) unchangedRows += 1;
-    else changedRows += 1;
-  }
+  /*
+    列指定を文字列連結で作っているため型推論が効かない。
+    実際に返るのは FINGERPRINT_DB_COLUMNS の行なので unknown 経由で受ける。
+  */
+  const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
+  const hasMore = rows.length === COMPARE_DIGEST_PAGE_SIZE;
 
   return {
     ok: true,
-    totals: {
-      newRows: keys.length - changedRows - unchangedRows,
-      changedRows,
-      unchangedRows,
-    },
+    rows: rows.map(toDigestRow),
+    hasMore,
+    nextPage: page + 1,
   };
 }
 
