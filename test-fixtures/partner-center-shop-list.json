@@ -1,0 +1,56 @@
+{
+  "_note": "Partner Center ショップ分析レスポンスの構造テスト用。Cookie / sessionid / msToken / X-Bogus / _signature などの認証情報は一切含まない。ショップ名はテスト用の架空名。",
+  "code": 0,
+  "message": "success",
+  "data": {
+    "time_descriptor": {
+      "start": "2026-08-01T00:00:00",
+      "end": "2026-09-01T00:00:00",
+      "timezone_offset": 32400,
+      "granularity": "1M",
+      "scenario": 10
+    },
+    "list_control": {
+      "rules": [],
+      "next_pagination": {
+        "has_more": false,
+        "next_page": 0,
+        "total_page": 1,
+        "total": 2
+      }
+    },
+    "is_sub_account": false,
+    "stats": [
+      {
+        "shop_id": "7496312938158394157",
+        "shop_name": "TEST SHOP A",
+        "shop_avatar": "",
+        "revenue": {
+          "amount_formatted": "100,000円",
+          "amount_delimited": "100,000",
+          "amount": "100000",
+          "currency_code": "JPY",
+          "currency_symbol": "円"
+        },
+        "shop_ranking": 1,
+        "revenue_percentage": "0.58",
+        "cmp_revenue": -7.02
+      },
+      {
+        "shop_id": "7496219251418106021",
+        "shop_name": "TEST SHOP B",
+        "shop_avatar": "",
+        "revenue": {
+          "amount_formatted": "50,000円",
+          "amount_delimited": "50,000",
+          "amount": "50000",
+          "currency_code": "JPY",
+          "currency_symbol": "円"
+        },
+        "shop_ranking": 2,
+        "revenue_percentage": "0.29",
+        "cmp_revenue": 1.5
+      }
+    ]
+  }
+}

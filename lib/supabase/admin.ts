@@ -1,13 +1,13 @@
+import "server-only";
+
 import { createClient } from "@supabase/supabase-js";
 
-export function createServiceRoleClient() {
+export function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!url || !key) {
-    throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY が未設定です。Cron 同期には service role が必要です。",
-    );
+    throw new Error("Supabase環境変数が設定されていません。");
   }
 
   return createClient(url, key, {
@@ -16,4 +16,8 @@ export function createServiceRoleClient() {
       autoRefreshToken: false,
     },
   });
+}
+
+export function createServiceRoleClient() {
+  return getSupabaseAdmin();
 }
