@@ -1,132 +1,293 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
+
 import {
   buildCreatorLookup,
   resolveCreatorByTiktokId,
 } from "@/lib/creators/resolve-creator-by-tiktok";
-import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
-import { parseAffiliateOrderFile } from "@/lib/orders/parse-affiliate-order-export";
+import { requireAdminAction } from "@/lib/db/admin-access";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
-import { createClient } from "@/lib/supabase/server";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
-import { revalidatePath } from "next/cache";
+import {
+  FINGERPRINT_DB_COLUMNS,
+  fingerprintFromDbRow,
+  MAX_CHUNK_ROWS,
+  MAX_COMPARE_CHUNK_ROWS,
+  validateAffiliateOrderPayloadRow,
+  type AffiliateOrderPayloadRow,
+  type CompareItem,
+} from "@/lib/orders/affiliate-order-import-payload";
+import type { AffiliateOrderCompareTotals } from "@/lib/orders/affiliate-order-preview";
 
-export type ImportAffiliateOrdersResult =
+/*
+  Partner Center 注文Excelの取込（チャンク方式）。
+
+  ■ Excelファイルはサーバーへ送らない
+  Vercel Functions のボディ上限 4.5MB（実測で 5MB は 413）と
+  Next.js Server Action の既定上限 1MB を避けるため、
+  解析はブラウザ側で行い、ここへは小さなJSONチャンクだけが届く。
+  next.config.ts の bodySizeLimit には依存しない。
+
+  ■ ブラウザの値を信用しない
+  チャンクごとに
+    管理者判定 → 行の再検証 → source_row_key の再生成と一致確認 → UPSERT
+  を必ず通す。
+
+  ■ 二重計上しない
+  UNIQUE(source_row_key) + onConflict: "source_row_key" の既存仕様を維持。
+  同じExcelの再投入・期間が重なるExcel・途中失敗後の再実行、いずれでも増えない。
+
+  ■ 報酬は自動再集計しない
+  既存運用どおり、取込後に「代理店報酬の再集計」「紹介者報酬の再集計」を
+  管理者が明示的に実行する。
+*/
+
+export type StartImportResult =
+  | { ok: true; batchId: string }
+  | { ok: false; error: string };
+
+export type CompareChunkResult =
+  | { ok: true; totals: AffiliateOrderCompareTotals }
+  | { ok: false; error: string };
+
+export type ImportChunkResult =
   | {
       ok: true;
-      message: string;
-      rowCount: number;
-      successCount: number;
+      upsertedCount: number;
       failedCount: number;
-      creatorsTouched: number;
-      creatorsCreatedOrResolved: number;
+      creatorsResolved: number;
       sellersLinked: number;
-      batchId: string;
       failures: Array<{ rowNumber: number; error: string }>;
     }
-  | {
-      ok: false;
-      error: string;
-      failures?: Array<{ rowNumber: number; error: string }>;
-    };
+  | { ok: false; error: string; failures?: Array<{ rowNumber: number; error: string }> };
 
-function chunk<T>(items: T[], size: number): T[][] {
-  const result: T[][] = [];
+export type FinishImportResult =
+  | { ok: true; message: string }
+  | { ok: false; error: string };
 
-  for (let i = 0; i < items.length; i += size) {
-    result.push(items.slice(i, i + size));
-  }
+/** 1リクエストで受け付ける行数の上限（クライアントの分割と合わせる） */
+const SERVER_MAX_CHUNK_ROWS = MAX_CHUNK_ROWS * 2;
 
-  return result;
+function failureList(
+  rows: Array<{ rowNumber: number; error: string }>,
+  limit = 50,
+): Array<{ rowNumber: number; error: string }> {
+  return rows.slice(0, limit);
 }
 
-export async function importAffiliateOrdersAction(
-  _prev: ImportAffiliateOrdersResult | null,
-  formData: FormData,
-): Promise<ImportAffiliateOrdersResult> {
-  const supabase = await createClient();
+// =============================================================================
+// 1. 取込セッションの開始
+// =============================================================================
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+/**
+ * Excel 1ファイル = 1 import session。
+ * チャンクごとにバッチを作らない。
+ */
+export async function startAffiliateOrderImportAction(input: {
+  fileName: string;
+  rowTotal: number;
+}): Promise<StartImportResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
 
-  if (!user) {
-    return {
-      ok: false,
-      error: "ログインが必要です",
-    };
+  const fileName = String(input?.fileName ?? "").trim();
+  const rowTotal = Number(input?.rowTotal ?? 0);
+
+  if (!fileName) return { ok: false, error: "ファイル名がありません" };
+  if (!Number.isInteger(rowTotal) || rowTotal <= 0) {
+    return { ok: false, error: "取込対象の行数が不正です" };
   }
 
-  const appUser = await resolveAppUserContext(supabase, user);
-
-  if (!isAdminRole(appUser.data.role)) {
-    return {
-      ok: false,
-      error: "管理者のみ実行できます",
-    };
-  }
-
-  const file = formData.get("file");
-
-  if (!(file instanceof File) || file.size === 0) {
-    return {
-      ok: false,
-      error: "Partner Center のExcelファイルを選択してください",
-    };
-  }
-
-  const parsed = await parseAffiliateOrderFile(file);
-
-  if (!parsed.rows.length) {
-    return {
-      ok: false,
-      error:
-        parsed.failures[0]?.error ??
-        "取り込み可能なPartner Center注文データがありません",
-      failures: parsed.failures,
-    };
-  }
-
-  // ------------------------------------------------------------
-  // 取込バッチ
-  // ------------------------------------------------------------
-
-  const { data: batch, error: batchError } = await supabase
+  const { data, error } = await auth.supabase
     .from("affiliate_order_import_batches")
     .insert({
-      file_name: file.name,
-      row_total: parsed.rows.length,
+      file_name: fileName,
+      row_total: rowTotal,
       upserted_count: 0,
-      failed_count: parsed.failures.length,
-      imported_by: user.id,
+      failed_count: 0,
+      imported_by: auth.user?.id ?? null,
     })
     .select("id")
     .single();
 
-  if (batchError || !batch?.id) {
+  if (error || !data?.id) {
     return {
       ok: false,
       error: mapSupabaseErrorToJa(
-        batchError?.message ?? "取込履歴を作成できませんでした",
+        error?.message ?? "取込履歴を作成できませんでした",
       ),
     };
   }
 
-  const batchId = batch.id as string;
+  return { ok: true, batchId: data.id as string };
+}
 
-  // ------------------------------------------------------------
-  // Creator読込
-  // ------------------------------------------------------------
+// =============================================================================
+// 2. プレビュー用の既存行照合（DB WRITE なし）
+// =============================================================================
 
-  const { data: existingCreators, error: creatorsError } = await supabase
+/**
+ * source_row_key と指紋だけを受け取り、
+ * 新規 / 更新あり / 変更なし を数える。
+ *
+ * 明細そのものは送らないので、1リクエストで2,000件ほど照合できる。
+ * このアクションは SELECT しか行わない。
+ */
+export async function compareAffiliateOrderChunkAction(input: {
+  items: CompareItem[];
+}): Promise<CompareChunkResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const items = Array.isArray(input?.items) ? input.items : null;
+  if (!items) return { ok: false, error: "照合データの形式が不正です" };
+  if (items.length === 0) {
+    return { ok: true, totals: { newRows: 0, changedRows: 0, unchangedRows: 0 } };
+  }
+  if (items.length > MAX_COMPARE_CHUNK_ROWS * 2) {
+    return { ok: false, error: "1回の照合件数が多すぎます" };
+  }
+
+  const fingerprintByKey = new Map<string, string>();
+  for (const item of items) {
+    const key = String(item?.k ?? "");
+    const fingerprint = String(item?.f ?? "");
+    if (!key || !fingerprint) {
+      return { ok: false, error: "照合データの形式が不正です" };
+    }
+    fingerprintByKey.set(key, fingerprint);
+  }
+
+  const keys = [...fingerprintByKey.keys()];
+
+  const { data, error } = await auth.supabase
+    .from("affiliate_order_lines")
+    .select(FINGERPRINT_DB_COLUMNS)
+    .in("source_row_key", keys);
+
+  if (error) {
+    return { ok: false, error: mapSupabaseErrorToJa(error.message) };
+  }
+
+  let changedRows = 0;
+  let unchangedRows = 0;
+
+  for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+    const key = String(row.source_row_key ?? "");
+    const incoming = fingerprintByKey.get(key);
+    if (!incoming) continue;
+
+    if (fingerprintFromDbRow(row) === incoming) unchangedRows += 1;
+    else changedRows += 1;
+  }
+
+  return {
+    ok: true,
+    totals: {
+      newRows: keys.length - changedRows - unchangedRows,
+      changedRows,
+      unchangedRows,
+    },
+  };
+}
+
+// =============================================================================
+// 3. チャンク取込（UPSERT）
+// =============================================================================
+
+/**
+ * 1チャンク分の明細を取り込む。
+ *
+ * 途中のチャンクが失敗しても、成功済みのチャンクは
+ * source_row_key の UPSERT で入っているため、
+ * 同じExcelを最初から流し直しても二重計上にならない。
+ */
+export async function importAffiliateOrderChunkAction(input: {
+  batchId: string;
+  rows: unknown[];
+}): Promise<ImportChunkResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const batchId = String(input?.batchId ?? "").trim();
+  if (!batchId) return { ok: false, error: "取込セッションが不明です" };
+
+  const incoming = Array.isArray(input?.rows) ? input.rows : null;
+  if (!incoming) return { ok: false, error: "明細データの形式が不正です" };
+  if (incoming.length === 0) {
+    return {
+      ok: true,
+      upsertedCount: 0,
+      failedCount: 0,
+      creatorsResolved: 0,
+      sellersLinked: 0,
+      failures: [],
+    };
+  }
+  if (incoming.length > SERVER_MAX_CHUNK_ROWS) {
+    return { ok: false, error: "1回の送信件数が多すぎます" };
+  }
+
+  // 取込セッションの存在確認（勝手なIDで書かせない）
+  const { data: batch, error: batchError } = await auth.supabase
+    .from("affiliate_order_import_batches")
+    .select("id, upserted_count, failed_count")
+    .eq("id", batchId)
+    .maybeSingle();
+
+  if (batchError) {
+    return { ok: false, error: mapSupabaseErrorToJa(batchError.message) };
+  }
+  if (!batch?.id) {
+    return { ok: false, error: "取込セッションが見つかりません" };
+  }
+
+  // ---- 行ごとの再検証（source_row_key の再生成を含む）----
+  const failures: Array<{ rowNumber: number; error: string }> = [];
+  const validRows: AffiliateOrderPayloadRow[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const candidate of incoming) {
+    const result = validateAffiliateOrderPayloadRow(candidate);
+
+    if (!result.ok) {
+      failures.push({ rowNumber: result.rowNumber, error: result.error });
+      continue;
+    }
+
+    /*
+      チャンク内の重複はブラウザ側で除去済みだが、
+      ここでも弾いておく。
+      同じキーが1文に2回現れると Postgres が 21000 で失敗するため。
+    */
+    if (seenKeys.has(result.row.sourceRowKey)) {
+      failures.push({
+        rowNumber: result.row.rowNumber,
+        error: "同じ明細キーが1回の送信に重複しています",
+      });
+      continue;
+    }
+
+    seenKeys.add(result.row.sourceRowKey);
+    validRows.push(result.row);
+  }
+
+  if (validRows.length === 0) {
+    return {
+      ok: false,
+      error: "このチャンクに取り込める明細がありません",
+      failures: failureList(failures),
+    };
+  }
+
+  // ---- クリエイター解決（未登録は仮登録。既存仕様を維持）----
+  const { data: existingCreators, error: creatorsError } = await auth.supabase
     .from("creators")
     .select("id, tiktok_id, agency_id, creator_name");
 
   if (creatorsError) {
-    return {
-      ok: false,
-      error: mapSupabaseErrorToJa(creatorsError.message),
-    };
+    return { ok: false, error: mapSupabaseErrorToJa(creatorsError.message) };
   }
 
   const creatorLookup = buildCreatorLookup(
@@ -138,20 +299,48 @@ export async function importAffiliateOrdersAction(
     })),
   );
 
-  // ------------------------------------------------------------
-  // Seller読込
-  // shop_code と sellers.shop_id を優先照合
-  // ------------------------------------------------------------
+  const resolvedCreators = new Map<
+    string,
+    { id: string; agencyId: string | null; creatorName: string }
+  >();
 
-  const { data: sellers, error: sellersError } = await supabase
+  const uniqueTiktokIds = new Set<string>();
+  for (const row of validRows) {
+    const key = normalizeTiktokId(row.creatorTiktokId);
+    if (key) uniqueTiktokIds.add(key);
+  }
+
+  for (const tiktokId of uniqueTiktokIds) {
+    const resolved = await resolveCreatorByTiktokId(auth.supabase, {
+      tiktokId,
+      // 現エクスポートに nickname が無いため username を表示名にする既存仕様
+      creatorName: tiktokId,
+      lookup: creatorLookup,
+      autoCreate: true,
+    });
+
+    if (!resolved.creator) {
+      failures.push({
+        rowNumber: 0,
+        error: `${tiktokId}: ${resolved.error ?? "クリエイターを登録できませんでした"}`,
+      });
+      continue;
+    }
+
+    resolvedCreators.set(tiktokId, {
+      id: resolved.creator.id,
+      agencyId: resolved.creator.agency_id,
+      creatorName: resolved.creator.creator_name,
+    });
+  }
+
+  // ---- セラー照合（shop_id 優先。既存仕様を維持）----
+  const { data: sellers, error: sellersError } = await auth.supabase
     .from("sellers")
     .select("id, shop_id, shop_name, seller_name");
 
   if (sellersError) {
-    return {
-      ok: false,
-      error: mapSupabaseErrorToJa(sellersError.message),
-    };
+    return { ok: false, error: mapSupabaseErrorToJa(sellersError.message) };
   }
 
   const sellerByShopId = new Map<string, string>();
@@ -161,93 +350,20 @@ export async function importAffiliateOrdersAction(
     const sellerId = seller.id as string;
 
     const shopId = String(seller.shop_id ?? "").trim();
-    if (shopId) {
-      sellerByShopId.set(shopId, sellerId);
-    }
+    if (shopId) sellerByShopId.set(shopId, sellerId);
 
-    const shopName = String(
-      seller.shop_name ?? seller.seller_name ?? "",
-    )
+    const shopName = String(seller.shop_name ?? seller.seller_name ?? "")
       .trim()
       .toLowerCase();
-
-    if (shopName) {
-      sellerByShopName.set(shopName, sellerId);
-    }
+    if (shopName) sellerByShopName.set(shopName, sellerId);
   }
 
-  // ------------------------------------------------------------
-  // Creatorを先に一意単位で解決
-  // 16,000行すべてでDB照会しない
-  // ------------------------------------------------------------
-
-  const uniqueCreators = new Map<
-    string,
-    {
-      tiktokId: string;
-      creatorName: string;
-    }
-  >();
-
-  for (const row of parsed.rows) {
-    const tiktokId = normalizeTiktokId(row.creatorTiktokId);
-
-    if (!tiktokId) continue;
-
-    if (!uniqueCreators.has(tiktokId)) {
-      uniqueCreators.set(tiktokId, {
-        tiktokId,
-        // 現エクスポートには nickname が無いため
-        // 初回はusernameを表示名として使用
-        creatorName: tiktokId,
-      });
-    }
-  }
-
-  const resolvedCreators = new Map<
-    string,
-    {
-      id: string;
-      agencyId: string | null;
-      creatorName: string;
-    }
-  >();
-
-  const failures = [...parsed.failures];
-
-  for (const creatorInput of uniqueCreators.values()) {
-    const resolved = await resolveCreatorByTiktokId(supabase, {
-      tiktokId: creatorInput.tiktokId,
-      creatorName: creatorInput.creatorName,
-      lookup: creatorLookup,
-      autoCreate: true,
-    });
-
-    if (!resolved.creator) {
-      failures.push({
-        rowNumber: 0,
-        error: `${creatorInput.tiktokId}: ${
-          resolved.error ?? "クリエイターを登録できませんでした"
-        }`,
-      });
-      continue;
-    }
-
-    resolvedCreators.set(creatorInput.tiktokId, {
-      id: resolved.creator.id,
-      agencyId: resolved.creator.agency_id,
-      creatorName: resolved.creator.creator_name,
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Affiliate注文行へ変換
-  // ------------------------------------------------------------
-
-  const insertRows = [];
+  // ---- DB 行へ変換（列の組み立ては従来と同一）----
+  const nowIso = new Date().toISOString();
+  const insertRows: Array<Record<string, unknown>> = [];
   let sellersLinked = 0;
 
-  for (const row of parsed.rows) {
+  for (const row of validRows) {
     const creatorKey = normalizeTiktokId(row.creatorTiktokId);
     const creator = resolvedCreators.get(creatorKey);
 
@@ -264,15 +380,10 @@ export async function importAffiliateOrdersAction(
     if (row.shopCode) {
       sellerId = sellerByShopId.get(row.shopCode.trim()) ?? null;
     }
-
     if (!sellerId && row.shopName) {
-      sellerId =
-        sellerByShopName.get(row.shopName.trim().toLowerCase()) ?? null;
+      sellerId = sellerByShopName.get(row.shopName.trim().toLowerCase()) ?? null;
     }
-
-    if (sellerId) {
-      sellersLinked += 1;
-    }
+    if (sellerId) sellersLinked += 1;
 
     insertRows.push({
       source_row_key: row.sourceRowKey,
@@ -307,13 +418,9 @@ export async function importAffiliateOrdersAction(
 
       order_amount: row.productPrice * row.quantity,
 
-      refund_amount: row.isFullyRefunded
-        ? row.productPrice * row.quantity
-        : 0,
+      refund_amount: row.isFullyRefunded ? row.productPrice * row.quantity : 0,
 
-      refund_status: row.isFullyRefunded
-        ? "fully_refunded"
-        : null,
+      refund_status: row.isFullyRefunded ? "fully_refunded" : null,
 
       commission_gmv: row.commissionGmv,
       commission_base: row.commissionBase,
@@ -323,13 +430,11 @@ export async function importAffiliateOrdersAction(
       tiktok_bonus_commission_rate: row.tiktokBonusCommissionRate,
       partner_bonus_commission_rate: row.partnerBonusCommissionRate,
 
-      creator_revenue_before_split:
-        row.creatorRevenueBeforeSplit,
+      creator_revenue_before_split: row.creatorRevenueBeforeSplit,
 
       agency_split_rate: row.agencySplitRate,
 
-      agency_revenue_before_tax:
-        row.agencyRevenueBeforeTax,
+      agency_revenue_before_tax: row.agencyRevenueBeforeTax,
 
       agency_revenue: row.agencyRevenue,
 
@@ -342,8 +447,7 @@ export async function importAffiliateOrdersAction(
       delivered_at: row.deliveredAt,
 
       paid_at:
-        row.payoutStatus &&
-        /paid|支払済|支払い済/i.test(row.payoutStatus)
+        row.payoutStatus && /paid|支払済|支払い済/i.test(row.payoutStatus)
           ? row.deliveredAt ?? row.orderedAt
           : null,
 
@@ -351,70 +455,107 @@ export async function importAffiliateOrdersAction(
 
       raw_row_json: row.raw,
 
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
     });
   }
 
-  // ------------------------------------------------------------
-  // 500件ずつupsert
-  // source_row_keyで同じ明細を二重登録しない
-  // ------------------------------------------------------------
-
-  let successCount = 0;
-
-  for (const rowsChunk of chunk(insertRows, 500)) {
-    const { error } = await supabase
-      .from("affiliate_order_lines")
-      .upsert(rowsChunk, {
-        onConflict: "source_row_key",
-      });
-
-    if (error) {
-      for (const row of rowsChunk) {
-        failures.push({
-          rowNumber: 0,
-          error: `${row.order_id}: ${mapSupabaseErrorToJa(error.message)}`,
-        });
-      }
-
-      continue;
-    }
-
-    successCount += rowsChunk.length;
-  }
-
-  const failedCount = failures.length;
-
-  await supabase
-    .from("affiliate_order_import_batches")
-    .update({
-      upserted_count: successCount,
-      failed_count: failedCount,
-    })
-    .eq("id", batchId);
-
-  revalidatePath("/orders");
-  revalidatePath("/creators");
-  revalidatePath("/admin/creator-assignment");
-
-  if (successCount === 0) {
+  if (insertRows.length === 0) {
     return {
       ok: false,
-      error: `取り込みに成功した明細がありません（失敗 ${failedCount} 件）`,
-      failures,
+      error: "このチャンクに取り込める明細がありません",
+      failures: failureList(failures),
     };
   }
 
+  // ---- UPSERT（既存仕様どおり source_row_key で後勝ち）----
+  const { error: upsertError } = await auth.supabase
+    .from("affiliate_order_lines")
+    .upsert(insertRows, { onConflict: "source_row_key" });
+
+  if (upsertError) {
+    return {
+      ok: false,
+      error: mapSupabaseErrorToJa(upsertError.message),
+      failures: failureList(failures),
+    };
+  }
+
+  // ---- import session の進捗を更新 ----
+  const upsertedCount = insertRows.length;
+  const failedCount = failures.length;
+
+  await auth.supabase
+    .from("affiliate_order_import_batches")
+    .update({
+      upserted_count: Number(batch.upserted_count ?? 0) + upsertedCount,
+      failed_count: Number(batch.failed_count ?? 0) + failedCount,
+    })
+    .eq("id", batchId);
+
   return {
     ok: true,
-    message: `${successCount.toLocaleString("ja-JP")}件のPartner Center注文明細を取り込みました`,
-    rowCount: parsed.rows.length,
-    successCount,
+    upsertedCount,
     failedCount,
-    creatorsTouched: resolvedCreators.size,
-    creatorsCreatedOrResolved: resolvedCreators.size,
+    creatorsResolved: resolvedCreators.size,
     sellersLinked,
-    batchId,
-    failures,
+    failures: failureList(failures),
+  };
+}
+
+// =============================================================================
+// 4. 取込セッションの完了
+// =============================================================================
+
+/**
+ * 取込完了を記録する。
+ *
+ * affiliate_order_import_batches には completed_at 列が無いため、
+ * ここでは最終的な件数の確定だけを行う。
+ * 途中で中断した場合は upserted_count が row_total に満たない状態で残り、
+ * 「どこまで入ったか」が履歴から分かる。
+ */
+export async function finishAffiliateOrderImportAction(input: {
+  batchId: string;
+  upsertedCount: number;
+  failedCount: number;
+}): Promise<FinishImportResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const batchId = String(input?.batchId ?? "").trim();
+  if (!batchId) return { ok: false, error: "取込セッションが不明です" };
+
+  const upsertedCount = Number(input?.upsertedCount ?? 0);
+  const failedCount = Number(input?.failedCount ?? 0);
+
+  if (!Number.isInteger(upsertedCount) || upsertedCount < 0) {
+    return { ok: false, error: "取込件数が不正です" };
+  }
+  if (!Number.isInteger(failedCount) || failedCount < 0) {
+    return { ok: false, error: "失敗件数が不正です" };
+  }
+
+  const { error } = await auth.supabase
+    .from("affiliate_order_import_batches")
+    .update({ upserted_count: upsertedCount, failed_count: failedCount })
+    .eq("id", batchId);
+
+  if (error) {
+    return { ok: false, error: mapSupabaseErrorToJa(error.message) };
+  }
+
+  /*
+    報酬の再集計はここでは行わない（既存運用を維持）。
+    全期間の取込が終わってから、管理者が
+    「代理店報酬の再集計」「紹介者報酬の再集計」を実行する。
+  */
+  revalidatePath("/orders");
+  revalidatePath("/creators");
+  revalidatePath("/admin/creator-assignment");
+  revalidatePath("/admin/affiliate-orders-import");
+
+  return {
+    ok: true,
+    message: `${upsertedCount.toLocaleString("ja-JP")}件の注文明細を取り込みました`,
   };
 }

@@ -1,3 +1,5 @@
+import { buildAffiliateOrderSourceRowKey } from "@/lib/orders/affiliate-order-source-key";
+
 export type AffiliateOrderImportRow = {
   rowNumber: number;
   sourceRowKey: string;
@@ -235,16 +237,21 @@ export function parseAffiliateOrderTable(
       readCell(source, headerIndex, "注文配達日時"),
     );
 
-    const sourceRowKey = [
+    /*
+      キー生成は lib/orders/affiliate-order-source-key.ts に集約した。
+      ブラウザ側の解析とサーバー側の再検証で同じ関数を使うため。
+      出力は従来と同一（trim 済み文字列を "|" で連結）。
+    */
+    const sourceRowKey = buildAffiliateOrderSourceRowKey({
       orderId,
-      skuId ?? "",
-      productId ?? "",
+      skuId,
+      productId,
       creatorTiktokId,
-      contentId ?? "",
-      invitationId ?? "",
-      text(readCell(source, headerIndex, "要因のタイプ")),
-      text(readCell(source, headerIndex, "成果報酬のタイプ")),
-    ].join("|");
+      contentId,
+      invitationId,
+      factorType: text(readCell(source, headerIndex, "要因のタイプ")),
+      commissionType: text(readCell(source, headerIndex, "成果報酬のタイプ")),
+    });
 
     const raw: Record<string, unknown> = {};
 

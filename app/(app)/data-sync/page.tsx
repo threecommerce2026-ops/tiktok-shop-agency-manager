@@ -17,9 +17,9 @@ type LinkCard = {
 const IMPORT_LINKS: LinkCard[] = [
   {
     href: "/admin/affiliate-orders-import",
-    title: "アフィリエイト注文 CSV 取込",
+    title: "アフィリエイト注文 Excel 取込",
     description:
-      "CAP エクスポート（affiliate_order_lines）を取り込みます。売上・代理店報酬・紹介者報酬のすべての計算元です。",
+      "CAP エクスポート（affiliate_order_lines）の XLSX を取り込みます。売上・代理店報酬・紹介者報酬のすべての計算元です。",
   },
   {
     href: "/admin/tap-orders-import",
