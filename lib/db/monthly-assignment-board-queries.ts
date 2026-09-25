@@ -158,16 +158,30 @@ export async function fetchMonthlyAssignmentBoard(
     monthlyByKey.set(`${row.creator_id}:${row.target_month}`, row.agency_id);
   }
 
-  // AU=支払い済みの明細だけを クリエイター×月 で集計
+  /*
+    行は CAP 明細がある クリエイター×月 すべてに作る。
+
+    以前は AU=支払い済み の明細がある組だけを行にしていたため、
+    支払い未済・返金済みの明細しか無い組が画面に出ず、
+    所属の確定漏れが起きていた（2026-08 の11名）。
+
+    AP 金額と対象明細数は従来どおり
+    isAgencyPayoutEligibleOrderLine（AU=支払い済み かつ 未返金）
+    を満たす明細だけを集計する。報酬計算の条件は変えない。
+  */
   const revenueByKey = new Map<string, { ap: number; lines: number }>();
   for (const line of linesResult.data) {
     if (!line.creator_id || !line.target_month) continue;
-    if (!isAgencyPayoutEligibleOrderLine(line)) continue;
 
     const key = `${line.creator_id}:${line.target_month}`;
     const current = revenueByKey.get(key) ?? { ap: 0, lines: 0 };
-    current.ap += toAmount(line.agency_revenue);
-    current.lines += 1;
+
+    if (isAgencyPayoutEligibleOrderLine(line)) {
+      current.ap += toAmount(line.agency_revenue);
+      current.lines += 1;
+    }
+
+    // 支払い済み明細が無くても、所属確定の対象として行は作る
     revenueByKey.set(key, current);
   }
 
