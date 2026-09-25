@@ -59,6 +59,8 @@ type RewardItemRow = {
   adjusted_reward_amount: number | string | null;
   is_paid: boolean;
   payout_id: string | null;
+  /** 支払明細（payment_batches）に占有されているか */
+  payment_batch_id: string | null;
   id: string;
 };
 
@@ -115,10 +117,15 @@ export async function syncReferralRewardsForMonth(
         ORDER_LINE_COLUMNS,
         (query) => query.eq("target_month", targetMonth),
       ),
-      fetchAllFrom<Pick<RewardItemRow, "id" | "source_row_key" | "is_paid" | "payout_id">>(
+      fetchAllFrom<
+        Pick<
+          RewardItemRow,
+          "id" | "source_row_key" | "is_paid" | "payout_id" | "payment_batch_id"
+        >
+      >(
         supabase,
         "referral_reward_items",
-        "id, source_row_key, is_paid, payout_id",
+        "id, source_row_key, is_paid, payout_id, payment_batch_id",
         (query) => query.eq("target_month", targetMonth),
       ),
       fetchAllFrom<RewardItemRow>(
@@ -178,12 +185,18 @@ export async function syncReferralRewardsForMonth(
     });
   }
 
-  // --- 支払い済み明細は触らない -----------------------------------------------
+  /*
+    --- 支払い済み / 支払予定中の明細は触らない ---------------------------------
+
+    payment_batch_id が付いている明細は支払明細（draft / approved / processing）
+    に組み入れ済みで、金額が確定している。再集計で書き換えると
+    支払明細のスナップショットと実額がずれ、振込完了の検証で弾かれる。
+  */
   const paidSourceKeys = new Set<string>();
 
   for (const item of existingResult.data) {
     if (!item.source_row_key) continue;
-    if (item.is_paid || item.payout_id != null) {
+    if (item.is_paid || item.payout_id != null || item.payment_batch_id != null) {
       paidSourceKeys.add(item.source_row_key);
     }
   }
@@ -342,8 +355,9 @@ export async function syncReferralRewardsForMonth(
  * 削除しないと、紹介者を外したクリエイターの報酬が旧紹介者に付いたまま残る。
  *
  * ■ 絶対に消さないもの
- *   is_paid = true       … 支払い済み
- *   payout_id が設定済み … 支払レコードに紐付け済み
+ *   is_paid = true              … 支払い済み
+ *   payout_id が設定済み        … 支払レコードに紐付け済み
+ *   payment_batch_id が設定済み … 支払明細に組み入れ済み（支払予定中）
  */
 async function deleteObsoleteReferralItems(
   supabase: SupabaseClient,
@@ -354,6 +368,7 @@ async function deleteObsoleteReferralItems(
     source_row_key: string | null;
     is_paid: boolean;
     payout_id: string | null;
+    payment_batch_id: string | null;
   }>,
 ): Promise<{ deletedCount: number; error: string | null }> {
   const obsoleteIds = existingKeys
@@ -362,6 +377,7 @@ async function deleteObsoleteReferralItems(
         item.source_row_key != null &&
         !item.is_paid &&
         item.payout_id == null &&
+        item.payment_batch_id == null &&
         !validSourceRowKeys.has(item.source_row_key),
     )
     .map((item) => item.id);
@@ -378,6 +394,7 @@ async function deleteObsoleteReferralItems(
       .eq("target_month", targetMonth)
       .eq("is_paid", false)
       .is("payout_id", null)
+      .is("payment_batch_id", null)
       .in("id", chunk)
       .select("id");
 

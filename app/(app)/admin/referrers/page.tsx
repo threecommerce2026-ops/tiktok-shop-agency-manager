@@ -1,5 +1,6 @@
 import { ReferrersAdminClient } from "@/app/(app)/admin/referrers/ReferrersAdminClient";
 import { ReferrerMaintenanceSection } from "@/components/master/ReferrerMaintenanceSection";
+import { PayeeBankSection } from "@/components/payments/PayeeBankSection";
 import { fetchReferrerMaintenanceData } from "@/lib/db/referrer-maintenance-queries";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import {
@@ -64,7 +65,7 @@ export default async function ReferrersAdminPage({
         <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">親管理画面</p>
         <h1 className="mt-2 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">紹介者管理</h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-500">
-          紹介者マスタ（連絡先・振込先・紹介リンク）の管理画面です。報酬の集計と支払い確定は「売上・報酬 › 紹介者報酬」で行います。
+          紹介者マスタ（連絡先・振込先・紹介リンク）の管理画面です。報酬の集計は「売上・報酬 › 紹介者報酬」、実際の支払いは「支払管理」で行います。
         </p>
         <p className="mt-2 text-xs text-zinc-600">
           対象月: <span className="font-mono text-zinc-400">{month}</span>
@@ -85,6 +86,9 @@ export default async function ReferrersAdminPage({
       ) : (
         <ReferrerMaintenanceSection data={maintenanceData} />
       )}
+
+      {/* 支払管理で使う振込先。登録しないと支払明細を作成できない */}
+      <PayeeBankSection payeeKind="referrer" />
 
       <ReferrersAdminClient
         referrers={referrersResult.data}

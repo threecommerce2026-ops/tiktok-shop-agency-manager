@@ -4,9 +4,7 @@ import { useActionState, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { PayoutConfirmButton } from "@/components/revenue/PayoutConfirmButton";
 import {
-  payReferralAnnualAction,
   previewReferralRewardsAction,
   syncReferralRewardsAction,
   unpayReferralAnnualAction,
@@ -72,10 +70,6 @@ export function ReferralRewardTabClient({
     syncReferralRewardsAction,
     null,
   );
-  const [payState, payAction, payPending] = useActionState(
-    payReferralAnnualAction,
-    null,
-  );
   const [unpayState, unpayAction, unpayPending] = useActionState(
     unpayReferralAnnualAction,
     null,
@@ -132,7 +126,6 @@ export function ReferralRewardTabClient({
       </div>
 
       <ResultBanner state={syncState} />
-      <ResultBanner state={payState} />
       <ResultBanner state={unpayState} />
 
       {summary.error ? (
@@ -269,27 +262,18 @@ export function ReferralRewardTabClient({
                   </td>
                   <td className={td}>
                     <div className="flex gap-2">
+                      {/*
+                        支払確定はこの画面から行わない。
+                        実際の銀行振込の前後を分けるため、支払明細の作成 →
+                        承認 → 振込CSV → 振込完了登録 は支払管理へ一本化する。
+                      */}
                       {row.isPayable ? (
-                        <form action={payAction}>
-                          <PayoutConfirmButton
-                            targetName={row.referrerName}
-                            amountLabel={formatYenPrecise(row.payableAmount)}
-                            itemCount={row.itemCount}
-                            creatorCount={row.creatorCount}
-                            creatorNoun="クリエイター"
-                            pending={payPending}
-                            hiddenFields={
-                              <>
-                                <input type="hidden" name="referrer_id" value={row.referrerId} />
-                                <input
-                                  type="hidden"
-                                  name="target_month"
-                                  value={row.latestUnpaidMonth ?? defaultMonth}
-                                />
-                              </>
-                            }
-                          />
-                        </form>
+                        <Link
+                          href="/payments?payee=referrer"
+                          className="rounded border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/10 px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent-cyan)] transition hover:bg-[var(--accent-cyan)]/20"
+                        >
+                          支払管理へ
+                        </Link>
                       ) : null}
 
                       {row.payoutStatus === "paid" && row.payoutId ? (

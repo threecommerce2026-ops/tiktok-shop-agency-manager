@@ -1,5 +1,6 @@
 import { AgenciesAdminClient } from "@/app/(app)/admin/agencies/AgenciesAdminClient";
 import { AgencyMaintenanceSection } from "@/components/master/AgencyMaintenanceSection";
+import { PayeeBankSection } from "@/components/payments/PayeeBankSection";
 import { fetchAgencyMaintenanceData } from "@/lib/db/agency-maintenance-queries";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import {
@@ -78,6 +79,9 @@ export default async function AgenciesAdminPage({
       ) : (
         <AgencyMaintenanceSection data={maintenanceData} />
       )}
+
+      {/* 支払管理で使う振込先。登録しないと支払明細を作成できない */}
+      <PayeeBankSection payeeKind="agency" />
 
       <AgenciesAdminClient
         agencies={agenciesResult.data}

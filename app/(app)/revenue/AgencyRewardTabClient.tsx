@@ -4,9 +4,7 @@ import { Fragment, useActionState, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { PayoutConfirmButton } from "@/components/revenue/PayoutConfirmButton";
 import {
-  payAgencyAnnualAction,
   syncAgencyRewardsAction,
   unpayAgencyAnnualAction,
   type AgencyActionResult,
@@ -239,12 +237,10 @@ export function AgencyRewardTabClient({
   summary,
   isAdmin,
   selectedAgencyId,
-  defaultMonth,
 }: {
   summary: AgencyAnnualSummary;
   isAdmin: boolean;
   selectedAgencyId: string | null;
-  defaultMonth: string;
 }) {
   const router = useRouter();
   const [openAgencyId, setOpenAgencyId] = useState<string | null>(selectedAgencyId);
@@ -255,7 +251,6 @@ export function AgencyRewardTabClient({
     syncAgencyRewardsAction,
     null,
   );
-  const [payState, payAction, payPending] = useActionState(payAgencyAnnualAction, null);
   const [unpayState, unpayAction, unpayPending] = useActionState(
     unpayAgencyAnnualAction,
     null,
@@ -329,7 +324,6 @@ export function AgencyRewardTabClient({
       </div>
 
       <ResultBanner state={syncState} />
-      <ResultBanner state={payState} />
       <ResultBanner state={unpayState} />
 
       {summary.error ? (
@@ -562,27 +556,18 @@ export function AgencyRewardTabClient({
                       {isAdmin ? (
                         <td className={td}>
                           <div className="flex gap-2">
+                            {/*
+                              支払確定はこの画面から行わない。
+                              実際の銀行振込の前後を分けるため、支払明細の作成 →
+                              承認 → 振込CSV → 振込完了登録 は支払管理へ一本化する。
+                            */}
                             {row.isPayable && !row.hasUnconfirmedAssignment ? (
-                              <form action={payAction}>
-                                <PayoutConfirmButton
-                                  targetName={row.agencyName}
-                                  amountLabel={formatYenPrecise(row.payableAmount)}
-                                  itemCount={row.itemCount}
-                                  creatorCount={row.creatorCount}
-                                  creatorNoun="クリエイター"
-                                  pending={payPending}
-                                  hiddenFields={
-                                    <>
-                                      <input type="hidden" name="agency_id" value={row.agencyId} />
-                                      <input
-                                        type="hidden"
-                                        name="target_month"
-                                        value={row.latestUnpaidMonth ?? defaultMonth}
-                                      />
-                                    </>
-                                  }
-                                />
-                              </form>
+                              <Link
+                                href="/payments?payee=agency"
+                                className="rounded border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/10 px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent-cyan)] transition hover:bg-[var(--accent-cyan)]/20"
+                              >
+                                支払管理へ
+                              </Link>
                             ) : null}
 
                             {row.isPayable && row.hasUnconfirmedAssignment ? (

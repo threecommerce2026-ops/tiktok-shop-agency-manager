@@ -1,6 +1,5 @@
 import { AgencyRewardTabClient } from "@/app/(app)/revenue/AgencyRewardTabClient";
 import { fetchAgencyAnnualSummary } from "@/lib/db/agency-annual-queries";
-import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 
 /*
@@ -30,15 +29,15 @@ export async function AgencyRewardTab({
     agencyId: isAdmin ? null : agencyId,
   });
 
-  const currentMonth = currentMonthKey();
-  const defaultMonth = currentMonth.startsWith(year) ? currentMonth : `${year}-12`;
-
+  /*
+    支払確定はこのタブから行わない（支払管理 /payments へ一本化した）。
+    対象月の既定値を渡す必要がなくなったので props からも外している。
+  */
   return (
     <AgencyRewardTabClient
       summary={summary}
       isAdmin={isAdmin}
       selectedAgencyId={selectedAgencyId}
-      defaultMonth={defaultMonth}
     />
   );
 }

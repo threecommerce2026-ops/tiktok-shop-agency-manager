@@ -73,6 +73,14 @@ export const APP_NAV: readonly NavItem[] = [
     ],
   },
   {
+    href: "/payments",
+    label: "支払管理",
+    short: "PM",
+    description: "代理店・紹介者への支払明細と振込管理 / セラー請求の確認",
+    adminOnly: true,
+    aliases: ["/admin/agency-payouts", "/admin/seller-billing"],
+  },
+  {
     href: "/admin/agencies",
     label: "代理店管理",
     short: "AG",
