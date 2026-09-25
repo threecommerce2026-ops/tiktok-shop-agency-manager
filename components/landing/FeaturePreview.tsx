@@ -24,11 +24,11 @@ const features: FeatureItem[] = [
     href: "/login?next=/creators",
   },
   {
-    title: "売上 CSV",
-    desc: "対象月・ID・金額・注文数をアップロード（次段で Supabase 反映）。",
+    title: "データ連携",
+    desc: "アフィリエイト注文・TAP・Partner Center・ショップ実績の取込を集約。",
     tag: "Import",
     span: "",
-    href: "/login?next=/sales-upload",
+    href: "/login?next=/data-sync",
   },
   {
     title: "売上・収益一覧",

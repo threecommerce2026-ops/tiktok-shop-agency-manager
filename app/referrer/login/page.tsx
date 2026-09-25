@@ -1,4 +1,5 @@
 import { ReferrerPublicLayout } from "@/components/referrer/ReferrerPublicLayout";
+import { fetchReferrerProfileByUser } from "@/lib/db/referrer-access";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { Suspense } from "react";
@@ -18,8 +19,20 @@ export default async function ReferrerLoginPage({
   const params = await searchParams;
 
   if (user) {
-    const nextPath = params.next?.trim();
-    redirect(nextPath && nextPath.startsWith("/") ? nextPath : "/referrer/dashboard");
+    const profileResult = await fetchReferrerProfileByUser(supabase, user);
+
+    // 現在のログインユーザーが紹介者本人の場合のみ
+    // 紹介者ダッシュボードへ自動遷移する。
+    // 管理者など別種別のユーザーでログイン中の場合は、
+    // 紹介者ログインフォームを表示してログインし直せるようにする。
+    if (profileResult.data) {
+      const nextPath = params.next?.trim();
+      redirect(
+        nextPath && nextPath.startsWith("/")
+          ? nextPath
+          : "/referrer/dashboard",
+      );
+    }
   }
 
   return (

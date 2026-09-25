@@ -1,6 +1,5 @@
 "use server";
 
-import { insertCreatorAssignmentLog } from "@/lib/db/creator-assignment-log-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
@@ -94,41 +93,20 @@ export async function updateCreatorAssignmentAction(
     return { ok: true, message: "変更はありません" };
   }
 
-  const updatePayload: Record<string, unknown> = {
-    agency_id: agencyId,
-    commission_rate: commissionRate,
-    registration_status: registrationStatus,
-    updated_at: new Date().toISOString(),
-  };
-  if (tiktokChanged) {
-    updatePayload.tiktok_id = tiktokNew;
-  }
+  const nextTiktokId = tiktokChanged ? tiktokNew : fromTiktok;
 
-  const { error } = await supabase.from("creators").update(updatePayload).eq("id", creatorId);
+  const { error } = await supabase.rpc("update_creator_assignment", {
+    p_creator_id: creatorId,
+    p_agency_id: agencyId,
+    p_commission_rate: commissionRate,
+    p_registration_status: registrationStatus,
+    p_tiktok_id: nextTiktokId,
+    p_changed_by: user.id,
+    p_changed_by_email: user.email ?? null,
+  });
 
   if (error) {
     return { ok: false, error: mapSupabaseErrorToJa(error.message) };
-  }
-
-  if (fromAgencyId !== agencyId || !commissionRatesEqual(fromCommissionRate, commissionRate)) {
-    const logResult = await insertCreatorAssignmentLog(supabase, {
-      creatorId,
-      fromAgencyId,
-      toAgencyId: agencyId,
-      fromCommissionRate,
-      toCommissionRate: commissionRate,
-      changedBy: user.id,
-      changedByEmail: user.email ?? null,
-    });
-
-    if (logResult.error) {
-      return {
-        ok: false,
-        error: mapSupabaseErrorToJa(
-          logResult.error ?? "振り分け履歴の保存に失敗しました",
-        ),
-      };
-    }
   }
 
   revalidatePath("/admin/creator-assignment");

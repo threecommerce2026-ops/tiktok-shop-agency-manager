@@ -13,7 +13,20 @@ export type CreatorAssignmentRow = {
   agency_id: string | null;
   agency_name: string | null;
   commission_rate: number;
-  created_at: string;
+  
+  /** TikTok実データ上のエージェンシー側分配率 */
+  tiktok_agency_split_rate: number | null;
+
+  /** TikTok実データ上のクリエイター側分配率 */
+  tiktok_creator_split_rate: number | null;
+
+  /** 月別の手動補正。クリエイター側の分配率 */
+  manual_creator_split_rate: number | null;
+
+  /** 対象月に手動補正が設定されているか */
+  has_manual_split_override: boolean;
+
+created_at: string;
   registration_status: string | null;
   official_line_registered: boolean | null;
   referrer_name: string | null;
@@ -70,6 +83,106 @@ async function attachReferrerInfo(
   });
 }
 
+
+async function attachTikTokSplitRates(
+  supabase: SupabaseClient,
+  rows: CreatorAssignmentRow[],
+  targetMonth: string,
+): Promise<CreatorAssignmentRow[]> {
+  const ids = rows.map((row) => row.id);
+  if (ids.length === 0) return rows;
+
+  const { data, error } = await supabase.rpc(
+    "get_creator_latest_split_rates",
+    {
+      p_creator_ids: ids,
+      p_target_month: targetMonth,
+    },
+  );
+
+  if (error) {
+    console.error("Failed to load TikTok split rates:", error.message);
+    return rows;
+  }
+
+  const latestByCreator = new Map<string, number>();
+
+  for (const item of data ?? []) {
+    const creatorId = item.creator_id as string | null;
+    const agencyRate = Number(item.agency_split_rate);
+
+    if (!creatorId || !Number.isFinite(agencyRate)) continue;
+
+    latestByCreator.set(
+      creatorId,
+      Math.max(0, Math.min(100, agencyRate)),
+    );
+  }
+
+  return rows.map((row) => {
+    const agencyRate = latestByCreator.get(row.id);
+
+    if (agencyRate === undefined) {
+      return {
+        ...row,
+        tiktok_agency_split_rate: null,
+        tiktok_creator_split_rate: null,
+      };
+    }
+
+    return {
+      ...row,
+      tiktok_agency_split_rate: agencyRate,
+      tiktok_creator_split_rate: 100 - agencyRate,
+    };
+  });
+}
+
+async function attachMonthlyCommissionRates(
+  supabase: SupabaseClient,
+  rows: CreatorAssignmentRow[],
+  targetMonth: string,
+): Promise<CreatorAssignmentRow[]> {
+  const ids = rows.map((row) => row.id);
+  if (ids.length === 0) return rows;
+
+  const { data, error } = await supabase
+    .from("creator_monthly_commission_rates")
+    .select("creator_id, commission_rate")
+    .in("creator_id", ids)
+    .eq("target_month", targetMonth);
+
+  if (error) {
+    console.error("Failed to load monthly commission rates:", error.message);
+    return rows;
+  }
+
+  const byCreator = new Map<string, number>();
+
+  for (const item of data ?? []) {
+    const creatorId = item.creator_id as string | null;
+    const rate = Number(item.commission_rate);
+
+    if (!creatorId || !Number.isFinite(rate)) continue;
+
+    byCreator.set(
+      creatorId,
+      Math.max(0, Math.min(100, rate)),
+    );
+  }
+
+  return rows.map((row) => {
+    const manualRate = byCreator.get(row.id);
+
+    return {
+      ...row,
+      manual_creator_split_rate:
+        manualRate === undefined ? null : manualRate,
+      has_manual_split_override: manualRate !== undefined,
+    };
+  });
+}
+
 export async function fetchAgencyOptions(
   supabase: SupabaseClient,
 ): Promise<{ data: AgencyOption[]; error: string | null }> {
@@ -94,6 +207,7 @@ export async function fetchAgencyOptions(
 
 export async function fetchCreatorsForAssignment(
   supabase: SupabaseClient,
+  targetMonth: string,
 ): Promise<{ data: CreatorAssignmentRow[]; error: string | null }> {
   const { data, error } = await supabase
     .from("creators")
@@ -113,6 +227,10 @@ export async function fetchCreatorsForAssignment(
     agency_id: (row.agency_id as string | null) ?? null,
     agency_name: unwrapAgency(row.agencies)?.name ?? null,
     commission_rate: Number(row.commission_rate),
+    tiktok_agency_split_rate: null,
+    tiktok_creator_split_rate: null,
+    manual_creator_split_rate: null,
+    has_manual_split_override: false,
     created_at: row.created_at as string,
     registration_status: (row.registration_status as string | null) ?? null,
     official_line_registered: (row.official_line_registered as boolean | null) ?? null,
@@ -120,11 +238,25 @@ export async function fetchCreatorsForAssignment(
     sales_total: 0,
   }));
 
-  return { data: await attachReferrerInfo(supabase, base), error: null };
+  const withReferrers = await attachReferrerInfo(supabase, base);
+  const withSplitRates = await attachTikTokSplitRates(
+    supabase,
+    withReferrers,
+    targetMonth,
+  );
+
+  const withMonthlyRates = await attachMonthlyCommissionRates(
+    supabase,
+    withSplitRates,
+    targetMonth,
+  );
+
+  return { data: withMonthlyRates, error: null };
 }
 
 export async function fetchUnassignedCreators(
   supabase: SupabaseClient,
+  targetMonth: string,
 ): Promise<{ data: CreatorAssignmentRow[]; error: string | null }> {
   const { data, error } = await supabase
     .from("creators")
@@ -145,6 +277,10 @@ export async function fetchUnassignedCreators(
     agency_id: null as string | null,
     agency_name: null as string | null,
     commission_rate: Number(row.commission_rate),
+    tiktok_agency_split_rate: null,
+    tiktok_creator_split_rate: null,
+    manual_creator_split_rate: null,
+    has_manual_split_override: false,
     created_at: row.created_at as string,
     registration_status: (row.registration_status as string | null) ?? null,
     official_line_registered: (row.official_line_registered as boolean | null) ?? null,
@@ -152,11 +288,25 @@ export async function fetchUnassignedCreators(
     sales_total: 0,
   }));
 
-  return { data: await attachReferrerInfo(supabase, base), error: null };
+  const withReferrers = await attachReferrerInfo(supabase, base);
+  const withSplitRates = await attachTikTokSplitRates(
+    supabase,
+    withReferrers,
+    targetMonth,
+  );
+
+  const withMonthlyRates = await attachMonthlyCommissionRates(
+    supabase,
+    withSplitRates,
+    targetMonth,
+  );
+
+  return { data: withMonthlyRates, error: null };
 }
 
 export async function fetchNewRegistrationCreators(
   supabase: SupabaseClient,
+  targetMonth: string,
   limit = 80,
 ): Promise<{ data: CreatorAssignmentRow[]; error: string | null }> {
   const { data, error } = await supabase
@@ -179,6 +329,10 @@ export async function fetchNewRegistrationCreators(
     agency_id: (row.agency_id as string | null) ?? null,
     agency_name: unwrapAgency(row.agencies)?.name ?? null,
     commission_rate: Number(row.commission_rate),
+    tiktok_agency_split_rate: null,
+    tiktok_creator_split_rate: null,
+    manual_creator_split_rate: null,
+    has_manual_split_override: false,
     created_at: row.created_at as string,
     registration_status: (row.registration_status as string | null) ?? null,
     official_line_registered: (row.official_line_registered as boolean | null) ?? null,
@@ -186,5 +340,18 @@ export async function fetchNewRegistrationCreators(
     sales_total: 0,
   }));
 
-  return { data: await attachReferrerInfo(supabase, base), error: null };
+  const withReferrers = await attachReferrerInfo(supabase, base);
+  const withSplitRates = await attachTikTokSplitRates(
+    supabase,
+    withReferrers,
+    targetMonth,
+  );
+
+  const withMonthlyRates = await attachMonthlyCommissionRates(
+    supabase,
+    withSplitRates,
+    targetMonth,
+  );
+
+  return { data: withMonthlyRates, error: null };
 }

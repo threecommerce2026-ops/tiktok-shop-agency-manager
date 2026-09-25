@@ -38,23 +38,53 @@ export type ShopPerformanceBillingStatus =
 
 export type ShopPerformanceBillingView = ShopPerformanceImportRow & {
   billing_status: ShopPerformanceBillingStatus;
+  billing_gmv_amount: number;
   seller_fee: number | null;
   billing_status_label: string;
 };
 
 export function computeSellerFee(
   gmvAmount: number,
+  refundAmount: number | null | undefined,
   tspRate: number | null | undefined,
   sellerId: string | null | undefined,
-): { status: ShopPerformanceBillingStatus; fee: number | null; label: string } {
+): {
+  status: ShopPerformanceBillingStatus;
+  billingGmv: number;
+  fee: number | null;
+  label: string;
+} {
+  const billingGmv = Math.max(
+    0,
+    Number(gmvAmount) - Number(refundAmount ?? 0),
+  );
+
   if (!sellerId) {
-    return { status: "unlinked", fee: null, label: "未紐付け" };
+    return {
+      status: "unlinked",
+      billingGmv,
+      fee: null,
+      label: "未紐付け",
+    };
   }
+
   if (tspRate == null || Number.isNaN(Number(tspRate))) {
-    return { status: "rate_missing", fee: null, label: "料率未設定" };
+    return {
+      status: "rate_missing",
+      billingGmv,
+      fee: null,
+      label: "料率未設定",
+    };
   }
-  const fee = Math.round((Number(gmvAmount) * Number(tspRate)) / 100);
-  return { status: "ok", fee, label: "計算済" };
+
+  const fee = Math.round((billingGmv * Number(tspRate)) / 100);
+
+  return {
+    status: "ok",
+    billingGmv,
+    fee,
+    label: "計算済",
+  };
 }
 
 export async function fetchShopPerformanceImportsForAdmin(
@@ -118,7 +148,15 @@ export async function fetchShopPerformanceImportsForAdmin(
     const tsp_rate =
       sellerRel?.tsp_rate == null ? null : Number(sellerRel.tsp_rate);
     const gmv_amount = Number(row.gmv_amount ?? 0);
-    const billing = computeSellerFee(gmv_amount, tsp_rate, seller_id);
+    const refund_amount =
+      row.refund_amount == null ? 0 : Number(row.refund_amount);
+
+    const billing = computeSellerFee(
+      gmv_amount,
+      refund_amount,
+      tsp_rate,
+      seller_id,
+    );
 
     return {
       id: row.id as string,
@@ -161,6 +199,7 @@ export async function fetchShopPerformanceImportsForAdmin(
       tsp_rate,
       sellers_shop_id: sellerRel?.shop_id ?? null,
       billing_status: billing.status,
+      billing_gmv_amount: billing.billingGmv,
       seller_fee: billing.fee,
       billing_status_label: billing.label,
     };

@@ -1,8 +1,5 @@
 import { OrdersListClient } from "@/app/(app)/orders/OrdersListClient";
-import {
-  fetchCreatorPaidOrderSummaries,
-  fetchOrders,
-} from "@/lib/db/orders-queries";
+import { fetchOrders } from "@/lib/db/orders-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
 import Link from "next/link";
@@ -32,12 +29,9 @@ export default async function OrdersPage() {
   const isAdmin = isAdminRole(appUser.data.role);
   const agencyId = isAdmin ? null : appUser.data.agencyId;
 
-  const [ordersResult, summariesResult] = await Promise.all([
-    fetchOrders(supabase, { agencyId }),
-    fetchCreatorPaidOrderSummaries(supabase, { agencyId }),
-  ]);
+  const ordersResult = await fetchOrders(supabase, { agencyId });
 
-  const loadError = ordersResult.error ?? summariesResult.error;
+  const loadError = ordersResult.error;
 
   return (
     <div className="space-y-6">
@@ -49,15 +43,14 @@ export default async function OrdersPage() {
           注文一覧
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          TikTok Shop Order API の注文を表示します。代理店報酬は決済済みかつ
-          キャンセル・返品・配送中を除外した注文のみを対象に計算します。
+          TikTok Shop Order API の注文データを表示します。注文状況・決済状況などの確認にご利用ください。
+          正式な代理店支払額は「代理店報酬」で確認できます。
         </p>
       </div>
 
       <OrdersListClient
         isAdmin={isAdmin}
         orders={ordersResult.data}
-        summaries={summariesResult.data}
         loadError={loadError}
       />
 

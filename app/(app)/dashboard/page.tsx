@@ -8,7 +8,8 @@ import {
 } from "@/lib/db/dashboard-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
-import { formatYen } from "@/lib/revenue/calc";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { formatYen, formatYenPrecise } from "@/lib/revenue/calc";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -50,7 +51,7 @@ export default async function DashboardPage() {
   const isAdmin = isAdminRole(appUser.data.role);
 
   if (isAdmin) {
-    const stats = await fetchAdminDashboardData(supabase);
+    const stats = await fetchAdminDashboardData(supabase, getSupabaseAdmin());
 
     return (
       <div className="space-y-8">
@@ -63,7 +64,7 @@ export default async function DashboardPage() {
               全体ダッシュボード
             </h1>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-zinc-500">
-              全代理店の売上・収益・報酬を横断集計します。詳細な代理店ランキングは専用ページで確認できます。
+              全代理店のCAP GMV・CAP代理店収益・代理店支払予定額をFinance Engineで横断集計します。
             </p>
             <p className="mt-1 text-xs text-zinc-600">
               ログイン:{" "}
@@ -88,15 +89,25 @@ export default async function DashboardPage() {
             全体指標
           </h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <Kpi label="全体総売上（今月）" value={formatYen(stats.totalSales)} />
-            <Kpi label="全体総収益（今月）" value={formatYen(stats.totalProfit)} />
+            <Kpi label="今月GMV" value={formatYen(stats.totalSales)} hint={`対象月: ${stats.month}`} />
+            <Kpi label="今月の代理店収益" value={formatYen(stats.totalProfit)} />
             <Kpi
-              label="全体代理店報酬（今月）"
+              label="代理店支払予定額（今月）"
               value={formatYen(stats.totalReward)}
-              hint={`対象月: ${stats.month}`}
             />
-            <Kpi label="全代理店数" value={`${stats.agencyCount}`} />
-            <Kpi label="全クリエイター数" value={`${stats.creatorCount}`} />
+            <Kpi
+              label="今月紹介報酬 発生額"
+              value={formatYenPrecise(stats.referralRewardMonth)}
+              hint="通常クリエイターのみ（自社運用・貸出は対象外）"
+            />
+            <Kpi
+              label="紹介報酬 未払残高"
+              value={formatYenPrecise(stats.referralUnpaidBalance)}
+              hint="年間累積1,000円以上で支払対象"
+            />
+            <Kpi label="クリエイター数" value={`${stats.creatorCount}`} />
+            <Kpi label="セラー数" value={`${stats.sellerCount}`} />
+            <Kpi label="代理店数" value={`${stats.agencyCount}`} />
           </div>
         </section>
 
@@ -129,13 +140,19 @@ export default async function DashboardPage() {
             href="/creators"
             className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
           >
-            クリエイター売上一覧
+            クリエイター
           </Link>
           <Link
-            href="/csv-logs"
+            href="/revenue?tab=referral"
             className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
           >
-            CSV 履歴
+            紹介者報酬
+          </Link>
+          <Link
+            href="/data-sync"
+            className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
+          >
+            データ連携
           </Link>
         </div>
       </div>
@@ -146,6 +163,7 @@ export default async function DashboardPage() {
     appUser.data.agencyId != null
       ? await fetchDashboardData(
           supabase,
+          getSupabaseAdmin(),
           appUser.data.agencyId,
           appUser.data.agencyName ?? "—",
         )
@@ -172,7 +190,7 @@ export default async function DashboardPage() {
             代理店ダッシュボード
           </h1>
           <p className="mt-2 max-w-xl text-sm leading-relaxed text-zinc-500">
-            自社の紹介クリエイターと売上データのみを表示します。
+            月別の確定所属とCAP実績をもとに、自社のFinance Engine集計のみを表示します。
           </p>
           <p className="mt-1 text-xs text-zinc-600">
             ログイン:{" "}
@@ -198,21 +216,21 @@ export default async function DashboardPage() {
         </h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <Kpi
-            label="紹介クリエイター数"
+            label="所属クリエイター数"
             value={`${stats.creatorCount}`}
-            hint="登録済みの紹介クリエイター"
+            hint="登録済みの所属クリエイター"
           />
-          <Kpi label="今月売上" value={formatYen(stats.totalSales)} />
-          <Kpi label="今月収益" value={formatYen(stats.totalProfit)} />
+          <Kpi label="CAP GMV（今月）" value={formatYen(stats.totalSales)} />
+          <Kpi label="CAP代理店収益（今月）" value={formatYen(stats.totalProfit)} />
           <Kpi
-            label="代理店報酬"
+            label="代理店支払予定額"
             value={formatYen(stats.totalReward)}
             hint={`対象月: ${stats.month}`}
           />
           <Kpi
             label="稼働クリエイター数"
             value={`${stats.activeCreatorCount}`}
-            hint="今月に売上または収益がある人数"
+            hint="当月にCAP/TAP実績がある月次所属確定済みクリエイター"
           />
         </div>
       </section>
@@ -229,19 +247,19 @@ export default async function DashboardPage() {
           href="/creators"
           className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
         >
-          クリエイター売上一覧
+          クリエイター
         </Link>
         <Link
-          href="/sales"
+          href="/revenue"
           className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
         >
-          売上・収益
+          売上・報酬
         </Link>
         <Link
-          href="/rewards"
+          href="/sellers"
           className="inline-flex min-h-[48px] items-center justify-center rounded-full border border-white/[0.1] px-5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
         >
-          代理店報酬
+          セラー
         </Link>
       </div>
     </div>

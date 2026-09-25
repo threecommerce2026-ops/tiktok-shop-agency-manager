@@ -37,9 +37,9 @@ export default async function CreatorAssignmentPage() {
 
   const [agenciesResult, creatorsResult, unassignedResult, pendingResult] = await Promise.all([
     fetchAgencyOptions(supabase),
-    fetchCreatorsForAssignment(supabase),
-    fetchUnassignedCreators(supabase),
-    fetchNewRegistrationCreators(supabase),
+    fetchCreatorsForAssignment(supabase, month),
+    fetchUnassignedCreators(supabase, month),
+    fetchNewRegistrationCreators(supabase, month),
   ]);
 
   const loadError =
@@ -116,6 +116,7 @@ export default async function CreatorAssignmentPage() {
         creators={creatorsResult.data}
         unassignedCreators={sortedUnassigned}
         pendingCreators={pendingResult.data}
+        targetMonth={month}
       />
 
       <div className="flex justify-center">

@@ -37,12 +37,16 @@ export async function saveReferrerAction(
   const memo = readOptionalText(formData, "memo");
   const isActive = readBoolean(formData, "is_active");
 
-  if (!referrerName) {
+  if (!referrerId && !referrerName) {
     return { ok: false, error: "紹介者名は必須です" };
   }
 
+  /*
+    紹介者名の変更はここでは行わない。
+    既存紹介者の名称変更は app/actions/master-name-edit.ts の renameReferrerAction に
+    一本化している（name / referrer_name を同時更新し、履歴も残す）。
+  */
   const payload = {
-    referrer_name: referrerName,
     email,
     phone,
     memo,
@@ -75,5 +79,10 @@ export async function saveReferrerAction(
 
   revalidatePath("/admin/referrers");
   revalidatePath("/admin/creator-referrals");
-  return { ok: true, message: referrerId ? "紹介者を更新しました" : "紹介者を追加しました" };
+  return {
+    ok: true,
+    message: referrerId
+      ? "紹介者情報を更新しました（紹介者名は「名称編集」から変更してください）"
+      : "紹介者を追加しました",
+  };
 }

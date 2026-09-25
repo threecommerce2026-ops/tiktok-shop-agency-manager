@@ -1,59 +1,60 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { agencyRewardFromRevenue } from "@/lib/revenue/calc";
-import { currentMonthKey } from "@/lib/db/dashboard-queries";
 
-export type CreatorMonthlyPoint = {
-  month: string;
-  sales: number;
-  profit: number;
-};
+import {
+  fetchCreatorFinanceHistory,
+  type CreatorMonthlyFinanceRow,
+} from "@/lib/db/creator-monthly-finance-queries";
 
-export type CreatorImportHistoryRow = {
-  id: string;
-  created_at: string;
-  target_month: string;
-  sales_amount: number;
-  profit_amount: number;
-  order_count: number;
+/*
+  クリエイター詳細。
+
+  月別実績は lib/db/creator-monthly-finance-queries.ts の計算層
+  （computeCreatorFinanceRows）をそのまま使う。
+  ここで独自の集計式は持たない。
+
+  旧実装は sales_imports（月×クリエイターの集計済みCSV）を読んでいたが、
+  現在のデータモデルは affiliate_order_lines / tap_affiliate_order_lines の
+  明細を都度集計する方式なので、Finance Engine に寄せている。
+*/
+
+export type CreatorMonthlyFinancePoint = {
+  targetMonth: string;
+  row: CreatorMonthlyFinanceRow;
 };
 
 export type CreatorDetail = {
   id: string;
   creator_name: string;
   tiktok_id: string;
-  agency_id: string;
-  agency_name: string;
+  agency_id: string | null;
+  agency_name: string | null;
+  account_management_type: string | null;
   commission_rate: number;
-  salesMonth: number;
-  salesTotal: number;
-  profitMonth: number;
-  profitTotal: number;
-  rewardMonth: number;
-  rewardTotal: number;
-  monthlySalesTrend: CreatorMonthlyPoint[];
-  monthlyProfitTrend: CreatorMonthlyPoint[];
-  importHistory: CreatorImportHistoryRow[];
-  lastUpdatedAt: string | null;
+  /** 月別実績（新しい月が先頭） */
+  months: CreatorMonthlyFinancePoint[];
+  /** 全期間の合計 */
+  totals: {
+    capGmv: number;
+    capRevenue: number;
+    tapRevenue: number;
+    creatorPayout: number;
+    referralReward: number;
+    agencyPayout: number;
+  };
+  /** 直近月（months の先頭）。実績が無ければ null */
+  latest: CreatorMonthlyFinancePoint | null;
+  /** 最新の紹介者名（月別実績から解決できた場合） */
+  referrer_name: string | null;
 };
 
 export async function fetchCreatorDetail(
   supabase: SupabaseClient,
   creatorId: string,
 ): Promise<{ data: CreatorDetail | null; error: string | null }> {
-  const month = currentMonthKey();
-
   const { data: creator, error: creatorError } = await supabase
     .from("creators")
     .select(
-      `
-      id,
-      creator_name,
-      tiktok_id,
-      agency_id,
-      commission_rate,
-      created_at,
-      agencies ( name )
-    `,
+      "id, creator_name, tiktok_id, agency_id, commission_rate, account_management_type, agencies ( name )",
     )
     .eq("id", creatorId)
     .maybeSingle();
@@ -68,83 +69,48 @@ export async function fetchCreatorDetail(
   const agencies = creator.agencies as { name: string } | { name: string }[] | null;
   const agency = Array.isArray(agencies) ? agencies[0] : agencies;
 
-  const { data: imports, error: importsError } = await supabase
-    .from("sales_imports")
-    .select("id, created_at, target_month, sales_amount, profit_amount, order_count")
-    .eq("creator_id", creatorId)
-    .order("target_month", { ascending: false });
-
-  if (importsError) {
-    return { data: null, error: importsError.message };
+  const history = await fetchCreatorFinanceHistory(supabase, creatorId);
+  if (history.error) {
+    return { data: null, error: history.error };
   }
 
-  const byMonth = new Map<string, { sales: number; profit: number }>();
-  let salesMonth = 0;
-  let salesTotal = 0;
-  let profitMonth = 0;
-  let profitTotal = 0;
-  let lastUpdatedAt: string | null = null;
+  const totals = history.months.reduce(
+    (acc, entry) => {
+      acc.capGmv += entry.row.capGmv;
+      acc.capRevenue += entry.row.capRevenue;
+      acc.tapRevenue += entry.row.tapRevenue;
+      acc.creatorPayout += entry.row.creatorPayout;
+      acc.referralReward += entry.row.referralReward;
+      acc.agencyPayout += entry.row.agencyPayout;
+      return acc;
+    },
+    {
+      capGmv: 0,
+      capRevenue: 0,
+      tapRevenue: 0,
+      creatorPayout: 0,
+      referralReward: 0,
+      agencyPayout: 0,
+    },
+  );
 
-  const importHistory: CreatorImportHistoryRow[] = (imports ?? []).map((row) => {
-    const sales = Number(row.sales_amount);
-    const profit = Number(row.profit_amount);
-    const targetMonth = row.target_month as string;
-    const createdAt = row.created_at as string;
-    if (!lastUpdatedAt || createdAt > lastUpdatedAt) lastUpdatedAt = createdAt;
-
-    salesTotal += sales;
-    profitTotal += profit;
-    if (targetMonth === month) {
-      salesMonth += sales;
-      profitMonth += profit;
-    }
-
-    const monthAgg = byMonth.get(targetMonth) ?? { sales: 0, profit: 0 };
-    monthAgg.sales += sales;
-    monthAgg.profit += profit;
-    byMonth.set(targetMonth, monthAgg);
-
-    return {
-      id: row.id as string,
-      created_at: createdAt,
-      target_month: targetMonth,
-      sales_amount: sales,
-      profit_amount: profit,
-      order_count: Number(row.order_count),
-    };
-  });
-
-  const monthsSorted = [...byMonth.keys()].sort((a, b) => a.localeCompare(b));
-  const monthlySalesTrend = monthsSorted.map((targetMonth) => {
-    const value = byMonth.get(targetMonth)!;
-    return { month: targetMonth, sales: value.sales, profit: value.profit };
-  });
-  const monthlyProfitTrend = monthlySalesTrend.map((point) => ({
-    month: point.month,
-    sales: point.sales,
-    profit: point.profit,
-  }));
-
-  const rate = Number(creator.commission_rate);
+  const latest = history.months[0] ?? null;
 
   return {
     data: {
       id: creator.id as string,
-      creator_name: creator.creator_name as string,
-      tiktok_id: creator.tiktok_id as string,
-      agency_id: creator.agency_id as string,
-      agency_name: agency?.name ?? "—",
-      commission_rate: rate,
-      salesMonth,
-      salesTotal,
-      profitMonth,
-      profitTotal,
-      rewardMonth: agencyRewardFromRevenue(profitMonth, rate),
-      rewardTotal: agencyRewardFromRevenue(profitTotal, rate),
-      monthlySalesTrend,
-      monthlyProfitTrend,
-      importHistory,
-      lastUpdatedAt,
+      creator_name: String(creator.creator_name ?? ""),
+      tiktok_id: String(creator.tiktok_id ?? ""),
+      agency_id: (creator.agency_id as string | null) ?? null,
+      agency_name: agency?.name ?? null,
+      account_management_type:
+        (creator.account_management_type as string | null) ?? null,
+      commission_rate: Number(creator.commission_rate ?? 0),
+      months: history.months,
+      totals,
+      latest,
+      referrer_name:
+        history.months.find((m) => m.row.referrerName)?.row.referrerName ?? null,
     },
     error: null,
   };

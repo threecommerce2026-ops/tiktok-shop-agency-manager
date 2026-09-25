@@ -2,8 +2,8 @@
 
 import { requireAdminAction } from "@/lib/db/admin-access";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
-import { DEFAULT_REFERRAL_RATE } from "@/lib/referrals/calc";
-import { DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN } from "@/lib/referrals/cap";
+import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
+import { linkCreatorToReferrer } from "@/lib/referrals/link-creator-referrer";
 import { isPendingReferralTiktokId } from "@/lib/creators/referral-registration";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
 import { revalidatePath } from "next/cache";
@@ -23,7 +23,7 @@ function readOptionalText(formData: FormData, key: string): string | null {
 
 function parseReferralRate(raw: string): number | null {
   const normalized = raw.trim().replace(/%/g, "").replace(/,/g, "");
-  if (!normalized) return DEFAULT_REFERRAL_RATE;
+  if (!normalized) return REFERRAL_REWARD_RATE;
   const value = Number(normalized);
   if (!Number.isFinite(value) || value < 0 || value > 1) return null;
   return value;
@@ -36,7 +36,6 @@ export async function saveCreatorReferralAction(
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const referralId = readOptionalText(formData, "referral_id");
   const creatorId = readText(formData, "creator_id");
   const referrerId = readText(formData, "referrer_id");
   const referralRate = parseReferralRate(String(formData.get("referral_rate") ?? ""));
@@ -50,35 +49,26 @@ export async function saveCreatorReferralAction(
     return { ok: false, error: "紹介率は 0〜1 の数値で入力してください（0.05 = 5%）" };
   }
 
-  const payload = {
-    creator_id: creatorId,
-    referrer_id: referrerId,
-    referral_rate: referralRate,
-    start_month: startMonth,
-    end_month: endMonth,
-    is_active: true,
-    updated_at: new Date().toISOString(),
-  };
+  /*
+    creators.referred_by_referrer_id と creator_referrals を必ず同時に更新する。
+    片方だけだと紹介者報酬が発生しなくなる。
+  */
+  const linked = await linkCreatorToReferrer(auth.supabase, {
+    creatorId,
+    referrerId,
+    referralRate,
+    startMonth,
+    endMonth,
+  });
 
-  if (referralId) {
-    const { error } = await auth.supabase
-      .from("creator_referrals")
-      .update(payload)
-      .eq("id", referralId);
-    if (error) return { ok: false, error: mapSupabaseErrorToJa(error.message) };
-  } else {
-    const { error } = await auth.supabase.from("creator_referrals").insert({
-      ...payload,
-      lifetime_payout_cap: DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN,
-      lifetime_paid_amount: 0,
-    });
-    if (error) return { ok: false, error: mapSupabaseErrorToJa(error.message) };
+  if (!linked.ok) {
+    return { ok: false, error: mapSupabaseErrorToJa(linked.error) };
   }
 
   revalidatePath("/admin/creator-referrals");
   revalidatePath("/admin/referrers");
   revalidatePath("/referrer/dashboard");
-  return { ok: true, message: referralId ? "紹介者紐付けを更新しました" : "紹介者を紐付けました" };
+  return { ok: true, message: "紹介者を紐付けました" };
 }
 
 export async function updateCreatorTiktokIdAction(

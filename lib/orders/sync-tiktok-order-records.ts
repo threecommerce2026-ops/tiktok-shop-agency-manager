@@ -44,18 +44,24 @@ export async function syncTikTokOrderRecords(
   );
 
   for (const record of records) {
-    const resolved = await resolveCreatorByTiktokId(supabase, {
-      tiktokId: record.creator_tiktok_id,
-      creatorName: record.creator_name?.trim() || record.creator_tiktok_id,
-      lookup: creatorLookup,
-      autoCreate: autoCreateCreators,
-    });
+    const creatorTiktokId = record.creator_tiktok_id?.trim() || null;
+    let creator = null;
 
-    if (resolved.error && !errorMessage) {
-      errorMessage = resolved.error;
+    if (creatorTiktokId) {
+      const resolved = await resolveCreatorByTiktokId(supabase, {
+        tiktokId: creatorTiktokId,
+        creatorName: record.creator_name?.trim() || creatorTiktokId,
+        lookup: creatorLookup,
+        autoCreate: autoCreateCreators,
+      });
+
+      if (resolved.error && !errorMessage) {
+        errorMessage = resolved.error;
+      }
+
+      creator = resolved.creator;
     }
 
-    const creator = resolved.creator;
     const mapped = mapTikTokOrderToUpsert(record, {
       creatorId: creator?.id ?? null,
       agencyId: creator?.agency_id ?? null,

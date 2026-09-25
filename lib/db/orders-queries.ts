@@ -26,7 +26,7 @@ export type OrderListRow = {
   shipping_status: string | null;
   cancellation_status: string | null;
   return_status: string | null;
-  creator_tiktok_id: string;
+  creator_tiktok_id: string | null;
   creator_name: string | null;
   ordered_at: string | null;
   paid_at: string | null;
@@ -171,7 +171,7 @@ async function fetchAgenciesByIds(
 function resolveCreatorForOrder(
   row: {
     creator_id: string | null;
-    creator_tiktok_id: string;
+    creator_tiktok_id: string | null;
   },
   creatorsById: Map<string, CreatorLookupRow>,
   creatorsByTiktokId: Map<string, CreatorLookupRow>,
@@ -333,7 +333,7 @@ export async function fetchCreatorPaidOrderSummaries(
     const existing = byCreator.get(order.creator_id) ?? {
       creator_id: order.creator_id,
       creator_name: order.creator_name ?? "—",
-      tiktok_id: order.creator_tiktok_id,
+      tiktok_id: order.creator_tiktok_id ?? "",
       paid_sales_month: 0,
       reward_profit_month: 0,
       reward_amount_month: 0,

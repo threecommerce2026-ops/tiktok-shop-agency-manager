@@ -61,7 +61,7 @@ function toTokenExpiredAt(expireInSeconds: number | null): string | null {
   return new Date(Date.now() + expireInSeconds * 1000).toISOString();
 }
 
-function createTikTokShopSign(params: {
+export function createTikTokShopSign(params: {
   path: string;
   queryParams: Record<string, string>;
   body: string;

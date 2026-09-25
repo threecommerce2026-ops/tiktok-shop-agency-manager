@@ -1,6 +1,5 @@
 import { fetchCreatorAssignmentLogs } from "@/lib/db/creator-assignment-log-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
-import { formatPercent } from "@/lib/revenue/calc";
 import { createClient } from "@/lib/supabase/server";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -38,7 +37,7 @@ export default async function CreatorAssignmentLogsPage() {
           振り分け変更履歴
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          クリエイターの代理店振り分けと分配率の変更履歴を表示します。
+          クリエイターの代理店振り分け変更履歴を表示します。
         </p>
         <p className="mt-3">
           <Link
@@ -65,8 +64,6 @@ export default async function CreatorAssignmentLogsPage() {
               <th className="px-4 py-3">TikTok ID</th>
               <th className="px-4 py-3">変更前代理店</th>
               <th className="px-4 py-3">変更後代理店</th>
-              <th className="px-4 py-3 text-right">変更前分配率</th>
-              <th className="px-4 py-3 text-right">変更後分配率</th>
               <th className="px-4 py-3">変更者</th>
             </tr>
           </thead>
@@ -74,7 +71,7 @@ export default async function CreatorAssignmentLogsPage() {
             {logs.data.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={6}
                   className="px-4 py-10 text-center text-zinc-500"
                 >
                   履歴がありません
@@ -95,14 +92,6 @@ export default async function CreatorAssignmentLogsPage() {
                   </td>
                   <td className="px-4 py-3 text-zinc-300">
                     {formatAgencyLabel(row.to_agency_name)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono text-zinc-400">
-                    {row.from_commission_rate == null
-                      ? "—"
-                      : formatPercent(row.from_commission_rate)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono text-[var(--accent-cyan)]">
-                    {formatPercent(row.to_commission_rate)}
                   </td>
                   <td className="px-4 py-3 text-zinc-300">
                     {row.changed_by_email ?? row.changed_by}
@@ -136,20 +125,6 @@ export default async function CreatorAssignmentLogsPage() {
                 <dt className="text-[10px] text-zinc-600">変更後代理店</dt>
                 <dd className="text-zinc-300">
                   {formatAgencyLabel(row.to_agency_name)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-[10px] text-zinc-600">変更前分配率</dt>
-                <dd className="font-mono text-zinc-400">
-                  {row.from_commission_rate == null
-                    ? "—"
-                    : formatPercent(row.from_commission_rate)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-[10px] text-zinc-600">変更後分配率</dt>
-                <dd className="font-mono text-[var(--accent-cyan)]">
-                  {formatPercent(row.to_commission_rate)}
                 </dd>
               </div>
             </dl>

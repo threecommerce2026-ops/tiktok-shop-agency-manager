@@ -18,17 +18,17 @@ export function AgencyRankingTable({ rows }: { rows: AgencyRankingRow[] }) {
             <tr className="border-b border-white/[0.06] bg-surface-1/80 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               <th className="px-4 py-3">順位</th>
               <th className="px-4 py-3">代理店名</th>
-              <th className="px-4 py-3 text-right">今月売上</th>
-              <th className="px-4 py-3 text-right">今月収益</th>
-              <th className="px-4 py-3 text-right">代理店報酬</th>
-              <th className="px-4 py-3 text-right">紹介クリエイター数</th>
+              <th className="px-4 py-3 text-right">CAP GMV</th>
+              <th className="px-4 py-3 text-right">CAP代理店収益</th>
+              <th className="px-4 py-3 text-right">代理店支払予定額</th>
+              <th className="px-4 py-3 text-right">所属クリエイター数</th>
               <th className="px-4 py-3 text-right">稼働クリエイター数</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr key={row.agencyId} className="border-b border-white/[0.04]">
-                <td className="px-4 py-3 font-mono text-zinc-400">{row.rank}</td>
+                <td className="px-4 py-3 font-mono text-zinc-400">{row.rank ?? "—"}</td>
                 <td className="px-4 py-3 font-medium text-zinc-100">{row.agencyName}</td>
                 <td className="px-4 py-3 text-right font-mono">{formatYen(row.salesMonth)}</td>
                 <td className="px-4 py-3 text-right font-mono text-[var(--accent-cyan)]">
@@ -53,7 +53,9 @@ export function AgencyRankingTable({ rows }: { rows: AgencyRankingRow[] }) {
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-mono text-zinc-500">#{row.rank}</p>
+                <p className="text-xs font-mono text-zinc-500">
+                  {row.rank != null ? `#${row.rank}` : "—"}
+                </p>
                 <p className="mt-1 font-semibold text-zinc-100">{row.agencyName}</p>
               </div>
               <p className="font-mono text-sm font-semibold text-zinc-100">
@@ -62,19 +64,19 @@ export function AgencyRankingTable({ rows }: { rows: AgencyRankingRow[] }) {
             </div>
             <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div>
-                <dt className="text-[10px] text-zinc-600">今月収益</dt>
+                <dt className="text-[10px] text-zinc-600">CAP代理店収益</dt>
                 <dd className="font-mono text-[var(--accent-cyan)]">
                   {formatYen(row.profitMonth)}
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] text-zinc-600">代理店報酬</dt>
+                <dt className="text-[10px] text-zinc-600">代理店支払予定額</dt>
                 <dd className="font-mono text-gradient-brand">
                   {formatYen(row.rewardMonth)}
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] text-zinc-600">紹介クリエイター</dt>
+                <dt className="text-[10px] text-zinc-600">所属クリエイター</dt>
                 <dd className="font-mono">{row.creatorCount}</dd>
               </div>
               <div>

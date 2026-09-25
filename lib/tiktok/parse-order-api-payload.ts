@@ -12,7 +12,7 @@ function toOrderRecord(value: unknown): TikTokOrderApiRecord | null {
     value.creator_tiktok_id ?? value.creatorTiktokId ?? value.tiktok_id ?? "",
   ).trim();
 
-  if (!orderId || !creatorTiktokId) return null;
+  if (!orderId) return null;
 
   return {
     order_id: orderId,
@@ -34,7 +34,7 @@ function toOrderRecord(value: unknown): TikTokOrderApiRecord | null {
       (value.return_status as string | null | undefined) ??
       (value.refund_status as string | null | undefined) ??
       null,
-    creator_tiktok_id: creatorTiktokId,
+    creator_tiktok_id: creatorTiktokId || null,
     creator_name: (value.creator_name as string | null | undefined) ?? null,
     ordered_at: (value.ordered_at as string | null | undefined) ?? null,
     paid_at: (value.paid_at as string | null | undefined) ?? null,

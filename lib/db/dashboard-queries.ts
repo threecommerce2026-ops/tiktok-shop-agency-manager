@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { aggregateMonthlyOrderTrend } from "@/lib/db/order-metrics";
-import { fetchOrderMetricRows } from "@/lib/db/orders-queries";
+
+import { fetchCreatorMonthlyFinance } from "@/lib/db/creator-monthly-finance-queries";
 
 export function currentMonthKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -25,8 +25,20 @@ export type DashboardData = {
   dbError: string | null;
 };
 
+function monthKeys(count: number, base = new Date()) {
+  const result: string[] = [];
+
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+    result.push(currentMonthKey(d));
+  }
+
+  return result;
+}
+
 export async function fetchDashboardData(
   supabase: SupabaseClient,
+  adminSupabase: SupabaseClient,
   agencyId: string,
   agencyName: string,
 ): Promise<DashboardData> {
@@ -44,75 +56,69 @@ export async function fetchDashboardData(
     dbError: null,
   };
 
-  const { data: creators, error: e2 } = await supabase
+  const { data: creators, error: creatorsError } = await supabase
     .from("creators")
-    .select("id, commission_rate")
+    .select("id")
     .eq("agency_id", agencyId);
 
-  if (e2) {
-    return { ...empty, dbError: e2.message };
+  if (creatorsError) {
+    return { ...empty, dbError: creatorsError.message };
   }
 
-  const ordersResult = await fetchOrderMetricRows(supabase, { agencyId });
-  if (ordersResult.error) {
-    return { ...empty, dbError: ordersResult.error };
-  }
+  const months = monthKeys(12);
 
-  const commissionRateByCreator = new Map<string, number>();
-  for (const creator of creators ?? []) {
-    commissionRateByCreator.set(
-      creator.id as string,
-      Number(creator.commission_rate),
-    );
-  }
-
-  const byMonth = aggregateMonthlyOrderTrend(
-    ordersResult.data,
-    commissionRateByCreator,
+  const financeResults = await Promise.all(
+    months.map((targetMonth) =>
+      fetchCreatorMonthlyFinance(adminSupabase, targetMonth),
+    ),
   );
 
-  const creatorIds = new Set((creators ?? []).map((c) => c.id as string));
-  const activeIds = new Set<string>();
+  const failed = financeResults.find((result) => result.error);
 
-  let totalSalesMonth = 0;
-  let totalProfitMonth = 0;
-  let totalRewardMonth = 0;
-
-  for (const order of ordersResult.data) {
-    if (!order.creator_id || !creatorIds.has(order.creator_id)) continue;
-    if (order.target_month === month) {
-      totalSalesMonth += Number(order.order_amount);
-    }
+  if (failed?.error) {
+    return { ...empty, dbError: failed.error };
   }
 
-  const current = byMonth.get(month);
-  if (current) {
-    totalProfitMonth = current.profit;
-    totalRewardMonth = current.reward;
-  }
+  const monthlyTrend: MonthlyTrendPoint[] = financeResults.map(
+    (result, index) => {
+      const agencyRows = result.rows.filter(
+        (row) => row.agencyId === agencyId && !row.isInHouse,
+      );
 
-  for (const order of ordersResult.data) {
-    if (!order.creator_id || order.target_month !== month) continue;
-    if (Number(order.order_amount) > 0) {
-      activeIds.add(order.creator_id);
-    }
-  }
+      return {
+        month: months[index],
+        sales: agencyRows.reduce((sum, row) => sum + row.capGmv, 0),
+        profit: agencyRows.reduce((sum, row) => sum + row.capRevenue, 0),
+        reward: agencyRows.reduce((sum, row) => sum + row.agencyPayout, 0),
+      };
+    },
+  );
 
-  const monthsSorted = [...byMonth.keys()].sort((a, b) => b.localeCompare(a));
-  const take = monthsSorted.slice(0, 12).reverse();
-  const monthlyTrend: MonthlyTrendPoint[] = take.map((m) => {
-    const v = byMonth.get(m)!;
-    return { month: m, sales: v.sales, profit: v.profit, reward: v.reward };
-  });
+  const currentRows =
+    financeResults[financeResults.length - 1]?.rows.filter(
+      (row) => row.agencyId === agencyId && !row.isInHouse,
+    ) ?? [];
+
+  const activeCreatorIds = new Set(
+    currentRows
+      .filter(
+        (row) =>
+          row.capGmv > 0 ||
+          row.capRevenue > 0 ||
+          row.tapRevenue > 0 ||
+          row.agencyPayout > 0,
+      )
+      .map((row) => row.creatorId),
+  );
 
   return {
     agencyName,
     month,
-    totalSales: totalSalesMonth,
-    totalProfit: totalProfitMonth,
-    totalReward: totalRewardMonth,
-    creatorCount: creatorIds.size,
-    activeCreatorCount: activeIds.size,
+    totalSales: currentRows.reduce((sum, row) => sum + row.capGmv, 0),
+    totalProfit: currentRows.reduce((sum, row) => sum + row.capRevenue, 0),
+    totalReward: currentRows.reduce((sum, row) => sum + row.agencyPayout, 0),
+    creatorCount: creators?.length ?? 0,
+    activeCreatorCount: activeCreatorIds.size,
     monthlyTrend,
     dbError: null,
   };

@@ -68,7 +68,6 @@ export const APP_NAV: readonly NavItem[] = [
       "/admin/affiliate-orders-import",
       "/admin/api-connections",
       "/admin/api-sync",
-      "/sales-upload",
       "/csv-logs",
       "/sync-jobs",
     ],

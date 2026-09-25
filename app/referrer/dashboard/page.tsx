@@ -2,7 +2,7 @@ import { ReferrerDashboardClient } from "@/app/referrer/dashboard/ReferrerDashbo
 import { ReferrerPageShell } from "@/components/referrer/ReferrerPageShell";
 import { fetchReferrerProfileByUser } from "@/lib/db/referrer-access";
 import { fetchReferrerDashboardData } from "@/lib/db/referrer-dashboard-queries";
-import { REFERRAL_PAYOUT_THRESHOLD_YEN } from "@/lib/referrals/calc";
+import { REFERRAL_PAYOUT_THRESHOLD_YEN } from "@/lib/referrals/referral-reward-engine";
 import { buildReferralLink } from "@/lib/referrals/site-url";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";

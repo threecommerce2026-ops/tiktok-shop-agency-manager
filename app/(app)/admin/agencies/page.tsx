@@ -1,4 +1,7 @@
 import { AgenciesAdminClient } from "@/app/(app)/admin/agencies/AgenciesAdminClient";
+import { AgencyMaintenanceSection } from "@/components/master/AgencyMaintenanceSection";
+import { fetchAgencyMaintenanceData } from "@/lib/db/agency-maintenance-queries";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import {
   fetchAgencyAdminRows,
   fetchAgencyCreators,
@@ -42,6 +45,9 @@ export default async function AgenciesAdminPage({
     ? await fetchAgencyMonthlyRewards(supabase, selectedAgencyId)
     : { data: [], error: null };
 
+  // マスタ整理セクション用（RLS が管理者のみのため service role で読む）
+  const maintenanceData = await fetchAgencyMaintenanceData(getSupabaseAdmin());
+
   const loadError =
     agenciesResult.error ?? creatorsResult.error ?? monthlyRewardsResult.error;
 
@@ -64,6 +70,14 @@ export default async function AgenciesAdminPage({
           <p className="mt-1 text-amber-200/90">{loadError}</p>
         </div>
       ) : null}
+
+      {maintenanceData.error ? (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          {maintenanceData.error}
+        </div>
+      ) : (
+        <AgencyMaintenanceSection data={maintenanceData} />
+      )}
 
       <AgenciesAdminClient
         agencies={agenciesResult.data}

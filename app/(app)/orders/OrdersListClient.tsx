@@ -1,6 +1,6 @@
 "use client";
 
-import type { CreatorPaidOrderSummary, OrderListRow } from "@/lib/db/orders-queries";
+import type { OrderListRow } from "@/lib/db/orders-queries";
 import { formatYen } from "@/lib/revenue/calc";
 import Link from "next/link";
 import { useMemo, useState } from "react";
@@ -8,7 +8,6 @@ import { useMemo, useState } from "react";
 type Props = {
   isAdmin: boolean;
   orders: OrderListRow[];
-  summaries: CreatorPaidOrderSummary[];
   loadError: string | null;
 };
 
@@ -20,7 +19,7 @@ function matchesSearch(order: OrderListRow, query: string) {
   return (
     order.tiktok_order_id.toLowerCase().includes(normalized) ||
     (order.creator_name ?? "").toLowerCase().includes(normalized) ||
-    order.creator_tiktok_id.toLowerCase().includes(normalized) ||
+    (order.creator_tiktok_id ?? "").toLowerCase().includes(normalized) ||
     (order.product_name ?? "").toLowerCase().includes(normalized)
   );
 }
@@ -120,13 +119,6 @@ function OrderCard({ order }: { order: OrderListRow }) {
         </div>
         <div>
           <dt className="text-[10px] text-zinc-600">対象月</dt>
-          <dd className="font-mono text-zinc-300">{order.target_month}</dd>
-        </div>
-        <div className="col-span-2">
-          <dt className="text-[10px] text-zinc-600">報酬見込み</dt>
-          <dd className="font-mono font-semibold text-gradient-brand">
-            {formatYen(order.reward_amount)}
-          </dd>
         </div>
       </dl>
     </li>
@@ -136,13 +128,11 @@ function OrderCard({ order }: { order: OrderListRow }) {
 export function OrdersListClient({
   isAdmin,
   orders,
-  summaries,
   loadError,
 }: Props) {
   const [search, setSearch] = useState("");
   const [orderStatusFilter, setOrderStatusFilter] = useState(ALL_FILTER);
   const [paidOnly, setPaidOnly] = useState(false);
-  const [rewardEligibleOnly, setRewardEligibleOnly] = useState(false);
 
   const orderStatuses = useMemo(() => {
     const values = new Set<string>();
@@ -159,15 +149,10 @@ export function OrdersListClient({
         return false;
       }
       if (paidOnly && !isPaidPayment(order)) return false;
-      if (rewardEligibleOnly && !order.reward_eligible) return false;
       return true;
     });
-  }, [orderStatusFilter, orders, paidOnly, rewardEligibleOnly, search]);
+  }, [orderStatusFilter, orders, paidOnly, search]);
 
-  const rewardEligibleTotal = useMemo(
-    () => filteredOrders.reduce((sum, order) => sum + order.reward_amount, 0),
-    [filteredOrders],
-  );
 
   return (
     <div className="space-y-4">
@@ -230,15 +215,6 @@ export function OrdersListClient({
             />
             決済済みのみ
           </label>
-
-          <label className="flex min-h-[44px] items-center gap-2 rounded-xl border border-white/[0.08] bg-surface-0 px-3 py-2 text-sm text-zinc-300">
-            <input
-              type="checkbox"
-              checked={rewardEligibleOnly}
-              onChange={(event) => setRewardEligibleOnly(event.target.checked)}
-            />
-            報酬対象のみ
-          </label>
         </div>
       </section>
 
@@ -249,61 +225,25 @@ export function OrdersListClient({
           {orders.length}
         </div>
         <div className="rounded-xl border border-white/[0.06] bg-surface-1/40 px-4 py-3 text-sm text-zinc-400">
-          報酬対象合計:{" "}
-          <span className="font-mono font-semibold text-gradient-brand">
-            {formatYen(rewardEligibleTotal)}
+          表示中の注文金額合計:{" "}
+          <span className="font-mono font-semibold text-zinc-200">
+            {formatYen(
+              filteredOrders.reduce((sum, order) => sum + order.order_amount, 0),
+            )}
           </span>
         </div>
       </div>
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-zinc-200">
-          クリエイター別の決済済み売上集計
-        </h2>
-        {summaries.length === 0 ? (
-          <p className="rounded-xl border border-white/[0.06] bg-surface-1/40 px-4 py-6 text-center text-sm text-zinc-500">
-            集計対象の決済済み注文はありません。
-          </p>
-        ) : (
-          <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {summaries.map((summary) => (
-              <li
-                key={summary.creator_id}
-                className="rounded-xl border border-white/[0.07] bg-surface-1/50 p-3.5"
-              >
-                <p className="font-semibold text-zinc-100">{summary.creator_name}</p>
-                <p className="mt-0.5 font-mono text-xs text-zinc-500">
-                  {summary.tiktok_id}
-                </p>
-                <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                  <div>
-                    <dt className="text-[10px] text-zinc-600">決済済み売上</dt>
-                    <dd className="font-mono text-zinc-200">
-                      {formatYen(summary.paid_sales_month)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] text-zinc-600">報酬対象収益</dt>
-                    <dd className="font-mono text-[var(--accent-cyan)]">
-                      {formatYen(summary.reward_profit_month)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] text-zinc-600">注文件数</dt>
-                    <dd className="font-mono text-zinc-300">{summary.order_count_month}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-[10px] text-zinc-600">報酬見込み</dt>
-                    <dd className="font-mono font-semibold text-gradient-brand">
-                      {formatYen(summary.reward_amount_month)}
-                    </dd>
-                  </div>
-                </dl>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-4 py-3 text-sm text-zinc-400">
+        正式な代理店支払額は、月別の確定所属とCAP実績をもとに
+        <Link
+          href="/rewards"
+          className="mx-1 font-medium text-[var(--accent-cyan)] hover:underline"
+        >
+          代理店報酬
+        </Link>
+        で確認してください。
+      </div>
 
       {filteredOrders.length === 0 ? (
         <p className="rounded-xl border border-white/[0.06] bg-surface-1/40 px-4 py-8 text-center text-sm text-zinc-500">

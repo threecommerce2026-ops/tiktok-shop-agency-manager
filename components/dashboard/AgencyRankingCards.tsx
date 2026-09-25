@@ -1,7 +1,7 @@
 import type { AgencyRankingRow } from "@/lib/db/admin-dashboard-queries";
 import { formatYen } from "@/lib/revenue/calc";
 
-function rankAccent(rank: number) {
+function rankAccent(rank: number | null) {
   if (rank === 1) return "from-amber-400/30 to-amber-500/10 text-amber-100 ring-amber-400/30";
   if (rank === 2) return "from-zinc-300/20 to-zinc-400/10 text-zinc-100 ring-zinc-300/20";
   if (rank === 3) return "from-orange-400/20 to-orange-500/10 text-orange-100 ring-orange-400/25";
@@ -29,16 +29,16 @@ export function AgencyRankingCards({ rows }: { rows: AgencyRankingRow[] }) {
               <span
                 className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br font-mono text-sm font-bold ring-1 ${rankAccent(row.rank)}`}
               >
-                #{row.rank}
+                {row.rank != null ? `#${row.rank}` : "—"}
               </span>
               <div className="min-w-0">
                 <p className="truncate text-lg font-semibold text-zinc-50">{row.agencyName}</p>
-                <p className="mt-1 text-xs text-zinc-500">今月収益で並び替え</p>
+                <p className="mt-1 text-xs text-zinc-500">CAP代理店収益で並び替え</p>
               </div>
             </div>
             <div className="text-right">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                今月収益
+                CAP代理店収益
               </p>
               <p className="mt-1 font-mono text-lg font-bold text-[var(--accent-cyan)]">
                 {formatYen(row.profitMonth)}
@@ -49,7 +49,7 @@ export function AgencyRankingCards({ rows }: { rows: AgencyRankingRow[] }) {
           <dl className="mt-5 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
             <div className="rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2.5">
               <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                今月売上
+                CAP GMV
               </dt>
               <dd className="mt-1 font-mono font-semibold text-zinc-100">
                 {formatYen(row.salesMonth)}
@@ -57,7 +57,7 @@ export function AgencyRankingCards({ rows }: { rows: AgencyRankingRow[] }) {
             </div>
             <div className="rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2.5">
               <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                代理店報酬
+                代理店支払予定額
               </dt>
               <dd className="mt-1 font-mono font-semibold text-gradient-brand">
                 {formatYen(row.rewardMonth)}
@@ -65,7 +65,7 @@ export function AgencyRankingCards({ rows }: { rows: AgencyRankingRow[] }) {
             </div>
             <div className="rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2.5">
               <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                紹介クリエイター
+                所属クリエイター
               </dt>
               <dd className="mt-1 font-mono font-semibold text-zinc-200">
                 {row.creatorCount}

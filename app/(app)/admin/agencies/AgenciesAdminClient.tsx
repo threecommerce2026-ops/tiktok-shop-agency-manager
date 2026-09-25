@@ -30,16 +30,32 @@ function AgencyForm({ agency }: { agency?: AgencyAdminRow }) {
   return (
     <form action={formAction} className="space-y-4 rounded-2xl border border-white/[0.06] bg-surface-1/40 p-4 sm:p-5">
       {agency ? <input type="hidden" name="agency_id" value={agency.id} /> : null}
-      <h2 className="text-sm font-semibold text-zinc-100">{agency ? `${agency.name} を編集` : "代理店を追加"}</h2>
+      <h2 className="text-sm font-semibold text-zinc-100">
+        {agency ? `${agency.name} の設定を編集` : "代理店を追加"}
+      </h2>
+      <p className="rounded-lg border border-white/[0.06] bg-surface-0/50 px-3 py-2 text-[11px] leading-relaxed text-zinc-500">
+        代理店報酬は TikTok の AP「エージェンシーの収益総額」を100%支払う計算です
+        （対象は AU「支払い状況」= 支払い済みの明細のみ）。
+        代理店ごとの分配率設定は使用しません。
+      </p>
+
       <div className="grid gap-3 sm:grid-cols-2">
-        <div>
-          <label className={labelClass} htmlFor={`agency-name-${agency?.id ?? "new"}`}>代理店名</label>
-          <input id={`agency-name-${agency?.id ?? "new"}`} name="name" defaultValue={agency?.name ?? ""} required className={inputClass} />
-        </div>
-        <div>
-          <label className={labelClass} htmlFor={`agency-rate-${agency?.id ?? "new"}`}>デフォルト分配率 (%)</label>
-          <input id={`agency-rate-${agency?.id ?? "new"}`} name="default_commission_rate" defaultValue={agency?.defaultCommissionRate ?? 5} required className={inputClass} />
-        </div>
+        {agency ? (
+          <div className="sm:col-span-2 rounded-xl border border-white/[0.08] bg-surface-0 px-3 py-2.5">
+            <p className={labelClass}>代理店名</p>
+            <p className="mt-1 text-sm font-medium text-zinc-100">{agency.name}</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+              代理店名はこのフォームからは変更できません。上部の「代理店マスタ（名称編集）」の
+              <span className="text-zinc-300">名称編集</span>
+              から、影響件数を確認したうえで変更してください（変更履歴が残ります）。
+            </p>
+          </div>
+        ) : (
+          <div>
+            <label className={labelClass} htmlFor="agency-name-new">代理店名</label>
+            <input id="agency-name-new" name="name" defaultValue="" required className={inputClass} />
+          </div>
+        )}
         <label className="flex min-h-[44px] items-center gap-2 rounded-xl border border-white/[0.08] bg-surface-0 px-3 py-2 text-sm text-zinc-300 sm:col-span-2">
           <input type="checkbox" name="is_active" defaultChecked={agency?.isActive ?? true} />
           有効な代理店として扱う
@@ -48,7 +64,7 @@ function AgencyForm({ agency }: { agency?: AgencyAdminRow }) {
       {state?.ok ? <p className="text-sm text-emerald-300">{state.message}</p> : null}
       {state && !state.ok ? <p className="text-sm text-red-300">{state.error}</p> : null}
       <button type="submit" disabled={isPending} className="inline-flex min-h-[40px] items-center justify-center rounded-lg bg-gradient-to-r from-[var(--accent-cyan)]/90 to-[var(--accent-magenta)]/80 px-4 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-50">
-        {isPending ? "保存中…" : agency ? "代理店を更新" : "代理店を追加"}
+        {isPending ? "保存中…" : agency ? "設定を更新" : "代理店を追加"}
       </button>
     </form>
   );
@@ -71,7 +87,6 @@ export function AgenciesAdminClient({ agencies, selectedAgencyId, creators, mont
               <th className="px-4 py-3">今月売上</th>
               <th className="px-4 py-3">今月収益</th>
               <th className="px-4 py-3">今月報酬</th>
-              <th className="px-4 py-3">分配率</th>
               <th className="px-4 py-3">状態</th>
               <th className="px-4 py-3" />
             </tr>
@@ -85,7 +100,6 @@ export function AgenciesAdminClient({ agencies, selectedAgencyId, creators, mont
                 <td className="px-4 py-3">{formatYen(agency.paidSalesMonth)}</td>
                 <td className="px-4 py-3">{formatYen(agency.paidProfitMonth)}</td>
                 <td className="px-4 py-3">{formatYen(agency.agencyRewardMonth)}</td>
-                <td className="px-4 py-3">{formatPercent(agency.defaultCommissionRate)}</td>
                 <td className="px-4 py-3">{agency.isActive ? "有効" : "無効"}</td>
                 <td className="px-4 py-3">
                   <Link href={`/admin/agencies?agencyId=${agency.id}`} className="text-[var(--accent-cyan)] hover:underline">

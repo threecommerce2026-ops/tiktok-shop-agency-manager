@@ -4,6 +4,21 @@ import { CopyReferralLinkButton } from "@/components/referrer/CopyReferralLinkBu
 import type { ReferrerDashboardData } from "@/lib/db/referrer-dashboard-queries";
 import { formatYen } from "@/lib/revenue/calc";
 
+function formatPayoutStatus(status: string | null): string {
+  if (!status) return "未確定";
+
+  switch (status) {
+    case "hold":
+      return "保留";
+    case "unpaid":
+      return "支払待ち";
+    case "paid":
+      return "支払済み";
+    default:
+      return status;
+  }
+}
+
 type Props = {
   referrerName: string;
   referralLink: string;
@@ -30,10 +45,25 @@ export function ReferrerDashboardClient({
           <StatCard label="紹介クリエイター数" value={String(dashboard.creatorCount)} />
           <StatCard label="今月の報酬対象収益" value={formatYen(dashboard.eligibleRevenueMonth)} />
         </div>
-        <p className="mt-4 text-sm text-zinc-300">
-          支払い対象: {dashboard.isPayableMonth ? `${formatYen(payoutThresholdYen)}以上で対象` : `${formatYen(payoutThresholdYen)}未満は保留`}
-          {dashboard.payoutStatus ? ` / 状況: ${dashboard.payoutStatus}` : ""}
-        </p>
+        <div className="mt-4 rounded-xl border border-white/[0.06] bg-surface-0/50 px-4 py-3">
+          <p className="text-sm text-zinc-300">
+            支払い状況:{" "}
+            <span className="font-semibold text-zinc-100">
+              {formatPayoutStatus(dashboard.payoutStatus)}
+            </span>
+          </p>
+
+          <p className="mt-1 text-xs leading-5 text-zinc-500">
+            未払い報酬の合計が{formatYen(payoutThresholdYen)}以上になると支払い対象です。
+            {formatYen(payoutThresholdYen)}未満の場合は翌月以降へ自動で繰り越されます。
+          </p>
+
+          <p className="mt-1 text-xs text-zinc-500">
+            現在の未払い報酬: {formatYen(dashboard.unpaidRewardTotal)}
+            {" / "}
+            {dashboard.isPayableMonth ? "支払い対象" : "繰越中"}
+          </p>
+        </div>
       </section>
 
       <section className="rounded-2xl border border-white/[0.06] bg-surface-1/40 p-5">
@@ -62,13 +92,35 @@ export function ReferrerDashboardClient({
                   <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400">
                     <div>
                       <dt>今月売上</dt>
-                      <dd className="mt-0.5 text-sm text-zinc-200">{formatYen(creator.salesMonth)}</dd>
+                      <dd className="mt-0.5 text-sm text-zinc-200">
+                        {formatYen(creator.salesMonth)}
+                      </dd>
                     </div>
                     <div>
                       <dt>今月報酬</dt>
-                      <dd className="mt-0.5 text-sm text-zinc-200">{formatYen(creator.referralRewardMonth)}</dd>
+                      <dd className="mt-0.5 text-sm text-zinc-200">
+                        {formatYen(creator.referralRewardMonth)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>累計支払額</dt>
+                      <dd className="mt-0.5 text-sm text-zinc-200">
+                        {formatYen(creator.lifetimePaidAmount)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>上限残額</dt>
+                      <dd className="mt-0.5 text-sm text-zinc-200">
+                        {creator.capReached
+                          ? "上限到達"
+                          : formatYen(creator.remainingCap)}
+                      </dd>
                     </div>
                   </dl>
+
+                  <p className="mt-3 text-[11px] text-zinc-500">
+                    紹介報酬上限: {formatYen(creator.lifetimePayoutCap)}
+                  </p>
                 </article>
               ))}
             </div>
@@ -81,6 +133,8 @@ export function ReferrerDashboardClient({
                     <th className="px-4 py-3">公式LINE</th>
                     <th className="px-4 py-3">今月売上</th>
                     <th className="px-4 py-3">今月報酬</th>
+                    <th className="px-4 py-3">累計支払額</th>
+                    <th className="px-4 py-3">上限残額</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -91,6 +145,19 @@ export function ReferrerDashboardClient({
                       <td className="px-4 py-3">{creator.officialLineRegistered}</td>
                       <td className="px-4 py-3">{formatYen(creator.salesMonth)}</td>
                       <td className="px-4 py-3">{formatYen(creator.referralRewardMonth)}</td>
+                      <td className="px-4 py-3">
+                        {formatYen(creator.lifetimePaidAmount)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div>
+                          {creator.capReached
+                            ? "上限到達"
+                            : formatYen(creator.remainingCap)}
+                        </div>
+                        <div className="mt-1 text-[11px] text-zinc-500">
+                          上限 {formatYen(creator.lifetimePayoutCap)}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

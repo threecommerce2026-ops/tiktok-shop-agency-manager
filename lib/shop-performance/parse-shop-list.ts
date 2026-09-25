@@ -34,6 +34,24 @@ export type ShopListParseResult = {
   failures: ShopListParseFailure[];
 };
 
+/*
+  請求根拠になる列の想定位置（0始まり）。
+
+    B列 = GMV      → index 1
+    I列 = Refunds  → index 8
+
+  ヘッダー名で列を解決したうえで、この想定位置と一致するかを必ず検証する。
+  TikTok 側のエクスポート仕様が変わって列がずれた場合に、
+  名前だけを頼りに別の列を請求へ使ってしまう事故を防ぐ。
+  ずれていた場合は取込を失敗させ、人に確認させる。
+*/
+export const EXPECTED_GMV_COLUMN_INDEX = 1; // B列
+export const EXPECTED_REFUNDS_COLUMN_INDEX = 8; // I列
+
+function columnLetter(index: number): string {
+  return String.fromCharCode("A".charCodeAt(0) + index);
+}
+
 const HEADER_ALIASES = {
   shopName: ["shop name"],
   gmv: ["gmv"],
@@ -95,6 +113,37 @@ export function parseShopRankingTable(table: unknown[][]): ShopListParseResult {
           rowNumber: 1,
           shopName: null,
           reason: "必須ヘッダー Shop name / GMV が見つかりません",
+        },
+      ],
+    };
+  }
+
+  // --- 請求根拠列の位置検証（B列 GMV / I列 Refunds）---------------------------
+  const layoutProblems: string[] = [];
+
+  if (idx.gmv !== EXPECTED_GMV_COLUMN_INDEX) {
+    layoutProblems.push(
+      `GMV が ${columnLetter(idx.gmv)}列にあります（想定は B列）`,
+    );
+  }
+  if (idx.refunds < 0) {
+    layoutProblems.push("Refunds 列が見つかりません（想定は I列）");
+  } else if (idx.refunds !== EXPECTED_REFUNDS_COLUMN_INDEX) {
+    layoutProblems.push(
+      `Refunds が ${columnLetter(idx.refunds)}列にあります（想定は I列）`,
+    );
+  }
+
+  if (layoutProblems.length > 0) {
+    return {
+      rows: [],
+      failures: [
+        {
+          rowNumber: 1,
+          shopName: null,
+          reason:
+            `CSVの列構成が想定と異なります: ${layoutProblems.join(" / ")}。` +
+            "請求額の根拠になる列のため、別の列を自動で使うことはしません。ファイルをご確認ください。",
         },
       ],
     };

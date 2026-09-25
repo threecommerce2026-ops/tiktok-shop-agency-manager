@@ -11,7 +11,7 @@ export type TikTokOrderApiRecord = {
   shipping_status?: string | null;
   cancellation_status?: string | null;
   return_status?: string | null;
-  creator_tiktok_id: string;
+  creator_tiktok_id?: string | null;
   creator_name?: string | null;
   ordered_at?: string | null;
   paid_at?: string | null;

@@ -1,6 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
-import { isInHouseCreator } from "@/lib/revenue/in-house-creator";
+import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
+import {
+  collectInHouseAgencyIds,
+  isInHouseCreator,
+} from "@/lib/revenue/in-house-creator";
 import {
   formatCreatorRegistrationStatusLabel,
   formatCreatorTiktokIdLabel,
@@ -45,7 +49,7 @@ export async function fetchCreatorReferralAdminRows(
         "id, creator_name, tiktok_id, official_line_registered, registration_status, agency_id, agencies ( name )",
       )
       .order("creator_name"),
-    supabase.from("agencies").select("id, name"),
+    supabase.from("agencies").select("id, name, is_in_house"),
     supabase
       .from("creator_referrals")
       .select(
@@ -75,6 +79,7 @@ export async function fetchCreatorReferralAdminRows(
     };
   }
 
+  const inHouseAgencyIds = collectInHouseAgencyIds(agencies ?? []);
   const agencyNameById = new Map<string, string>();
   for (const agency of agencies ?? []) {
     agencyNameById.set(agency.id as string, agency.name as string);
@@ -133,10 +138,10 @@ export async function fetchCreatorReferralAdminRows(
   const rows: CreatorReferralAdminRow[] = [];
   for (const creator of creators ?? []) {
     const agencyId = (creator.agency_id as string | null) ?? null;
-    const agenciesJoin = creator.agencies as { name: string } | { name: string }[] | null;
-    const agency = Array.isArray(agenciesJoin) ? agenciesJoin[0] : agenciesJoin;
-    const agencyName = agency?.name ?? agencyNameById.get(agencyId ?? "") ?? null;
-    if (!isInHouseCreator({ agencyId, agencyName })) {
+    if (!isInHouseCreator({
+      agencyId,
+      agencyIsInHouse: agencyId ? inHouseAgencyIds.has(agencyId) : false,
+    })) {
       continue;
     }
 
@@ -159,7 +164,7 @@ export async function fetchCreatorReferralAdminRows(
       ),
       referrerId: referral?.referrerId ?? null,
       referrerName: referral?.referrerName ?? null,
-      referralRate: referral?.referralRate ?? 0.05,
+      referralRate: referral?.referralRate ?? REFERRAL_REWARD_RATE,
       startMonth: referral?.startMonth ?? targetMonth,
       endMonth: referral?.endMonth ?? null,
       isActive: referral?.isActive ?? false,
@@ -182,13 +187,14 @@ export async function fetchInHouseCreatorOptions(
         .from("creators")
         .select("id, creator_name, tiktok_id, agency_id, agencies ( name )")
         .order("creator_name"),
-      supabase.from("agencies").select("id, name"),
+      supabase.from("agencies").select("id, name, is_in_house"),
     ]);
 
   if (creatorsError || agenciesError) {
     return { data: [], error: creatorsError?.message ?? agenciesError?.message ?? null };
   }
 
+  const inHouseAgencyIds = collectInHouseAgencyIds(agencies ?? []);
   const agencyNameById = new Map<string, string>();
   for (const agency of agencies ?? []) {
     agencyNameById.set(agency.id as string, agency.name as string);
@@ -198,10 +204,10 @@ export async function fetchInHouseCreatorOptions(
     data: (creators ?? [])
       .filter((creator) => {
         const agencyId = (creator.agency_id as string | null) ?? null;
-        const agenciesJoin = creator.agencies as { name: string } | { name: string }[] | null;
-        const agency = Array.isArray(agenciesJoin) ? agenciesJoin[0] : agenciesJoin;
-        const agencyName = agency?.name ?? agencyNameById.get(agencyId ?? "") ?? null;
-        return isInHouseCreator({ agencyId, agencyName });
+        return isInHouseCreator({
+          agencyId,
+          agencyIsInHouse: agencyId ? inHouseAgencyIds.has(agencyId) : false,
+        });
       })
       .map((creator) => ({
         id: creator.id as string,

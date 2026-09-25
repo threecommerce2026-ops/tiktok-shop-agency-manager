@@ -1,12 +1,11 @@
 import { ReferrersAdminClient } from "@/app/(app)/admin/referrers/ReferrersAdminClient";
+import { ReferrerMaintenanceSection } from "@/components/master/ReferrerMaintenanceSection";
+import { fetchReferrerMaintenanceData } from "@/lib/db/referrer-maintenance-queries";
+import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import {
   fetchReferrerAdminCreators,
   fetchReferrerAdminRows,
 } from "@/lib/db/referrer-admin-queries";
-import {
-  fetchReferralPayoutAdminRows,
-  fetchReferralRewardItems,
-} from "@/lib/db/referral-payout-admin-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { buildReferralLink } from "@/lib/referrals/site-url";
@@ -46,30 +45,18 @@ export default async function ReferrersAdminPage({
     }
   }
 
-  const [payoutsResult, creatorsResult, itemsResult] = selectedReferrerId
-    ? await Promise.all([
-        fetchReferralPayoutAdminRows(supabase, month),
-        fetchReferrerAdminCreators(supabase, selectedReferrerId, month),
-        fetchReferralRewardItems(supabase, {
-          targetMonth: month,
-          referrerId: selectedReferrerId,
-        }),
-      ])
-    : [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }];
+  const creatorsResult = selectedReferrerId
+    ? await fetchReferrerAdminCreators(supabase, selectedReferrerId, month)
+    : { data: [], error: null };
+
+  // マスタ整理セクション用（名称編集 / 統合 / 無効化 / 削除）
+  // RLS が管理者のみのため service role で読む
+  const maintenanceData = await fetchReferrerMaintenanceData(getSupabaseAdmin());
 
   const selectedReferrer = selectedReferrerId
     ? referrersResult.data.find((referrer) => referrer.id === selectedReferrerId) ?? null
     : null;
-  const selectedPayout =
-    selectedReferrerId && payoutsResult.data.length > 0
-      ? payoutsResult.data.find((payout) => payout.referrerId === selectedReferrerId) ?? null
-      : null;
-
-  const loadError =
-    referrersResult.error ??
-    payoutsResult.error ??
-    creatorsResult.error ??
-    itemsResult.error;
+  const loadError = referrersResult.error ?? creatorsResult.error;
 
   return (
     <div className="space-y-8">
@@ -77,7 +64,7 @@ export default async function ReferrersAdminPage({
         <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">親管理画面</p>
         <h1 className="mt-2 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">紹介者管理</h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-500">
-          THREE.inc 自社クリエイター向け紹介者の追加・編集、紹介クリエイター数、今月報酬、累計報酬、支払い管理を行います。
+          紹介者マスタ（連絡先・振込先・紹介リンク）の管理画面です。報酬の集計と支払い確定は「売上・報酬 › 紹介者報酬」で行います。
         </p>
         <p className="mt-2 text-xs text-zinc-600">
           対象月: <span className="font-mono text-zinc-400">{month}</span>
@@ -91,15 +78,21 @@ export default async function ReferrersAdminPage({
         </div>
       ) : null}
 
+      {maintenanceData.error ? (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          {maintenanceData.error}
+        </div>
+      ) : (
+        <ReferrerMaintenanceSection data={maintenanceData} />
+      )}
+
       <ReferrersAdminClient
         referrers={referrersResult.data}
         referralLinks={referralLinks}
         targetMonth={month}
         selectedReferrerId={selectedReferrerId}
         selectedReferrer={selectedReferrer}
-        selectedPayout={selectedPayout}
         creators={creatorsResult.data}
-        rewardItems={itemsResult.data}
       />
 
       <div className="flex justify-center">

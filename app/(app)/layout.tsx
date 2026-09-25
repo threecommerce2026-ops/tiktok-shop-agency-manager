@@ -25,6 +25,7 @@ export default async function AppAreaLayout({
   return (
     <AppShell
       role={appUser.data.role}
+      agencyName={appUser.data.agencyName}
       profileRoleRaw={appUser.data.profileRoleRaw}
       profileLoadError={appUser.data.profileLoadError}
     >

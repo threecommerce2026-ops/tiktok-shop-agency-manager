@@ -5,6 +5,11 @@ import {
   saveTikTokApiConnectionAction,
   type SaveTikTokApiConnectionResult,
 } from "@/app/actions/tiktok-api-connections";
+
+import {
+  testTikTokApiConnectionAction,
+  type TikTokApiConnectionTestResult,
+} from "@/app/actions/tiktok-api-connection-test";
 import type { TikTokApiConnectionRow } from "@/lib/db/tiktok-api-connection-queries";
 import { useActionState, useState, useTransition } from "react";
 
@@ -203,11 +208,29 @@ function ConnectionCard({ connection }: { connection: TikTokApiConnectionRow }) 
   const [isPending, startTransition] = useTransition();
   const [deleteMessage, setDeleteMessage] =
     useState<SaveTikTokApiConnectionResult | null>(null);
+  const [testMessage, setTestMessage] =
+    useState<TikTokApiConnectionTestResult | null>(null);
 
   return (
     <section className="space-y-3">
       <ConnectionForm connection={connection} />
+
       <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          disabled={isPending}
+          onClick={() => {
+            setTestMessage(null);
+            startTransition(async () => {
+              const result = await testTikTokApiConnectionAction(connection.id);
+              setTestMessage(result);
+            });
+          }}
+          className="inline-flex min-h-[40px] items-center justify-center rounded-lg border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/10 px-4 py-2 text-sm font-medium text-[var(--accent-cyan)] disabled:opacity-50"
+        >
+          {isPending ? "通信中…" : "Order API 接続テスト"}
+        </button>
+
         <button
           type="button"
           disabled={isPending}
@@ -219,15 +242,25 @@ function ConnectionCard({ connection }: { connection: TikTokApiConnectionRow }) 
           }}
           className="inline-flex min-h-[40px] items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 disabled:opacity-50"
         >
-          {isPending ? "削除中…" : "この接続を削除"}
+          {isPending ? "処理中…" : "この接続を削除"}
         </button>
-        {deleteMessage?.ok ? (
-          <p className="text-sm text-emerald-300">{deleteMessage.message}</p>
-        ) : null}
-        {deleteMessage && !deleteMessage.ok ? (
-          <p className="text-sm text-red-300">{deleteMessage.error}</p>
-        ) : null}
       </div>
+
+      {testMessage?.ok ? (
+        <p className="text-sm text-emerald-300">{testMessage.message}</p>
+      ) : null}
+
+      {testMessage && !testMessage.ok ? (
+        <p className="text-sm text-red-300">{testMessage.error}</p>
+      ) : null}
+
+      {deleteMessage?.ok ? (
+        <p className="text-sm text-emerald-300">{deleteMessage.message}</p>
+      ) : null}
+
+      {deleteMessage && !deleteMessage.ok ? (
+        <p className="text-sm text-red-300">{deleteMessage.error}</p>
+      ) : null}
     </section>
   );
 }

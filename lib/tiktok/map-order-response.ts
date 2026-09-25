@@ -1,8 +1,5 @@
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
-import {
-  getOrderRevenueBase,
-  isOrderEligibleForAgencyReward,
-} from "@/lib/revenue/order-eligibility";
+import { isOrderEligibleForAgencyReward } from "@/lib/revenue/order-eligibility";
 import type { TikTokOrderApiRecord } from "@/lib/tiktok/order-types";
 
 function toNumber(value: number | string | null | undefined): number {
@@ -35,7 +32,7 @@ export type OrderUpsertInput = {
   cancel_status: string | null;
   refund_status: string | null;
   is_commission_target: boolean;
-  creator_tiktok_id: string;
+  creator_tiktok_id: string | null;
   creator_name: string | null;
   ordered_at: string | null;
   paid_at: string | null;
@@ -51,7 +48,7 @@ export function mapTikTokOrderToUpsert(
 ): OrderUpsertInput | null {
   const tiktokOrderId = String(record.order_id ?? "").trim();
   const creatorTiktokId = String(record.creator_tiktok_id ?? "").trim().toLowerCase();
-  if (!tiktokOrderId || !creatorTiktokId) return null;
+  if (!tiktokOrderId) return null;
 
   const orderedAt = record.ordered_at ?? null;
   const paidAt = record.paid_at ?? null;
@@ -89,7 +86,7 @@ export function mapTikTokOrderToUpsert(
     cancel_status: cancelStatus,
     refund_status: refundStatus,
     is_commission_target: isOrderEligibleForAgencyReward(rewardFields),
-    creator_tiktok_id: creatorTiktokId,
+    creator_tiktok_id: creatorTiktokId || null,
     creator_name: record.creator_name?.trim() || null,
     ordered_at: orderedAt,
     paid_at: paidAt,

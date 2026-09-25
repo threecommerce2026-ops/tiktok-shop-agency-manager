@@ -3,7 +3,7 @@
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
-import { DEFAULT_REFERRAL_RATE } from "@/lib/referrals/calc";
+import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
 import { DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN } from "@/lib/referrals/cap";
 import {
   REFERRAL_LINK_CREATOR_SOURCE,
@@ -13,6 +13,7 @@ import {
   generateReferralCode,
   normalizeReferralCode,
 } from "@/lib/referrals/referral-code";
+import { resolveActiveReferrerByCode } from "@/lib/referrals/resolve-referral-code";
 import { buildReferralLink } from "@/lib/referrals/site-url";
 import { revalidatePath } from "next/cache";
 
@@ -163,17 +164,19 @@ export async function registerCreatorViaReferralAction(
   }
 
   const supabase = createServiceRoleClient();
-  const { data: referrer, error: referrerError } = await supabase
-    .from("referrers")
-    .select("id, referrer_name, is_active")
-    .eq("referral_code", referralCode)
-    .maybeSingle();
-  if (referrerError) {
-    return { ok: false, error: mapSupabaseErrorToJa(referrerError.message) };
+
+  /*
+    紹介コードの解決は resolve-referral-code に一本化する。
+    統合済みの旧コードでアクセスされた場合、ここで返る referrer.id は
+    必ず「統合先」の referrer_id になる。
+    以降の creators.referred_by_referrer_id と creator_referrals.referrer_id には
+    この ID だけを保存すること（alias 側に紐付けや報酬を作らない）。
+  */
+  const resolved = await resolveActiveReferrerByCode(supabase, referralCode);
+  if (resolved.error || !resolved.data) {
+    return { ok: false, error: mapSupabaseErrorToJa(resolved.error ?? "紹介リンクが無効です") };
   }
-  if (!referrer?.id || !referrer.is_active) {
-    return { ok: false, error: "紹介リンクが無効です" };
-  }
+  const referrer = resolved.data;
 
   const startMonth = currentMonthKey();
   const { data: creator, error: creatorError } = await supabase
@@ -201,7 +204,7 @@ export async function registerCreatorViaReferralAction(
   const { error: referralError } = await supabase.from("creator_referrals").insert({
     creator_id: creator.id,
     referrer_id: referrer.id,
-    referral_rate: DEFAULT_REFERRAL_RATE,
+    referral_rate: REFERRAL_REWARD_RATE,
     start_month: startMonth,
     end_month: null,
     is_active: true,
@@ -229,24 +232,23 @@ export async function fetchPublicReferrerByCodeAction(referralCode: string) {
   }
 
   const supabase = createServiceRoleClient();
-  const { data, error } = await supabase
-    .from("referrers")
-    .select("id, referrer_name, referral_code, is_active")
-    .eq("referral_code", normalized)
-    .maybeSingle();
+  const resolved = await resolveActiveReferrerByCode(supabase, normalized);
 
-  if (error) {
-    return { data: null, error: error.message };
-  }
-  if (!data?.id || !data.is_active) {
-    return { data: null, error: "紹介リンクが無効です" };
+  if (resolved.error || !resolved.data) {
+    return { data: null, error: resolved.error ?? "紹介リンクが無効です" };
   }
 
+  /*
+    referralCode にはアクセスに使われたコード（統合済みの旧コードのこともある）を返す。
+    登録フォームの hidden input にそのまま載り、登録時に
+    もう一度 resolveActiveReferrerByCode を通って統合先へ解決される。
+  */
   return {
     data: {
-      id: data.id as string,
-      referrerName: data.referrer_name as string,
-      referralCode: data.referral_code as string,
+      id: resolved.data.id,
+      referrerName: resolved.data.name,
+      referralCode: resolved.data.requestedCode,
+      viaAlias: resolved.data.viaAlias,
     },
     error: null,
   };

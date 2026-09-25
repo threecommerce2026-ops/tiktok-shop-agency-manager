@@ -1,6 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import {
+  resolveRewardItemAmount,
+  sumReferralAmounts,
+} from "@/lib/referrals/referral-reward-engine";
+import {
   DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN,
   isReferralCapReached,
   resolveRemainingReferralCap,
@@ -41,7 +45,9 @@ export async function fetchReferrerAdminRows(
     supabase.from("creator_referrals").select("id, referrer_id, creator_id, is_active"),
     supabase
       .from("referral_reward_items")
-      .select("referrer_id, target_month, reward_amount, is_reward_target"),
+      .select(
+        "referrer_id, target_month, reward_amount, adjusted_reward_amount, is_reward_target",
+      ),
     supabase
       .from("referral_payouts")
       .select("referrer_id, target_month, is_payable")
@@ -74,7 +80,7 @@ export async function fetchReferrerAdminRows(
   for (const item of rewardItems ?? []) {
     if (!item.is_reward_target) continue;
     const referrerId = item.referrer_id as string;
-    const amount = Number(item.reward_amount);
+    const amount = resolveRewardItemAmount(item);
     totalRewardByReferrer.set(referrerId, (totalRewardByReferrer.get(referrerId) ?? 0) + amount);
     if (item.target_month === targetMonth) {
       monthRewardByReferrer.set(
@@ -101,8 +107,8 @@ export async function fetchReferrerAdminRows(
         referralCode: (referrer.referral_code as string | null) ?? null,
         isActive: Boolean(referrer.is_active),
         creatorCount: creatorCountByReferrer.get(id)?.size ?? 0,
-        rewardMonth: monthRewardByReferrer.get(id) ?? 0,
-        rewardTotal: totalRewardByReferrer.get(id) ?? 0,
+        rewardMonth: sumReferralAmounts([monthRewardByReferrer.get(id) ?? 0]),
+        rewardTotal: sumReferralAmounts([totalRewardByReferrer.get(id) ?? 0]),
         isPayableMonth: payableByReferrer.get(id) ?? false,
       };
     }),
