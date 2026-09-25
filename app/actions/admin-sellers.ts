@@ -51,7 +51,7 @@ function parseSellerPayload(
     return { ok: false, error: "TAP料率は 0〜100 の数値で入力するか、空にしてください" };
   }
   if (tspRaw && tsp_rate == null) {
-    return { ok: false, error: "TSP料率は 0〜100 の数値で入力するか、空にしてください" };
+    return { ok: false, error: "契約料率は 0〜100 の数値で入力するか、空にしてください" };
   }
 
   const dateRaw = readText(formData, "last_meeting_date");

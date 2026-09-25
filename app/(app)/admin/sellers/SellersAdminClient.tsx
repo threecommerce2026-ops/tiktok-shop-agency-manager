@@ -182,7 +182,7 @@ function SellerFormFields({ seller }: { seller?: SellerRow | null }) {
       </div>
       <div>
         <label className={labelClass} htmlFor="sf-tsp_rate">
-          TSP料率 (%)
+          契約料率 (%)
         </label>
         <input
           id="sf-tsp_rate"
@@ -250,6 +250,41 @@ function SellerFormFields({ seller }: { seller?: SellerRow | null }) {
         </label>
         <textarea id="sf-memo" name="memo" rows={3} defaultValue={seller?.memo ?? ""} className={inputClass} />
       </div>
+
+      {/*
+        TSP登録フォーム由来の情報。取込で更新されるため編集はさせず、
+        内容確認のみできるようにしている。
+      */}
+      {seller ? (
+        <div className="sm:col-span-2">
+          <p className={labelClass}>TSP登録フォームの情報（取込時に更新）</p>
+          <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3 text-xs">
+            {[
+              ["契約書", seller.contract_status],
+              ["TSP連携", seller.tsp_link_status],
+              ["販売", seller.sales_status],
+              ["初期費用", seller.initial_fee_note],
+              ["支払い", seller.payment_status_note],
+              ["備考", seller.form_note],
+              ["創建時間", formatMeetingDate(seller.source_created_at)],
+              ["Shop ID", seller.shop_id],
+              [
+                "TSP請求対象",
+                seller.is_tsp_billing_eligible ? "対象" : "対象外",
+              ],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="flex justify-between gap-2">
+                <dt className="text-zinc-500">{label}</dt>
+                <dd className="text-right text-zinc-300">{value || "—"}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="mt-1 text-[11px] text-zinc-600">
+            Shop ID は登録フォームに無いため、ショップ実績の紐付けで設定されます。
+            契約料率はこの画面の「契約料率 (%)」で設定してください（取込では変更されません）。
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -374,7 +409,7 @@ export function SellersAdminClient({ rows }: Props) {
       "サンプル条件",
       "SMP有無",
       "TAP料率",
-      "TSP料率",
+      "契約料率",
       "前回打ち合わせ日",
       "前回打ち合わせ情報",
       "割引条件",
@@ -524,21 +559,21 @@ export function SellersAdminClient({ rows }: Props) {
       {deleteState?.ok ? <p className="text-sm text-emerald-400">{deleteState.message}</p> : null}
 
       <div className="overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/80">
-        <table className="min-w-[1400px] w-full border-collapse text-sm">
+        <table className="min-w-[1560px] w-full border-collapse text-sm">
           <thead>
             <tr>
               <th className={th}>セラー名</th>
               <th className={th}>ショップ名</th>
-              <th className={th}>カテゴリ</th>
-              <th className={th}>サンプル条件</th>
-              <th className={th}>SMP有無</th>
-              <th className={th}>TAP料率</th>
+              <th className={th}>Shop ID</th>
+              <th className={th}>担当者</th>
               <th className={th}>TSP料率</th>
-              <th className={th}>前回打ち合わせ日</th>
-              <th className={th}>前回打ち合わせ情報</th>
-              <th className={th}>割引条件</th>
-              <th className={th}>セラーライブ可否</th>
+              <th className={th}>TSP連携</th>
+              <th className={th}>販売</th>
+              <th className={th}>契約書</th>
+              <th className={th}>TSP請求</th>
               <th className={th}>ステータス</th>
+              <th className={th}>カテゴリ</th>
+              <th className={th}>TAP料率</th>
               <th className={th}>メモ</th>
               <th className={`${th} sticky right-0 z-10 min-w-[8rem] border-l border-zinc-800 bg-zinc-950`}>編集</th>
             </tr>
@@ -546,7 +581,7 @@ export function SellersAdminClient({ rows }: Props) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={14} className="px-4 py-10 text-center text-zinc-500">
+                <td colSpan={15} className="px-4 py-10 text-center text-zinc-500">
                   {rows.length === 0 ? "セラーがまだ登録されていません。「セラー追加」から登録してください。" : "条件に一致するセラーがありません。"}
                 </td>
               </tr>
@@ -559,30 +594,53 @@ export function SellersAdminClient({ rows }: Props) {
                   <td className="max-w-[10rem] truncate px-3 py-2 text-zinc-300" title={r.shop_name}>
                     {r.shop_name || "—"}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-400">{r.category ?? "—"}</td>
-                  <td className="max-w-[12rem] truncate px-3 py-2 text-xs text-zinc-400" title={r.sample_condition ?? ""}>
-                    {r.sample_condition ?? "—"}
+                  <td
+                    className={`whitespace-nowrap px-3 py-2 font-mono text-xs ${
+                      r.shop_id ? "text-zinc-400" : "text-amber-300/80"
+                    }`}
+                    title={r.shop_id ?? "TikTok Shop ID 未設定"}
+                  >
+                    {r.shop_id ?? "未設定"}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">{r.has_smp ? "あり" : "なし"}</td>
+                  <td className="max-w-[9rem] truncate px-3 py-2 text-xs text-zinc-300" title={r.contact_person ?? ""}>
+                    {r.contact_person ?? "—"}
+                  </td>
+                  <td
+                    className={`whitespace-nowrap px-3 py-2 text-right font-mono text-xs ${
+                      r.tsp_rate == null ? "text-amber-300/80" : "text-zinc-300"
+                    }`}
+                    title="セラー請求に使う契約料率（10 = 10%）"
+                  >
+                    {r.tsp_rate == null ? "未設定" : formatRateDisplay(r.tsp_rate)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">
+                    {r.tsp_link_status ?? "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">
+                    {r.sales_status ?? "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-400">
+                    {r.contract_status ?? "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs">
+                    {r.is_tsp_billing_eligible ? (
+                      <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-300">
+                        対象
+                      </span>
+                    ) : (
+                      <span
+                        className="rounded-full border border-red-400/25 bg-red-400/10 px-2 py-0.5 text-[11px] text-red-200"
+                        title={r.form_note ?? "TSP請求対象外"}
+                      >
+                        対象外{r.form_note ? `（${r.form_note}）` : ""}
+                      </span>
+                    )}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">{formatSellerStatusLabel(r.status)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-400">{r.category ?? "—"}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-zinc-300">
                     {formatRateDisplay(r.tap_rate)}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-zinc-300">
-                    {formatRateDisplay(r.tsp_rate)}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-zinc-500">
-                    {formatMeetingDate(r.last_meeting_date)}
-                  </td>
-                  <td className="max-w-[14rem] truncate px-3 py-2 text-xs text-zinc-400" title={r.last_meeting_note ?? ""}>
-                    {r.last_meeting_note ?? "—"}
-                  </td>
-                  <td className="max-w-[12rem] truncate px-3 py-2 text-xs text-zinc-400" title={r.discount_condition ?? ""}>
-                    {r.discount_condition ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">
-                    {r.seller_live_available ? "可" : "不可"}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-xs text-zinc-300">{formatSellerStatusLabel(r.status)}</td>
                   <td className="max-w-[12rem] truncate px-3 py-2 text-xs text-zinc-500" title={r.memo ?? ""}>
                     {r.memo ?? "—"}
                   </td>

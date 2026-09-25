@@ -1,4 +1,7 @@
 import { SellersAdminClient } from "@/app/(app)/admin/sellers/SellersAdminClient";
+import { ShopIdLinkPanel } from "@/app/(app)/admin/sellers/ShopIdLinkPanel";
+import { TspRateBulkPanel } from "@/app/(app)/admin/sellers/TspRateBulkPanel";
+import { fetchShopIdCandidateSources } from "@/lib/db/shop-id-candidate-queries";
 import { fetchSellersForAdmin } from "@/lib/db/sellers-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
@@ -7,7 +10,13 @@ import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
-export default async function SellersAdminPage() {
+export default async function SellersAdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ panel?: string }>;
+}) {
+  // ショップ実績の取込完了画面から ?panel=shop-id で遷移してくる
+  const { panel } = await searchParams;
   const supabase = await createClient();
   const {
     data: { user },
@@ -22,7 +31,23 @@ export default async function SellersAdminPage() {
     redirect("/dashboard");
   }
 
-  const result = await fetchSellersForAdmin(supabase);
+  const [result, candidates, aliasResult] = await Promise.all([
+    fetchSellersForAdmin(supabase),
+    fetchShopIdCandidateSources(supabase),
+    supabase.from("seller_shop_aliases").select("seller_id, alias_normalized"),
+  ]);
+
+  const linkSellers = result.data.map((r) => ({
+    id: r.id,
+    seller_name: r.seller_name,
+    shop_name: r.shop_name,
+    shop_id: r.shop_id,
+  }));
+
+  const aliases = (aliasResult.data ?? []).map((a) => ({
+    seller_id: String(a.seller_id),
+    alias_normalized: String(a.alias_normalized),
+  }));
 
   return (
     <div className="space-y-8">
@@ -51,6 +76,19 @@ export default async function SellersAdminPage() {
           </p>
         </div>
       ) : null}
+
+      <div className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          <TspRateBulkPanel rows={result.data} />
+          <ShopIdLinkPanel
+            sellers={linkSellers}
+            sources={candidates.sources}
+            sourceError={candidates.error}
+            aliases={aliases}
+            defaultOpen={panel === "shop-id"}
+          />
+        </div>
+      </div>
 
       <SellersAdminClient rows={result.data} />
 

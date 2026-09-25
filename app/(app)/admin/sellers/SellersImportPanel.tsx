@@ -5,7 +5,11 @@ import {
   previewSellerImportRowsAction,
 } from "@/app/actions/seller-import";
 import { buildSellerImportRowsFromObjects } from "@/lib/sellers/build-import-rows";
-import type { SellerImportPreviewRow, SellerImportSourceRow } from "@/lib/sellers/import-types";
+import type {
+  SellerImportPreviewResultCounts,
+  SellerImportPreviewRow,
+  SellerImportSourceRow,
+} from "@/lib/sellers/import-types";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
@@ -62,7 +66,7 @@ export function SellersImportPanel() {
   const [sourceType, setSourceType] = useState<"excel" | "csv">("excel");
   const [parsedRows, setParsedRows] = useState<SellerImportSourceRow[] | null>(null);
   const [preview, setPreview] = useState<SellerImportPreviewRow[] | null>(null);
-  const [counts, setCounts] = useState<{ total: number; new: number; update: number; error: number } | null>(
+  const [counts, setCounts] = useState<SellerImportPreviewResultCounts | null>(
     null,
   );
   const [message, setMessage] = useState<string | null>(null);
@@ -213,6 +217,68 @@ export function SellersImportPanel() {
                 </div>
               </div>
 
+              {/* 取込前に確認したい件数 */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">ファイル内重複</p>
+                  <p className="font-mono text-lg text-amber-200">{counts.duplicateInFile}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">辞退</p>
+                  <p className="font-mono text-lg text-red-200">{counts.declined}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">TAP連携のみ</p>
+                  <p className="font-mono text-lg text-red-200">{counts.tapOnly}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">要確認</p>
+                  <p className="font-mono text-lg text-amber-200">{counts.needsReview}</p>
+                </div>
+              </div>
+
+              {/* 自動統合しなかった重複候補 */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">メールのみ一致</p>
+                  <p className="font-mono text-lg text-sky-300">{counts.emailOnly}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">電話のみ一致</p>
+                  <p className="font-mono text-lg text-sky-300">{counts.phoneOnly}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">同一会社・別SHOP</p>
+                  <p className="font-mono text-lg text-sky-300">{counts.sameCompanyOtherShop}</p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase text-zinc-500">同一SHOP・別会社</p>
+                  <p className="font-mono text-lg text-sky-300">{counts.sameShopOtherCompany}</p>
+                </div>
+              </div>
+
+              <p className="rounded-lg border border-sky-500/25 bg-sky-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-sky-100">
+                1ショップ = 1 seller として扱います。同一と確定するのは
+                <span className="font-semibold"> 会社名＋SHOP名が一致 </span>
+                （または Shop ID 一致）の場合だけです。
+                メール・電話だけの一致では自動統合せず、上の件数と下の表の「重複候補」列に警告として表示します。
+              </p>
+
+              {counts.conflict > 0 ? (
+                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">
+                  同一セラー内で連絡先情報が競合しています（{counts.conflict} 件）。
+                  この列は後の行の値で上書きされ、前の行の値は残りません。
+                  下の表の「要確認」列でどちらを残すか確認してください。
+                </p>
+              ) : null}
+
+              <p className="text-[11px] leading-relaxed text-zinc-500">
+                辞退は停止状態で登録し、辞退・TAP連携のみ はTSP請求の対象外になります。
+                契約料率・Shop ID は登録フォームに無いため、再取込で消えることはありません。
+                後の行が空欄の列は既存の値をそのまま残します（空欄で情報を消しません）。
+                契約書ステータスは「締結完了 → 送付済み」のように後退させません。
+              </p>
+
               <div className="overflow-x-auto rounded-lg border border-zinc-800">
                 <table className="min-w-[720px] w-full border-collapse text-left text-sm">
                   <thead>
@@ -225,6 +291,9 @@ export function SellersImportPanel() {
                       <th className="px-3 py-2">メール</th>
                       <th className="px-3 py-2">取込</th>
                       <th className="px-3 py-2">備考</th>
+                      <th className="px-3 py-2">要確認（上書きで失われる値）</th>
+                      <th className="px-3 py-2">重複候補（自動統合しない）</th>
+                      <th className="px-3 py-2">後退を防いだ項目</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -247,6 +316,24 @@ export function SellersImportPanel() {
                         <td className="px-3 py-2">{statusBadge(r.status)}</td>
                         <td className="max-w-[14rem] truncate px-3 py-2 text-xs text-red-300/90" title={r.errorMessage}>
                           {r.errorMessage ?? "—"}
+                        </td>
+                        <td
+                          className="max-w-[20rem] truncate px-3 py-2 text-xs text-amber-200/90"
+                          title={r.conflictMessage}
+                        >
+                          {r.conflictMessage ?? "—"}
+                        </td>
+                        <td
+                          className="max-w-[20rem] truncate px-3 py-2 text-xs text-sky-200/90"
+                          title={r.matchWarning}
+                        >
+                          {r.matchWarning ?? "—"}
+                        </td>
+                        <td
+                          className="max-w-[20rem] truncate px-3 py-2 text-xs text-emerald-200/90"
+                          title={r.regressionMessage}
+                        >
+                          {r.regressionMessage ?? "—"}
                         </td>
                       </tr>
                     ))}
