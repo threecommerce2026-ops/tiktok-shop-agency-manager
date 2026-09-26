@@ -135,6 +135,13 @@ export function PaymentBatchClient({
     detail.totalsMatchBatch &&
     Math.abs(breakdownTotal - batch.paymentAmount) <= 0.005;
 
+  /*
+    紹介制度報酬を含んでいるのは、代理店支払へ合算していた旧仕様の支払明細だけ。
+    新しい支払明細には入らないので、実際に明細がある場合だけ表示する。
+    過去の履歴は隠さない。
+  */
+  const hasLegacyReferral = detail.referralBreakdown.creators.length > 0;
+
   return (
     <div className="space-y-6">
       <div>
@@ -178,12 +185,19 @@ export function PaymentBatchClient({
                 {yen(detail.agencyRewardAmount)}
               </p>
             </div>
-            <div>
-              <p className="text-[11px] text-zinc-500">紹介制度報酬</p>
-              <p className="mt-0.5 font-mono text-base font-semibold text-violet-200">
-                {yen(detail.referralRewardAmount)}
-              </p>
-            </div>
+            {/*
+              代理店へ支払うのは代理店分配報酬だけ。
+              紹介制度報酬が入っているのは旧仕様で作られた支払明細だけなので、
+              実際に含まれているときだけ「旧仕様」として出す（履歴を隠さない）。
+            */}
+            {hasLegacyReferral ? (
+              <div>
+                <p className="text-[11px] text-amber-300">旧仕様：紹介制度報酬</p>
+                <p className="mt-0.5 font-mono text-base font-semibold text-violet-200">
+                  {yen(detail.referralRewardAmount)}
+                </p>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -456,17 +470,26 @@ export function PaymentBatchClient({
         accent="sky"
       />
 
-      <RewardBreakdownSection
-        breakdown={detail.referralBreakdown}
-        title="紹介制度報酬"
-        totalAmount={detail.referralRewardAmount}
-        baseLabel="紹介計算基準額"
-        baseHint="紹介制度報酬の計算対象となる成果報酬ベースです。"
-        rateLabel="紹介率"
-        amountLabel="紹介制度報酬"
-        amountHint="紹介計算基準額に紹介率を適用した報酬です。"
-        accent="violet"
-      />
+      {hasLegacyReferral ? (
+        <>
+          <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[11px] leading-relaxed text-amber-100">
+            <span className="font-semibold">旧仕様の支払明細です。</span>
+            現在の業務ルールでは紹介制度報酬を代理店へ支払いません。
+            この明細は紹介制度報酬を含んでいた当時の記録として表示しています。
+          </p>
+          <RewardBreakdownSection
+            breakdown={detail.referralBreakdown}
+            title="旧仕様：紹介制度報酬"
+            totalAmount={detail.referralRewardAmount}
+            baseLabel="紹介計算基準額"
+            baseHint="紹介制度報酬の計算対象となる成果報酬ベースです。"
+            rateLabel="紹介率"
+            amountLabel="紹介制度報酬"
+            amountHint="紹介計算基準額に紹介率を適用した報酬です。現在は代理店へ支払いません。"
+            accent="violet"
+          />
+        </>
+      ) : null}
 
       <section className="rounded-2xl border border-white/[0.08] bg-surface-1/50 px-4 py-4 sm:px-6">
         <h2 className="text-sm font-semibold text-zinc-200">振込予定額の内訳</h2>
@@ -475,10 +498,12 @@ export function PaymentBatchClient({
             <dt className="text-zinc-400">代理店分配報酬</dt>
             <dd className="font-mono text-zinc-100">{yen(detail.agencyRewardAmount)}</dd>
           </div>
-          <div className="flex items-center justify-between gap-4">
-            <dt className="text-zinc-400">＋ 紹介制度報酬</dt>
-            <dd className="font-mono text-zinc-100">{yen(detail.referralRewardAmount)}</dd>
-          </div>
+          {hasLegacyReferral ? (
+            <div className="flex items-center justify-between gap-4">
+              <dt className="text-amber-300">＋ 旧仕様：紹介制度報酬</dt>
+              <dd className="font-mono text-zinc-100">{yen(detail.referralRewardAmount)}</dd>
+            </div>
+          ) : null}
           <div className="flex items-center justify-between gap-4 border-t border-white/[0.08] pt-2">
             <dt className="font-semibold text-zinc-200">＝ 振込予定額</dt>
             <dd className="font-mono text-lg font-bold text-zinc-50">
@@ -487,7 +512,8 @@ export function PaymentBatchClient({
           </div>
         </dl>
         <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">
-          代理店分配報酬は TikTok が注文明細単位で算出した分配実額（AP）の合計です。
+          代理店へ支払うのは代理店分配報酬だけです。紹介制度報酬は代理店へは支払いません。
+          代理店分配報酬は TikTok が注文明細単位で算出した分配実額（AP）の合計で、
           THREE 側で「分配計算基準額 × 分配率」を掛け直して作り直してはいません。
           TAP収益はどちらにも含まれません。
         </p>

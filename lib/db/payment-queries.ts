@@ -3,7 +3,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchAllFrom } from "@/lib/db/paged-select";
 import { sumAgencyAmounts } from "@/lib/agency/agency-reward-engine";
 import {
-  REFERRAL_PAYOUT_THRESHOLD_YEN,
   resolveRewardItemAmount,
   sumReferralAmounts,
 } from "@/lib/referrals/referral-reward-engine";
@@ -37,12 +36,15 @@ import {
   「対象月時点の年初来累積スナップショット」で行をまたいで重複するため、
   このモジュールでは金額の根拠として一切使わない。
 
-  ■ 支払先は代理店に一本化する
-  紹介者は独立した支払先ではない。referrers.agency_id が指す代理店へ
-  紹介者報酬を合算し、代理店単位で1行にまとめる。会計上の報酬種別は
-  agencyRewardAmount / referralRewardAmount として保持する。
-  agency_id が未設定の紹介者だけ従来どおり紹介者の行として出し、
-  referrer_agency_unassigned で保留する（名前から推測して寄せない）。
+  ■ 代理店へ支払うのは代理店分配報酬だけ
+  紹介制度報酬は代理店へ支払わない。紹介者が代理店に所属していることと、
+  その紹介制度報酬を代理店へ支払うことは別の話。
+  代理店行の未払残高・支払予定額は agency_reward_items だけで構成する。
+
+  ■ 紹介制度報酬は当面支払わない
+  referral_reward_items は会計・計算履歴として保持する。支払側が claim
+  しないことで「未払い・支払対象外」を表すため、代理店支払の候補にも
+  紹介者単独の候補にも出さない。金額は参考値として集計するだけ。
 
   ■ 報酬計算はしない
   既存 Finance Engine が確定させた明細を読み、支払状態ごとに束ねるだけ。
@@ -166,7 +168,12 @@ export type PaymentOverview = {
     /** 今回支払予定総額（draft / approved / processing の合計） */
     scheduledAmount: number;
     scheduledBatchCount: number;
+    /** 代理店へ支払う分（代理店分配報酬のみ） */
     agencyUnpaidAmount: number;
+    /**
+     * 紹介制度報酬の参考値。代理店へは支払わないため、
+     * 支払予定額・支払可能額・振込保留額には含まれない。
+     */
     referrerUnpaidAmount: number;
     holdAmount: number;
     holdCount: number;
@@ -434,41 +441,21 @@ export async function fetchPaymentOverview(
   }
 
   /*
-    紹介者報酬は帰属先代理店の行へ合算する。
-    帰属先の判定は referrers.agency_id のみ。名前では寄せない。
-    agency_id が未設定の紹介者だけ従来どおり紹介者の行として残す。
+    紹介制度報酬は代理店の支払予定額へ合算しない。
+    代理店へ支払うのは代理店分配報酬だけなので、代理店行の accumulator へは
+    一切足さない。紹介者の行としても支払候補には出さない（当面支払わないため）。
+
+    金額は「代理店へは支払わない紹介制度報酬」の参考値としてだけ集計する。
   */
-  const referralAcc = new Map<string, PayeeAccumulator>();
+  let referralReferenceAmount = 0;
 
   for (const item of referralItems.data) {
-    const value = resolveRewardItemAmount(item);
-    const referrerMeta = referrerById.get(item.referrer_id);
-    const mergeAgencyId = referrerMeta?.agencyId ?? null;
-
-    const acc = mergeAgencyId
-      ? agencyAcc.get(mergeAgencyId) ?? createAccumulator()
-      : referralAcc.get(item.referrer_id) ?? createAccumulator();
-
-    if (item.is_reward_target) {
-      acc.gross.push(value);
-      if (item.is_paid) acc.paid.push(value);
-      else if (item.payment_batch_id != null) acc.claimed.push(value);
-    }
-
-    if (isClaimable(item) && inClaimRange(item.target_month)) {
-      acc.claimable.push(value);
-      acc.referralClaimable.push(value);
-      acc.itemCount += 1;
-      acc.creators.add(item.creator_id);
-      trackMonth(acc, item.target_month);
-      if (!(value > 0)) acc.hasUnconfirmedReward = true;
-      if (mergeAgencyId) acc.referrers.add(item.referrer_id);
-      else acc.hasUnassignedReferrerAgency = true;
-    }
-
-    if (mergeAgencyId) agencyAcc.set(mergeAgencyId, acc);
-    else referralAcc.set(item.referrer_id, acc);
+    if (!item.is_reward_target) continue;
+    if (!isClaimable(item) || !inClaimRange(item.target_month)) continue;
+    referralReferenceAmount += resolveRewardItemAmount(item);
   }
+
+  referralReferenceAmount = sumReferralAmounts([referralReferenceAmount]);
 
   // ---- 支払明細 -------------------------------------------------------------
   const batches: PaymentBatchSummary[] = (batchesResult.data ?? []).map((row) => {
@@ -529,8 +516,12 @@ export async function fetchPaymentOverview(
       claimedAmount: sum(acc.claimed),
       unpaidAmount,
       agencyRewardAmount: sum(acc.agencyClaimable),
-      referralRewardAmount: sum(acc.referralClaimable),
-      referrerCount: acc.referrers.size,
+      /*
+        代理店へは紹介制度報酬を支払わないため常に 0。
+        履歴として紹介報酬を含む旧明細を見るときは支払明細の詳細を使う。
+      */
+      referralRewardAmount: 0,
+      referrerCount: 0,
       itemCount: acc.itemCount,
       creatorCount: acc.creators.size,
       thresholdAmount,
@@ -547,18 +538,10 @@ export async function fetchPaymentOverview(
     );
   }
 
-  for (const [referrerId, acc] of referralAcc) {
-    rows.push(
-      buildRow(
-        "referrer",
-        referrerId,
-        acc,
-        referrerById.get(referrerId),
-        sumReferralAmounts,
-        REFERRAL_PAYOUT_THRESHOLD_YEN,
-      ),
-    );
-  }
+  /*
+    紹介者の行は作らない。紹介制度報酬は当面支払わないため、支払候補にも
+    振込保留にも出さない。金額は referralReferenceAmount で参考表示する。
+  */
 
   rows.sort(
     (a, b) =>
@@ -611,15 +594,14 @@ export async function fetchPaymentOverview(
       ),
       scheduledBatchCount: scheduledBatches.length,
       /*
-        支払先は代理店へ統合したが、この2つのKPIは「報酬種別」の内訳を
-        表す。支払先の束ね方が変わっても会計上の内訳は保つ。
+        代理店の支払予定額は代理店分配報酬だけ。
+        referralReferenceAmount は「代理店へは支払わない紹介制度報酬」の
+        参考値で、支払予定額・支払可能額・振込保留額には一切入らない。
       */
       agencyUnpaidAmount: sumAgencyAmounts(
         rows.map((row) => row.agencyRewardAmount),
       ),
-      referrerUnpaidAmount: sumReferralAmounts(
-        rows.map((row) => row.referralRewardAmount),
-      ),
+      referrerUnpaidAmount: referralReferenceAmount,
       holdAmount: sumAgencyAmounts(holdRows.map((row) => row.unpaidAmount)),
       holdCount: holdRows.length,
       payeeCount: rows.filter((row) => row.isPayable).length,

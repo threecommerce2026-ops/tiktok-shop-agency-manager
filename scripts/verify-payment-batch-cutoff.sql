@@ -12,6 +12,8 @@
   ・締め月を迂回する引数経路が残っていない
   ・未来月・不正な YYYY-MM を拒否する
   ・支払明細に締め月が保存され、後から判定できる
+  ・代理店の支払明細は代理店分配報酬だけで構成される
+    （紹介制度報酬は代理店へ支払わないので claim されない）
 */
 
 \set ON_ERROR_STOP on
@@ -195,9 +197,9 @@ begin
     into v_cnt, v_amt, v_cut, v_end
     from public.payment_batches where id = v_batch;
 
-  -- 代理店 100+200=300 / 紹介 10.50+20.25+5.30=36.05 → 5件 / 336.05
-  perform t_check(1, 'cutoff=2026-07 で7月までを claim（5件 / 336.05円）',
-    v_cnt = 5 and v_amt = 336.05, format('件数=%s 金額=%s', v_cnt, v_amt));
+  -- 代理店分配報酬のみ 100+200=300 → 2件 / 300.00（紹介報酬は claim しない）
+  perform t_check(1, 'cutoff=2026-07 で7月までの代理店分配報酬だけを claim（2件 / 300.00円）',
+    v_cnt = 2 and v_amt = 300.00, format('件数=%s 金額=%s', v_cnt, v_amt));
 
   perform t_check(2, '8月の代理店報酬は claim されない',
     (select payment_batch_id from public.agency_reward_items where source_row_key='ct-a-08') is null, null);
@@ -206,20 +208,21 @@ begin
     (select count(*) from public.referral_reward_items
       where source_row_key in ('ct-r1-08','ct-r2-08') and payment_batch_id is not null) = 0, null);
 
-  perform t_check(4, '代理店報酬と紹介報酬に同じ cutoff が効く',
-    (select max(target_month) from public.agency_reward_items where payment_batch_id = v_batch) = '2026-07'
-    and (select max(target_month) from public.referral_reward_items where payment_batch_id = v_batch) = '2026-07', null);
+  perform t_check(4, '代理店分配報酬に cutoff が効く（最大月が締め月）',
+    (select max(target_month) from public.agency_reward_items where payment_batch_id = v_batch) = '2026-07', null);
 
-  perform t_check(5, '複数referrer → 1 agency が同じ明細に入る',
-    (select count(distinct referrer_id) from public.referral_reward_items where payment_batch_id = v_batch) = 2, null);
+  perform t_check(5, '紹介制度報酬は代理店明細へ一切入らない',
+    (select count(*) from public.referral_reward_items where payment_batch_id is not null) = 0, null);
+
+  perform t_check(501, '紹介制度報酬は変更されない（記録として保持）',
+    (select count(*) from public.referral_reward_items
+      where is_reward_target and not is_paid and payout_id is null and payment_batch_id is null) = 5, null);
 
   perform t_check(12, '支払明細に締め対象月が保存される', v_cut = '2026-07', v_cut);
   perform t_check(17, 'period_end_month = cutoff_month', v_end = v_cut, format('end=%s cutoff=%s', v_end, v_cut));
 
-  perform t_check(13, 'CSV対象（batch集計）と claim 内容が一致',
-    v_amt = (select coalesce(sum(reward_amount),0) from public.agency_reward_items where payment_batch_id = v_batch)
-          + (select coalesce(sum(coalesce(adjusted_reward_amount,reward_amount,0)),0)
-               from public.referral_reward_items where payment_batch_id = v_batch), null);
+  perform t_check(13, 'CSV対象（batch集計）と claim 内容が一致（代理店分配報酬のみ）',
+    v_amt = (select coalesce(sum(reward_amount),0) from public.agency_reward_items where payment_batch_id = v_batch), null);
 end $blk$;
 
 -- =========================================================================
@@ -245,14 +248,15 @@ begin
 
   v_batch := public.claim_payment_batch_items('agency','c0a00001-0000-4000-8000-000000000001','2026-07');
   perform t_check(11, 'release 後に同じ cutoff で再作成できる',
-    (select item_count from public.payment_batches where id = v_batch) = 5, null);
+    (select item_count from public.payment_batches where id = v_batch) = 2, null);
 
   -- TEST 3 準備: 7月分を paid にする
   perform public.approve_payment_batch(v_batch);
   perform public.complete_payment_batch(v_batch, null, 'T3準備');
-  perform t_check(8, '7月分が支払済みになる',
-    (select count(*) from public.agency_reward_items where payment_batch_id = v_batch and is_paid) = 2
-    and (select count(*) from public.referral_reward_items where payment_batch_id = v_batch and is_paid) = 3, null);
+  perform t_check(8, '7月分の代理店分配報酬が支払済みになる',
+    (select count(*) from public.agency_reward_items where payment_batch_id = v_batch and is_paid) = 2, null);
+  perform t_check(801, '紹介制度報酬は支払済みにならない',
+    (select count(*) from public.referral_reward_items where is_paid) = 0, null);
   perform t_check(10, '支払済み明細に payout_id が付く',
     (select count(*) from public.agency_reward_items where payment_batch_id = v_batch and payout_id is null) = 0, null);
 end $blk$;
@@ -269,14 +273,12 @@ begin
   select item_count, payment_amount into v_cnt, v_amt
     from public.payment_batches where id = v_batch;
 
-  -- 代理店 900 / 紹介 450.00 + 100.00 = 550.00 → 3件 / 1450.00
-  perform t_check(3, '7月paid済みなら cutoff=2026-08 で8月だけ（3件 / 1450.00円）',
-    v_cnt = 3 and v_amt = 1450.00, format('件数=%s 金額=%s', v_cnt, v_amt));
+  -- 代理店分配報酬のみ 900 → 1件 / 900.00
+  perform t_check(3, '7月paid済みなら cutoff=2026-08 で8月の代理店分配報酬だけ（1件 / 900.00円）',
+    v_cnt = 1 and v_amt = 900.00, format('件数=%s 金額=%s', v_cnt, v_amt));
 
-  select least(
-    (select min(target_month) from public.agency_reward_items where payment_batch_id = v_batch),
-    (select min(target_month) from public.referral_reward_items where payment_batch_id = v_batch)
-  ) into v_min;
+  select min(target_month) into v_min
+    from public.agency_reward_items where payment_batch_id = v_batch;
   perform t_check(301, '8月より前の月が混ざらない', v_min = '2026-08', v_min);
 
   perform t_check(302, '締め対象月が 2026-08 で保存される',

@@ -1,5 +1,14 @@
 /*
-  代理店単位への支払統合の検証（使い捨てDB専用）。
+  代理店への支払は「代理店分配報酬のみ」であることの検証（使い捨てDB専用）。
+
+  ■ 業務ルール
+  代理店へ支払うのは代理店分配報酬（agency_reward_items）だけ。
+  紹介者が代理店に所属していること（referrers.agency_id）と、
+  その紹介制度報酬を代理店へ支払うことは別の話。
+  紹介制度報酬は当面支払わず、会計・計算履歴として保持する。
+
+  かつては agency batch へ紹介制度報酬も合算していた。このスイートは
+  その合算が復活しないことを守る回帰テストでもある。
 
   ■ 本番では実行しない
   実データを INSERT / UPDATE する。scratch DB に本番スキーマの最小再現と
@@ -8,11 +17,12 @@
     psql -d merge_test -f scripts/verify-payment-batch-agency-merge.sql
 
   ■ 何を守っているか
-  ・代理店の支払明細に、帰属する紹介者の紹介報酬が合算される
-  ・二重支払い防止の4条件を紹介報酬側にも適用している
+  ・代理店の支払明細は代理店分配報酬だけで構成される
+  ・紹介制度報酬は claim されず、値も変更されない
+  ・二重支払い防止の4条件
   ・代理店へ帰属済みの紹介者は単独明細を作れない
   ・銀行口座は代理店側だけで足りる
-  ・報酬種別（agency / referral）は失われない
+  ・取消時は旧明細の紹介報酬も解放できる（release は両テーブル対応）
 */
 
 \set ON_ERROR_STOP on
@@ -179,17 +189,20 @@ begin
 end $blk$;
 
 -- =========================================================================
--- TEST 2: 紹介報酬のみ（代理店報酬 0 件でも代理店明細が作れる）
+-- TEST 2: 代理店分配報酬が無い代理店は明細を作れない（紹介報酬だけでは作らない）
 -- =========================================================================
 do $blk$
-declare v_batch uuid; v_cnt int; v_amt numeric;
+declare v_err text;
 begin
-  v_batch := public.claim_payment_batch_items('agency','a0000005-0000-4000-8000-000000000005','2026-03','2026-01',0,'T2');
-  select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
-  perform t_check(2, '紹介報酬のみ: 1件 / 80.00円', v_cnt = 1 and v_amt = 80.00,
-                  format('件数=%s 金額=%s', v_cnt, v_amt));
-  perform t_check(202, '紹介報酬がagency明細へ紐付く',
-    (select count(*) from public.referral_reward_items where payment_batch_id = v_batch) = 1, null);
+  begin
+    perform public.claim_payment_batch_items('agency','a0000005-0000-4000-8000-000000000005','2026-03','2026-01',0,'T2');
+    v_err := '(例外が出なかった)';
+  exception when others then v_err := sqlerrm;
+  end;
+  perform t_check(2, '紹介報酬しか無い代理店は支払明細を作れない',
+    v_err like '%未払い明細がありません%', v_err);
+  perform t_check(202, '紹介報酬は代理店明細へ紐付かない',
+    (select payment_batch_id from public.referral_reward_items where source_row_key='mg-r6-1') is null, null);
 end $blk$;
 
 -- =========================================================================
@@ -201,12 +214,13 @@ begin
   v_batch := public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2026-03','2026-01',0,'T3');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
 
-  -- 代理店 100+200=300 / 紹介 10.50+20.25+5.30=36.05 → 5件 / 336.05
-  perform t_check(3, '代理店+紹介の合算: 5件 / 336.05円', v_cnt = 5 and v_amt = 336.05,
+  -- 代理店分配報酬のみ 100+200=300 → 2件 / 300.00
+  perform t_check(3, '代理店分配報酬だけを claim: 2件 / 300.00円', v_cnt = 2 and v_amt = 300.00,
                   format('件数=%s 金額=%s', v_cnt, v_amt));
 
-  perform t_check(4, '複数referrer→同一agency: 2名分が同じ明細へ',
-    (select count(distinct referrer_id) from public.referral_reward_items where payment_batch_id = v_batch) = 2, null);
+  -- 除外条件テスト用の mg-r1-batch は別の（取消済み）batchを指しているので対象外
+  perform t_check(4, '帰属する紹介者が複数いても紹介報酬は入らない',
+    (select count(*) from public.referral_reward_items where payment_batch_id = v_batch) = 0, null);
 
   perform t_check(8, 'is_paid=true はclaimされない',
     (select payment_batch_id from public.agency_reward_items where source_row_key='mg-a1-paid') is null
@@ -220,14 +234,18 @@ begin
     (select payment_batch_id from public.agency_reward_items where source_row_key='mg-a1-nottarget') is null
     and (select payment_batch_id from public.referral_reward_items where source_row_key='mg-r1-nottarget') is null, null);
 
-  perform t_check(14, '紹介者側の口座が未登録でもholdにならない',
+  perform t_check(14, '代理店の口座だけで支払明細が作れる（紹介者の口座は不要）',
     (select count(*) from public.referrers r
       where r.id in ('b0000001-0000-4000-8000-000000000001','b0000002-0000-4000-8000-000000000002')
         and coalesce(btrim(r.bank_name),'') = '') = 2, null);
 
-  perform t_check(17, '報酬種別の内訳が追跡できる（代理店2 / 紹介3）',
+  perform t_check(17, '支払明細は代理店分配報酬だけ（代理店2 / 紹介0）',
     (select count(*) from public.agency_reward_items where payment_batch_id = v_batch) = 2
-    and (select count(*) from public.referral_reward_items where payment_batch_id = v_batch) = 3, null);
+    and (select count(*) from public.referral_reward_items where payment_batch_id = v_batch) = 0, null);
+
+  perform t_check(1701, '紹介制度報酬の値は一切変更されない',
+    (select count(*) from public.referral_reward_items
+      where is_reward_target and not is_paid and payout_id is null and payment_batch_id is null) = 7, null);
 
   perform t_check(16, 'CSVは代理店単位1振込（payment_batches 1行）',
     (select count(*) from public.payment_batches where id = v_batch) = 1, null);
@@ -272,26 +290,29 @@ begin
   perform t_check(10, 'claim→approve→processing→complete が通る', v_status = 'paid', v_status);
 
   select count(*) into v_ag_paid from public.agency_reward_items   where payment_batch_id = v_batch and is_paid;
-  select count(*) into v_rf_paid from public.referral_reward_items where payment_batch_id = v_batch and is_paid;
-  perform t_check(1301, '代理店の口座だけで紹介報酬まで支払済みになる',
-    v_ag_paid = 2 and v_rf_paid = 3, format('agency=%s referral=%s', v_ag_paid, v_rf_paid));
+  -- mg-r1-paid / mg-r1-payout は除外条件テスト用のフィクスチャなので対象外
+  select count(*) into v_rf_paid from public.referral_reward_items
+   where is_paid and source_row_key <> 'mg-r1-paid';
+  perform t_check(1301, '代理店分配報酬だけが支払済みになる',
+    v_ag_paid = 2 and v_rf_paid = 0, format('agency=%s referral=%s', v_ag_paid, v_rf_paid));
 
-  perform t_check(1302, '紹介報酬にも payout_id が付く',
-    (select count(*) from public.referral_reward_items where payment_batch_id = v_batch and payout_id is null) = 0, null);
+  perform t_check(1302, '紹介報酬に payout_id は付かない',
+    (select count(*) from public.referral_reward_items
+      where payout_id is not null and source_row_key <> 'mg-r1-payout') = 0, null);
 
-  -- 他の検証スクリプトのデータと混ざらないよう、自分のフィクスチャだけを見る
+  -- 紹介報酬を支払っていないので生涯上限の累計は進まない
   select coalesce(sum(lifetime_paid_amount), 0) into v_life
     from public.creator_referrals
    where referrer_id in ('b0000001-0000-4000-8000-000000000001',
                          'b0000002-0000-4000-8000-000000000002');
-  perform t_check(1303, '生涯上限の累計支払額が進む（30.75 + 5.30）',
-    v_life = 36.05, format('累計=%s', v_life));
+  perform t_check(1303, '紹介報酬未払いなので生涯上限の累計は進まない',
+    v_life = 0, format('累計=%s', v_life));
 
   perform t_check(1304, 'batch外のreward itemを巻き込まない',
     (select count(*) from public.agency_reward_items
       where source_row_key in ('mg-a2-1','mg-a3-1','mg-a4-1') and is_paid) = 0
     and (select count(*) from public.referral_reward_items
-      where source_row_key in ('mg-r4-1','mg-r5-1','mg-r6-1') and is_paid) = 0, null);
+          where is_paid and source_row_key <> 'mg-r1-paid') = 0, null);
 
   perform t_check(1305, '支払済みを含む明細は解放できない',
     (select count(*) from public.payment_batch_audit_logs where batch_id = v_batch and action='paid') = 1, null);

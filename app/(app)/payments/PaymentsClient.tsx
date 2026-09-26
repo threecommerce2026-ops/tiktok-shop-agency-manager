@@ -319,10 +319,8 @@ export function PaymentsClient({
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <Kpi
           label={`締め対象（${formatCutoffLabel(cutoffMonth)}まで）`}
-          value={yen(
-            overview.totals.agencyUnpaidAmount + overview.totals.referrerUnpaidAmount,
-          )}
-          hint="この画面の支払判断はすべてこの金額が基準です"
+          value={yen(overview.totals.agencyUnpaidAmount)}
+          hint="代理店分配報酬のみ。この画面の支払判断はすべてこの金額が基準です"
           tone="strong"
         />
         <Kpi
@@ -331,8 +329,17 @@ export function PaymentsClient({
           hint={`支払明細 ${overview.totals.scheduledBatchCount} 件（未振込）`}
           tone="strong"
         />
-        <Kpi label="代理店報酬 未払" value={yen(overview.totals.agencyUnpaidAmount)} />
-        <Kpi label="紹介報酬 未払" value={yen(overview.totals.referrerUnpaidAmount)} />
+        <Kpi
+          label="代理店分配報酬 未払"
+          value={yen(overview.totals.agencyUnpaidAmount)}
+          hint="代理店へ支払うのはこの金額だけです"
+        />
+        <Kpi
+          label="紹介制度報酬（支払対象外）"
+          value={yen(overview.totals.referrerUnpaidAmount)}
+          hint="代理店へは支払いません。支払予定額・支払可能額には含まれません"
+          tone="muted"
+        />
         <Kpi
           label="振込保留"
           value={yen(overview.totals.holdAmount)}
@@ -505,8 +512,7 @@ export function PaymentsClient({
                     <th className={`${th} text-right`}>発生額</th>
                     <th className={`${th} text-right`}>過去支払済</th>
                     <th className={`${th} text-right`}>支払予定中</th>
-                    <th className={`${th} text-right`}>代理店報酬</th>
-                    <th className={`${th} text-right`}>紹介報酬</th>
+                    <th className={`${th} text-right`}>代理店分配報酬</th>
                     <th className={`${th} text-right`}>未払残高</th>
                     <th className={`${th} text-right`}>今回支払額</th>
                     <th className={th}>振込先状態</th>
@@ -517,7 +523,7 @@ export function PaymentsClient({
                 <tbody>
                   {unpaidRows.length === 0 ? (
                     <tr>
-                      <td colSpan={14} className="px-4 py-10 text-center text-sm text-zinc-500">
+                      <td colSpan={13} className="px-4 py-10 text-center text-sm text-zinc-500">
                         該当する支払先がありません。
                       </td>
                     </tr>
@@ -576,23 +582,9 @@ export function PaymentsClient({
                           <td className={`${td} text-right font-mono text-indigo-200`}>
                             {row.claimedAmount > 0 ? yen(row.claimedAmount) : "—"}
                           </td>
-                          {/* 支払先は代理店へ統合するが、会計上の報酬種別は必ず見せる */}
+                          {/* 代理店へ支払うのは代理店分配報酬だけ */}
                           <td className={`${td} text-right font-mono text-zinc-300`}>
                             {row.agencyRewardAmount > 0 ? yen(row.agencyRewardAmount) : "—"}
-                          </td>
-                          <td className={`${td} text-right font-mono text-zinc-300`}>
-                            {row.referralRewardAmount > 0 ? (
-                              <>
-                                {yen(row.referralRewardAmount)}
-                                {row.referrerCount > 0 ? (
-                                  <div className="text-[10px] text-zinc-500">
-                                    紹介者 {row.referrerCount} 名
-                                  </div>
-                                ) : null}
-                              </>
-                            ) : (
-                              "—"
-                            )}
                           </td>
                           <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
                             {yen(row.unpaidAmount)}
@@ -676,8 +668,9 @@ export function PaymentsClient({
             <p className="text-[11px] leading-relaxed text-zinc-500">
               「未払残高」は、支払明細に組み入れていない明細だけの合計です。
               支払明細を作成すると、その分は「支払予定中」へ移り、未払残高から外れます。
-              支払先は代理店に一本化しており、代理店報酬とその代理店に帰属する
-              紹介報酬を合算して1回だけ振り込みます。
+              代理店へ支払うのは
+              <span className="font-semibold text-zinc-300">代理店分配報酬だけ</span>
+              です。紹介制度報酬は代理店へは支払わず、会計・計算履歴として保持しています。
               対象は締め対象月（{formatCutoffLabel(cutoffMonth)}）までの未払いだけです。
               二重に支払対象へ現れることはありません。
             </p>
