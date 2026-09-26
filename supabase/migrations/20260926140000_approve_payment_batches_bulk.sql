@@ -257,7 +257,16 @@ end;
 $fn$;
 
 -- ---------------------------------------------------------------------------
--- 権限。RPC は SECURITY DEFINER で、中で is_app_admin() を必ず確認している
+-- 権限
+--
+-- 関数は作成時に PUBLIC へ EXECUTE が付くので、先に落としてから付け直す。
+-- 既存の遷移系 RPC（approve / cancel / complete など）と同じ
+-- 「anon は不可 / authenticated のみ」に揃える。
+-- いずれも SECURITY DEFINER で、中で is_app_admin() を必ず確認している。
 -- ---------------------------------------------------------------------------
+
+-- 共通処理は直接呼ばせない（admin 判定を通さずに承認されないようにする）
 revoke all on function public.approve_one_payment_batch(uuid) from public, anon, authenticated;
-grant execute on function public.approve_payment_batches_bulk(uuid[]) to authenticated, service_role;
+
+revoke all on function public.approve_payment_batches_bulk(uuid[]) from public, anon;
+grant execute on function public.approve_payment_batches_bulk(uuid[]) to authenticated;

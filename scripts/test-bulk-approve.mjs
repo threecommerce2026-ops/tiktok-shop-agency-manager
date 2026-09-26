@@ -139,7 +139,23 @@ test("migration は関数定義と権限だけ", () => {
 
 test("共通処理は直接実行させない", () => {
   assert.match(MIGRATION, /revoke all on function public\.approve_one_payment_batch\(uuid\) from public, anon, authenticated/);
-  assert.match(MIGRATION, /grant execute on function public\.approve_payment_batches_bulk\(uuid\[\]\) to authenticated, service_role/);
+});
+
+test("一括承認は anon から実行できない（PUBLIC 既定を落としてから付け直す）", () => {
+  // 関数作成時に PUBLIC へ EXECUTE が付くので、revoke してから grant する
+  const revokeIdx = MIGRATION.indexOf(
+    "revoke all on function public.approve_payment_batches_bulk(uuid[]) from public, anon",
+  );
+  const grantIdx = MIGRATION.indexOf(
+    "grant execute on function public.approve_payment_batches_bulk(uuid[]) to authenticated",
+  );
+  assert.ok(revokeIdx >= 0, "PUBLIC/anon からの revoke が無い");
+  assert.ok(grantIdx > revokeIdx, "revoke より前に grant している");
+  // service_role へ明示的に付けない（既存の遷移系RPCと同じ）
+  assert.doesNotMatch(
+    MIGRATION,
+    /grant execute on function public\.approve_payment_batches_bulk\(uuid\[\]\) to authenticated, service_role/,
+  );
 });
 
 // =============================================================================
