@@ -17,6 +17,7 @@ import type {
   PaymentBatchDetail,
   PaymentRewardBreakdown,
 } from "@/lib/db/payment-queries";
+import { isStatementIssuableStatus } from "@/lib/payments/agency-statement";
 import { formatCutoffLabel } from "@/lib/payments/cutoff-month";
 import { BankStateBadge } from "@/components/payments/PayeeBankForm";
 import { PAYEE_KIND_LABEL } from "@/lib/payments/payable";
@@ -120,6 +121,12 @@ export function PaymentBatchClient({
   const canFail = canTransitionPaymentBatch(batch.status, "failed");
   const canCancel = canTransitionPaymentBatch(batch.status, "cancelled");
   const canExportCsv = batch.status === "approved" || batch.status === "processing";
+  /*
+    支払明細書は代理店向けの帳票。承認前の下書きは正式な書面として出さない。
+    金額が変わり得る段階のものを代理店へ渡すと根拠にならない。
+  */
+  const canIssueStatement =
+    batch.payeeKind === "agency" && isStatementIssuableStatus(batch.status);
 
   const amountMatches =
     Math.abs(detail.itemsTotalAmount - batch.paymentAmount) <= 0.005 &&
@@ -315,6 +322,17 @@ export function PaymentBatchClient({
                 {approvePending ? "承認中…" : "承認する（振込先を固定）"}
               </button>
             </form>
+          ) : null}
+
+          {canIssueStatement ? (
+            <Link
+              href={`/statements/agency/${batch.id}`}
+              target="_blank"
+              rel="noopener"
+              className="inline-flex min-h-[40px] items-center rounded-lg border border-white/[0.12] px-4 text-sm font-medium text-zinc-100 hover:bg-white/[0.06]"
+            >
+              支払明細書を表示（PDF）
+            </Link>
           ) : null}
 
           {canExportCsv ? (

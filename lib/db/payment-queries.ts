@@ -700,6 +700,11 @@ export type PaymentRewardMonthRow = {
   baseAmount: number;
   /** 代理店=agency_split_rate(%) / 紹介=reward_rate を % 化した値 */
   ratePct: number;
+  /**
+   * その月の明細に複数の率が混ざっているか。
+   * true のときは代表値を1つ出さず「複数」と表示する（平均を作らない）。
+   */
+  hasMixedRate: boolean;
   /** 代理店=reward_amount(AP実額) / 紹介=adjusted または reward_amount */
   rewardAmount: number;
   itemCount: number;
@@ -715,6 +720,8 @@ export type PaymentRewardCreatorGroup = {
   periodEndMonth: string;
   gmv: number;
   baseAmount: number;
+  /** 全期間で率が1つに定まるならその値。混在なら null */
+  ratePct: number | null;
   rewardAmount: number;
   itemCount: number;
   months: PaymentRewardMonthRow[];
@@ -1176,10 +1183,12 @@ function buildRewardBreakdown(
         gmv: sumAgencyAmounts(month.gmv),
         baseAmount: sumAgencyAmounts(month.base),
         /*
-          率は明細ごとに同じ想定。混在していたら最大値を出し、
-          金額は明細の実額合計なので率の表示に引きずられない。
+          率は明細ごとに同じ想定。混在していたら代表値を1つに丸めず
+          hasMixedRate で示す（平均を作ると根拠にならない）。
+          金額は明細の実額合計なので率の表示には影響されない。
         */
         ratePct: month.rates.size === 0 ? 0 : Math.max(...month.rates),
+        hasMixedRate: month.rates.size > 1,
         rewardAmount: sumAmounts(month.reward),
         itemCount: month.count,
       }))
@@ -1194,6 +1203,15 @@ function buildRewardBreakdown(
       periodEndMonth: months.at(-1)?.targetMonth ?? "",
       gmv: sumAgencyAmounts(months.map((m) => m.gmv)),
       baseAmount: sumAgencyAmounts(months.map((m) => m.baseAmount)),
+      /*
+        全期間で率が1つに定まるときだけ値を出す。
+        月内で混在、あるいは月ごとに違う場合は null（画面で「複数」と出す）。
+      */
+      ratePct:
+        months.some((m) => m.hasMixedRate) ||
+        new Set(months.map((m) => m.ratePct)).size > 1
+          ? null
+          : (months[0]?.ratePct ?? 0),
       rewardAmount: sumAmounts(months.map((m) => m.rewardAmount)),
       itemCount: months.reduce((total, m) => total + m.itemCount, 0),
       months,

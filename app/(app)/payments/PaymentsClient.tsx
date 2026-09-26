@@ -27,6 +27,7 @@ import {
   PAYMENT_HOLD_REASON_LABEL,
   type PayeeKind,
 } from "@/lib/payments/payable";
+import { isStatementIssuableStatus } from "@/lib/payments/agency-statement";
 import {
   PAYMENT_BATCH_STATUS_LABEL,
   isOpenPaymentBatchStatus,
@@ -280,6 +281,17 @@ export function PaymentsClient({
     .filter((batch) => batch.status === "approved" || batch.status === "processing")
     .map((batch) => batch.id);
 
+  /*
+    代理店へ渡す支払明細書。承認済み以降の代理店明細だけが対象。
+    実際の出力対象は帳票側でもう一度確かめる（ここは導線の出し分けだけ）。
+  */
+  const statementBatches = overview.batches.filter(
+    (batch) =>
+      batch.payeeKind === "agency" &&
+      batch.cutoffMonth === cutoffMonth &&
+      isStatementIssuableStatus(batch.status),
+  );
+
   const toggle = (key: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -508,6 +520,17 @@ export function PaymentsClient({
                 <h2 className="text-sm font-semibold text-zinc-200">
                   進行中の支払明細（{openBatches.length}）
                 </h2>
+                <div className="flex flex-wrap items-center gap-2">
+                {statementBatches.length > 0 ? (
+                  <Link
+                    href={`/statements/agency?cutoff=${cutoffMonth}`}
+                    target="_blank"
+                    rel="noopener"
+                    className="inline-flex min-h-[36px] items-center rounded-lg border border-white/[0.1] px-3 text-xs font-medium text-zinc-200 hover:bg-white/[0.06]"
+                  >
+                    支払明細書をまとめて表示（{statementBatches.length}件）
+                  </Link>
+                ) : null}
                 {exportableIds.length > 0 ? (
                   <form action={csvAction}>
                     {exportableIds.map((id) => (
@@ -524,6 +547,7 @@ export function PaymentsClient({
                     </button>
                   </form>
                 ) : null}
+                </div>
               </div>
               {/*
                 一括承認。選べるのは下書きの代理店明細だけ。
