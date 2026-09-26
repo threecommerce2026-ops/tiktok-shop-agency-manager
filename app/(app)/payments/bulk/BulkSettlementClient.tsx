@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useActionState, useState } from "react";
+import { formatCutoffLabel } from "@/lib/payments/cutoff-month";
 
 import {
   createPaymentBatchesBulkAction,
@@ -59,12 +60,17 @@ function Banner({
 }
 
 export function BulkSettlementClient({
-  defaultEndMonth,
+  cutoffMonth: initialCutoffMonth,
+  cutoffOptions,
+  cutoffError,
 }: {
-  defaultEndMonth: string;
+  /** 締め対象月。/payments から引き継ぐ */
+  cutoffMonth: string;
+  cutoffOptions: string[];
+  cutoffError: string | null;
 }) {
   const [startMonth, setStartMonth] = useState(DEFAULT_START_MONTH);
-  const [endMonth, setEndMonth] = useState(defaultEndMonth);
+  const [cutoffMonth, setCutoffMonth] = useState(initialCutoffMonth);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [previewState, previewAction, previewPending] = useActionState(
@@ -114,6 +120,19 @@ export function BulkSettlementClient({
         </p>
       </div>
 
+      {cutoffError ? (
+        <p
+          className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+          role="alert"
+        >
+          {cutoffError}
+          <br />
+          <span className="text-[11px]">
+            安全側の既定（{formatCutoffLabel(cutoffMonth)}）を選択しています。
+          </span>
+        </p>
+      ) : null}
+
       <form
         action={previewAction}
         className="flex flex-wrap items-end gap-3 rounded-xl border border-white/[0.08] bg-surface-1/60 p-4"
@@ -129,14 +148,19 @@ export function BulkSettlementClient({
           />
         </label>
         <label className="text-[11px] text-zinc-400">
-          締め月
-          <input
-            type="month"
-            name="end_month"
-            value={endMonth}
-            onChange={(event) => setEndMonth(event.target.value)}
+          締め対象月
+          <select
+            name="cutoff_month"
+            value={cutoffMonth}
+            onChange={(event) => setCutoffMonth(event.target.value)}
             className="mt-1 block min-h-[36px] rounded-lg border border-white/[0.1] bg-surface-1 px-3 text-xs text-zinc-100"
-          />
+          >
+            {cutoffOptions.map((month) => (
+              <option key={month} value={month}>
+                {formatCutoffLabel(month)}
+              </option>
+            ))}
+          </select>
         </label>
         <button
           type="submit"
@@ -201,7 +225,8 @@ export function BulkSettlementClient({
 
           <form action={createAction} className="space-y-3">
             <input type="hidden" name="start_month" value={preview.startMonth} />
-            <input type="hidden" name="end_month" value={preview.endMonth} />
+            {/* 実行時もサーバー/RPCで同じ締め対象月を再検証する */}
+            <input type="hidden" name="cutoff_month" value={preview.cutoffMonth} />
             {[...selected].map((key) => (
               <input key={key} type="hidden" name="payee_key" value={key} />
             ))}

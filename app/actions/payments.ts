@@ -2,6 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 
+import {
+  EARLIEST_CUTOFF_MONTH,
+  formatCutoffLabel,
+  isCutoffMonth,
+  currentMonthJst,
+} from "@/lib/payments/cutoff-month";
 import { requireAdminAction } from "@/lib/db/admin-access";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
@@ -97,6 +103,36 @@ function describeRpcError(message: string, code?: string | null): string {
   通常UIではそれらは referrer_agency_unassigned で保留されるため、
   ここへは到達しない。
 */
+/*
+  締め対象月の検証。
+
+  フロントの検証だけに依存しない。RPC 側でも同じ検証をしているが、
+  ここで弾いたほうが操作者に分かりやすいエラーを返せる。
+  不正な値を近い月へ勝手に丸めることはしない。
+*/
+function validateCutoff(
+  cutoffMonth: string,
+  startMonth: string,
+): string | null {
+  if (!isCutoffMonth(cutoffMonth)) {
+    return `締め対象月を YYYY-MM 形式で指定してください: ${cutoffMonth || "(未指定)"}`;
+  }
+  const current = currentMonthJst();
+  if (cutoffMonth > current) {
+    return `締め対象月に未来月は指定できません（指定 ${cutoffMonth} / 当月 ${current}）`;
+  }
+  if (cutoffMonth < EARLIEST_CUTOFF_MONTH) {
+    return `締め対象月は ${EARLIEST_CUTOFF_MONTH} 以降で指定してください`;
+  }
+  if (!isMonthKey(startMonth)) {
+    return "開始月を YYYY-MM 形式で指定してください";
+  }
+  if (startMonth > cutoffMonth) {
+    return "開始月が締め対象月より後になっています";
+  }
+  return null;
+}
+
 function thresholdFor(payeeKind: PayeeKind): number {
   return payeeKind === "referrer" ? REFERRAL_PAYOUT_THRESHOLD_YEN : 0;
 }
@@ -120,8 +156,13 @@ export async function createPaymentBatchAction(
 
   const payeeKind = readText(formData, "payee_kind");
   const payeeId = readText(formData, "payee_id");
-  const startMonth = readText(formData, "start_month");
-  const endMonth = readText(formData, "end_month");
+  /*
+    支払の上限は「締め対象月」だけで決める。
+    画面に出ている未払い明細の最終月（データ由来）を上限にしない。
+    そうしないと代理店ごとに締め月がばらつき、締めていない月まで入る。
+  */
+  const cutoffMonth = readText(formData, "cutoff_month");
+  const startMonth = readText(formData, "start_month") || EARLIEST_CUTOFF_MONTH;
   const memo = readText(formData, "memo") || null;
 
   if (!isPayeeKind(payeeKind)) {
@@ -130,18 +171,15 @@ export async function createPaymentBatchAction(
   if (!payeeId) {
     return { ok: false, error: "支払先を指定してください" };
   }
-  if (!isMonthKey(startMonth) || !isMonthKey(endMonth)) {
-    return { ok: false, error: "対象期間を YYYY-MM 形式で指定してください" };
-  }
-  if (endMonth < startMonth) {
-    return { ok: false, error: "対象期間の開始月が終了月より後になっています" };
-  }
+
+  const cutoffError = validateCutoff(cutoffMonth, startMonth);
+  if (cutoffError) return { ok: false, error: cutoffError };
 
   const { data, error } = await auth.supabase.rpc("claim_payment_batch_items", {
     p_payee_kind: payeeKind,
     p_payee_id: payeeId,
+    p_cutoff_month: cutoffMonth,
     p_period_start_month: startMonth,
-    p_period_end_month: endMonth,
     p_min_amount: thresholdFor(payeeKind),
     p_memo: memo,
   });
@@ -155,7 +193,7 @@ export async function createPaymentBatchAction(
   return {
     ok: true,
     batchId: (data as string) ?? undefined,
-    message: `支払明細を作成しました（${startMonth}〜${endMonth}）。まだ支払済みにはなっていません。`,
+    message: `支払明細を作成しました（${formatCutoffLabel(cutoffMonth)}締め）。まだ支払済みにはなっていません。`,
   };
 }
 
@@ -184,16 +222,13 @@ export async function createPaymentBatchesBulkAction(
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const startMonth = readText(formData, "start_month");
-  const endMonth = readText(formData, "end_month");
+  const cutoffMonth = readText(formData, "cutoff_month");
+  const startMonth = readText(formData, "start_month") || EARLIEST_CUTOFF_MONTH;
   const selectedKeys = new Set(readList(formData, "payee_key"));
 
-  if (!isMonthKey(startMonth) || !isMonthKey(endMonth)) {
-    return { ok: false, error: "対象期間を YYYY-MM 形式で指定してください" };
-  }
-  if (endMonth < startMonth) {
-    return { ok: false, error: "対象期間の開始月が終了月より後になっています" };
-  }
+  const cutoffError = validateCutoff(cutoffMonth, startMonth);
+  if (cutoffError) return { ok: false, error: cutoffError };
+
   if (selectedKeys.size === 0) {
     return { ok: false, error: "支払先を1件以上選択してください" };
   }
@@ -201,7 +236,7 @@ export async function createPaymentBatchesBulkAction(
   // 対象の再判定はサーバー側で必ずやり直す（画面の値を信用しない）
   const overview = await fetchPaymentOverview(getSupabaseAdmin(), {
     claimStartMonth: startMonth,
-    claimEndMonth: endMonth,
+    cutoffMonth,
   });
   if (overview.error) {
     return { ok: false, error: mapSupabaseErrorToJa(overview.error) };
@@ -234,10 +269,10 @@ export async function createPaymentBatchesBulkAction(
     const { error } = await auth.supabase.rpc("claim_payment_batch_items", {
       p_payee_kind: row.payeeKind,
       p_payee_id: row.payeeId,
+      p_cutoff_month: cutoffMonth,
       p_period_start_month: startMonth,
-      p_period_end_month: endMonth,
       p_min_amount: thresholdFor(row.payeeKind),
-      p_memo: `一括精算 ${startMonth}〜${endMonth}`,
+      p_memo: `一括精算 ${formatCutoffLabel(cutoffMonth)}締め`,
     });
 
     if (error) {
@@ -490,7 +525,8 @@ export type BulkSettlementPreviewResult =
   | {
       ok: true;
       startMonth: string;
-      endMonth: string;
+      /** 締め対象月。この月までの未払いだけが payable / held に入る */
+      cutoffMonth: string;
       payable: BulkSettlementPreviewRow[];
       held: BulkSettlementPreviewRow[];
       payableAmount: number;
@@ -510,24 +546,20 @@ export async function previewBulkSettlementAction(
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const startMonth = readText(formData, "start_month");
-  const endMonth = readText(formData, "end_month");
+  const cutoffMonth = readText(formData, "cutoff_month");
+  const startMonth = readText(formData, "start_month") || EARLIEST_CUTOFF_MONTH;
 
-  if (!isMonthKey(startMonth) || !isMonthKey(endMonth)) {
-    return { ok: false, error: "対象期間を YYYY-MM 形式で指定してください" };
-  }
-  if (endMonth < startMonth) {
-    return { ok: false, error: "対象期間の開始月が終了月より後になっています" };
-  }
+  const cutoffError = validateCutoff(cutoffMonth, startMonth);
+  if (cutoffError) return { ok: false, error: cutoffError };
 
   /*
-    選んだ期間の明細だけで集計し直す。
-    未払い一覧（全期間）の金額をそのまま出すと、実際に作られる
-    支払明細の金額とずれてしまう。
+    締め対象月までの明細だけで集計し直す。
+    全期間の未払いをそのまま出すと、実際に作られる支払明細の金額と
+    ずれてしまう（締めていない月が混ざる）。
   */
   const overview = await fetchPaymentOverview(getSupabaseAdmin(), {
     claimStartMonth: startMonth,
-    claimEndMonth: endMonth,
+    cutoffMonth,
   });
   if (overview.error) {
     return { ok: false, error: mapSupabaseErrorToJa(overview.error) };
@@ -557,7 +589,7 @@ export async function previewBulkSettlementAction(
   return {
     ok: true,
     startMonth,
-    endMonth,
+    cutoffMonth,
     payable,
     held,
     payableAmount: sum(payable),

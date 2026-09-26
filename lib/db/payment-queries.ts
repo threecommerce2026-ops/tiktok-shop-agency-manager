@@ -59,7 +59,7 @@ const REFERRAL_ITEM_COLUMNS =
   "id, target_month, referrer_id, creator_id, base_amount, reward_amount, adjusted_reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id";
 
 const BATCH_COLUMNS =
-  "id, payee_kind, agency_id, referrer_id, period_start_month, period_end_month, item_count, gross_amount, payment_amount, status, memo, failure_reason, created_at, approved_at, paid_at, paid_on, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_holder";
+  "id, payee_kind, agency_id, referrer_id, cutoff_month, period_start_month, period_end_month, item_count, gross_amount, payment_amount, status, memo, failure_reason, created_at, approved_at, paid_at, paid_on, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_holder";
 
 type AgencyItemRow = {
   id: string;
@@ -93,6 +93,8 @@ export type PaymentBatchSummary = {
   payeeKind: PayeeKind;
   payeeId: string;
   payeeName: string;
+  /** 締め対象月（YYYY-MM）。この月までの未払いを組み入れたことを表す */
+  cutoffMonth: string;
   periodStartMonth: string;
   periodEndMonth: string;
   itemCount: number;
@@ -264,6 +266,7 @@ function mapBatchRow(
       (payeeKind === "agency" ? row.agency_id : row.referrer_id) ?? "",
     ),
     payeeName,
+    cutoffMonth: String(row.cutoff_month ?? row.period_end_month ?? ""),
     periodStartMonth: String(row.period_start_month ?? ""),
     periodEndMonth: String(row.period_end_month ?? ""),
     itemCount: Number(row.item_count ?? 0),
@@ -297,7 +300,12 @@ export type PaymentOverviewOptions = {
    * 発生額・支払済額は全期間のまま（実績を欠けさせない）。
    */
   claimStartMonth?: string | null;
-  claimEndMonth?: string | null;
+  /**
+   * 締め対象月。この月までの未払い明細だけを集計する。
+   * 支払明細の claim 上限と同じ意味なので、画面の表示と実際に作られる
+   * 支払明細の内容が必ず一致する。
+   */
+  cutoffMonth?: string | null;
 };
 
 export async function fetchPaymentOverview(
@@ -305,7 +313,7 @@ export async function fetchPaymentOverview(
   options: PaymentOverviewOptions = {},
 ): Promise<PaymentOverview> {
   const claimStart = options.claimStartMonth ?? null;
-  const claimEnd = options.claimEndMonth ?? null;
+  const claimEnd = options.cutoffMonth ?? null;
 
   const inClaimRange = (targetMonth: string): boolean => {
     if (claimStart && targetMonth < claimStart) return false;
@@ -926,6 +934,7 @@ export type PaymentBatchCsvSource = {
   id: string;
   payeeKind: PayeeKind;
   payeeName: string;
+  cutoffMonth: string;
   periodStartMonth: string;
   periodEndMonth: string;
   paymentAmount: number;
@@ -948,7 +957,7 @@ export async function fetchPaymentBatchCsvSources(
   const { data, error } = await supabase
     .from("payment_batches")
     .select(
-      "id, payee_kind, agency_id, referrer_id, period_start_month, period_end_month, payment_amount, status, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
+      "id, payee_kind, agency_id, referrer_id, cutoff_month, period_start_month, period_end_month, payment_amount, status, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
     )
     .in("id", batchIds)
     .order("created_at", { ascending: true });
@@ -1001,6 +1010,7 @@ export async function fetchPaymentBatchCsvSources(
         payeeKind,
         payeeName: nameById.get(`${payeeKind}:${payeeId}`) ?? "（不明な支払先）",
         periodStartMonth: String(row.period_start_month ?? ""),
+        cutoffMonth: String(row.cutoff_month ?? row.period_end_month ?? ""),
         periodEndMonth: String(row.period_end_month ?? ""),
         paymentAmount: toAmount(row.payment_amount),
         status: String(row.status) as PaymentBatchStatus,

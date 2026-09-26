@@ -67,11 +67,11 @@ insert into public.creator_referrals (creator_id, referrer_id, lifetime_paid_amo
 
 -- 除外条件テスト用の既存レコード
 insert into public.agency_payouts (id, target_month, agency_id, total_reward_amount, threshold_amount, is_payable, status)
-values ('d0000001-0000-4000-8000-000000000001','2030-01','a0000001-0000-4000-8000-000000000001',0,0,true,'unpaid');
+values ('d0000001-0000-4000-8000-000000000001','2026-03','a0000001-0000-4000-8000-000000000001',0,0,true,'unpaid');
 insert into public.referral_payouts (id, target_month, referrer_id, total_reward_amount, threshold_amount, is_payable, status)
-values ('d0000002-0000-4000-8000-000000000002','2030-01','b0000001-0000-4000-8000-000000000001',0,1000,true,'unpaid');
-insert into public.payment_batches (id, payee_kind, agency_id, period_start_month, period_end_month, status)
-values ('e0000001-0000-4000-8000-000000000001','agency','a0000004-0000-4000-8000-000000000004','2030-01','2030-01','cancelled');
+values ('d0000002-0000-4000-8000-000000000002','2026-03','b0000001-0000-4000-8000-000000000001',0,1000,true,'unpaid');
+insert into public.payment_batches (id, payee_kind, agency_id, cutoff_month, period_start_month, period_end_month, status)
+values ('e0000001-0000-4000-8000-000000000001','agency','a0000004-0000-4000-8000-000000000004','2026-03','2026-01','2026-03','cancelled');
 
 -- ---- 代理店報酬 ----
 insert into public.agency_reward_items
@@ -79,18 +79,18 @@ insert into public.agency_reward_items
    commission_base, commission_gmv, creator_revenue_before_split, agency_split_rate,
    reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id) values
   -- A1: 通常2件（claim対象）
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-1','o1','p1',1000,1000,900,10,100,true,false,null,null),
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-2','o2','p1',2000,2000,1800,10,200,true,false,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-1','o1','p1',1000,1000,900,10,100,true,false,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-2','o2','p1',2000,2000,1800,10,200,true,false,null,null),
   -- A1: 除外されるべき3件
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-paid','o3','p1',9000,9000,8000,10,1000,true,true,null,null),
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-payout','o4','p1',9000,9000,8000,10,2000,true,false,'d0000001-0000-4000-8000-000000000001',null),
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-batch','o5','p1',9000,9000,8000,10,3000,true,false,null,'e0000001-0000-4000-8000-000000000001'),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-paid','o3','p1',9000,9000,8000,10,1000,true,true,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-payout','o4','p1',9000,9000,8000,10,2000,true,false,'d0000001-0000-4000-8000-000000000001',null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-batch','o5','p1',9000,9000,8000,10,3000,true,false,null,'e0000001-0000-4000-8000-000000000001'),
   -- A1: 報酬対象外（is_reward_target=false）
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-a1-nottarget','o6','p1',9000,9000,8000,10,4000,false,false,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-nottarget','o6','p1',9000,9000,8000,10,4000,false,false,null,null),
   -- A2（口座未登録）/ A3（自社）/ A4（代理店報酬のみ）
-  ('a0000002-0000-4000-8000-000000000002','c0000001-0000-4000-8000-000000000001','2030-01','mg-a2-1','o7','p1',5000,5000,4500,10,500,true,false,null,null),
-  ('a0000003-0000-4000-8000-000000000003','c0000001-0000-4000-8000-000000000001','2030-01','mg-a3-1','o8','p1',7000,7000,6300,10,700,true,false,null,null),
-  ('a0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2030-01','mg-a4-1','o9','p1',9000,9000,8100,10,900,true,false,null,null);
+  ('a0000002-0000-4000-8000-000000000002','c0000001-0000-4000-8000-000000000001','2026-03','mg-a2-1','o7','p1',5000,5000,4500,10,500,true,false,null,null),
+  ('a0000003-0000-4000-8000-000000000003','c0000001-0000-4000-8000-000000000001','2026-03','mg-a3-1','o8','p1',7000,7000,6300,10,700,true,false,null,null),
+  ('a0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2026-03','mg-a4-1','o9','p1',9000,9000,8100,10,900,true,false,null,null);
 
 -- ---- 紹介者報酬 ----
 insert into public.referral_reward_items
@@ -98,21 +98,21 @@ insert into public.referral_reward_items
    base_amount, reward_rate, original_reward_amount, adjusted_reward_amount, reward_amount,
    cap_applied, cap_reached, is_reward_target, is_paid, payout_id, payment_batch_id) values
   -- R1 → A1: 通常2件
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-1','o1','p1',210,0.05,10.50,10.50,10.50,false,false,true,false,null,null),
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-2','o2','p1',405,0.05,20.25,20.25,20.25,false,false,true,false,null,null),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-1','o1','p1',210,0.05,10.50,10.50,10.50,false,false,true,false,null,null),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-2','o2','p1',405,0.05,20.25,20.25,20.25,false,false,true,false,null,null),
   -- R1 → A1: 除外されるべき3件 + 報酬対象外1件
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-paid','o3','p1',9000,0.05,111.00,111.00,111.00,false,false,true,true,null,null),
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-payout','o4','p1',9000,0.05,222.00,222.00,222.00,false,false,true,false,'d0000002-0000-4000-8000-000000000002',null),
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-batch','o5','p1',9000,0.05,333.00,333.00,333.00,false,false,true,false,null,'e0000001-0000-4000-8000-000000000001'),
-  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2030-01','mg-r1-nottarget','o6','p1',9000,0.05,444.00,444.00,444.00,false,false,false,false,null,null),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-paid','o3','p1',9000,0.05,111.00,111.00,111.00,false,false,true,true,null,null),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-payout','o4','p1',9000,0.05,222.00,222.00,222.00,false,false,true,false,'d0000002-0000-4000-8000-000000000002',null),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-batch','o5','p1',9000,0.05,333.00,333.00,333.00,false,false,true,false,null,'e0000001-0000-4000-8000-000000000001'),
+  ('b0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-r1-nottarget','o6','p1',9000,0.05,444.00,444.00,444.00,false,false,false,false,null,null),
   -- R2 → A1: 同一agencyへの2人目
-  ('b0000002-0000-4000-8000-000000000002','c0000002-0000-4000-8000-000000000002','2030-01','mg-r2-1','o7','p1',106,0.05,5.30,5.30,5.30,false,false,true,false,null,null),
+  ('b0000002-0000-4000-8000-000000000002','c0000002-0000-4000-8000-000000000002','2026-03','mg-r2-1','o7','p1',106,0.05,5.30,5.30,5.30,false,false,true,false,null,null),
   -- R3 → agency未紐付け（legacy経路）
-  ('b0000003-0000-4000-8000-000000000003','c0000001-0000-4000-8000-000000000001','2030-01','mg-r3-1','o8','p1',30000,0.05,1500.00,1500.00,1500.00,false,false,true,false,null,null),
+  ('b0000003-0000-4000-8000-000000000003','c0000001-0000-4000-8000-000000000001','2026-03','mg-r3-1','o8','p1',30000,0.05,1500.00,1500.00,1500.00,false,false,true,false,null,null),
   -- R4 → A3（自社）/ R5 → A2（口座未登録）/ R6 → A5（紹介報酬のみ）
-  ('b0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2030-01','mg-r4-1','o9','p1',800,0.05,40.00,40.00,40.00,false,false,true,false,null,null),
-  ('b0000005-0000-4000-8000-000000000005','c0000001-0000-4000-8000-000000000001','2030-01','mg-r5-1','o10','p1',1200,0.05,60.00,60.00,60.00,false,false,true,false,null,null),
-  ('b0000006-0000-4000-8000-000000000006','c0000001-0000-4000-8000-000000000001','2030-01','mg-r6-1','o11','p1',1600,0.05,80.00,80.00,80.00,false,false,true,false,null,null);
+  ('b0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2026-03','mg-r4-1','o9','p1',800,0.05,40.00,40.00,40.00,false,false,true,false,null,null),
+  ('b0000005-0000-4000-8000-000000000005','c0000001-0000-4000-8000-000000000001','2026-03','mg-r5-1','o10','p1',1200,0.05,60.00,60.00,60.00,false,false,true,false,null,null),
+  ('b0000006-0000-4000-8000-000000000006','c0000001-0000-4000-8000-000000000001','2026-03','mg-r6-1','o11','p1',1600,0.05,80.00,80.00,80.00,false,false,true,false,null,null);
 
 -- =========================================================================
 -- 異常系（claim を拒否すること）
@@ -122,7 +122,7 @@ declare v_err text;
 begin
   -- TEST 6: 自社agencyは支払対象外
   begin
-    perform public.claim_payment_batch_items('agency','a0000003-0000-4000-8000-000000000003','2030-01','2030-01',0,null);
+    perform public.claim_payment_batch_items('agency','a0000003-0000-4000-8000-000000000003','2026-03','2026-01',0,null);
     v_err := '(例外が出なかった)';
   exception when others then v_err := sqlerrm;
   end;
@@ -130,7 +130,7 @@ begin
 
   -- TEST 15: 代理店の口座未登録なら代理店+紹介の全体が拒否される
   begin
-    perform public.claim_payment_batch_items('agency','a0000002-0000-4000-8000-000000000002','2030-01','2030-01',0,null);
+    perform public.claim_payment_batch_items('agency','a0000002-0000-4000-8000-000000000002','2026-03','2026-01',0,null);
     v_err := '(例外が出なかった)';
   exception when others then v_err := sqlerrm;
   end;
@@ -138,7 +138,7 @@ begin
 
   -- TEST 18: 代理店へ帰属済みの紹介者は単独明細を作れない
   begin
-    perform public.claim_payment_batch_items('referrer','b0000001-0000-4000-8000-000000000001','2030-01','2030-01',0,null);
+    perform public.claim_payment_batch_items('referrer','b0000001-0000-4000-8000-000000000001','2026-03','2026-01',0,null);
     v_err := '(例外が出なかった)';
   exception when others then v_err := sqlerrm;
   end;
@@ -146,7 +146,7 @@ begin
 
   -- TEST 19: 自社agencyへ帰属した紹介者も単独明細を作れない
   begin
-    perform public.claim_payment_batch_items('referrer','b0000004-0000-4000-8000-000000000004','2030-01','2030-01',0,null);
+    perform public.claim_payment_batch_items('referrer','b0000004-0000-4000-8000-000000000004','2026-03','2026-01',0,null);
     v_err := '(例外が出なかった)';
   exception when others then v_err := sqlerrm;
   end;
@@ -159,7 +159,7 @@ end $blk$;
 do $blk$
 declare v_batch uuid; v_cnt int; v_amt numeric; v_released int;
 begin
-  v_batch := public.claim_payment_batch_items('agency','a0000004-0000-4000-8000-000000000004','2030-01','2030-01',0,'T1');
+  v_batch := public.claim_payment_batch_items('agency','a0000004-0000-4000-8000-000000000004','2026-03','2026-01',0,'T1');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
   perform t_check(1, '代理店報酬のみ: 1件 / 900円', v_cnt = 1 and v_amt = 900,
                   format('件数=%s 金額=%s', v_cnt, v_amt));
@@ -184,7 +184,7 @@ end $blk$;
 do $blk$
 declare v_batch uuid; v_cnt int; v_amt numeric;
 begin
-  v_batch := public.claim_payment_batch_items('agency','a0000005-0000-4000-8000-000000000005','2030-01','2030-01',0,'T2');
+  v_batch := public.claim_payment_batch_items('agency','a0000005-0000-4000-8000-000000000005','2026-03','2026-01',0,'T2');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
   perform t_check(2, '紹介報酬のみ: 1件 / 80.00円', v_cnt = 1 and v_amt = 80.00,
                   format('件数=%s 金額=%s', v_cnt, v_amt));
@@ -198,7 +198,7 @@ end $blk$;
 do $blk$
 declare v_batch uuid; v_cnt int; v_amt numeric; v_err text;
 begin
-  v_batch := public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2030-01','2030-01',0,'T3');
+  v_batch := public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2026-03','2026-01',0,'T3');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
 
   -- 代理店 100+200=300 / 紹介 10.50+20.25+5.30=36.05 → 5件 / 336.05
@@ -234,7 +234,7 @@ begin
 
   -- TEST 12: 二重claimできない
   begin
-    perform public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2030-01','2030-01',0,'dup');
+    perform public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2026-03','2026-01',0,'dup');
     v_err := '(例外が出なかった)';
   exception when others then v_err := sqlerrm;
   end;
@@ -247,7 +247,7 @@ end $blk$;
 do $blk$
 declare v_batch uuid; v_cnt int; v_amt numeric;
 begin
-  v_batch := public.claim_payment_batch_items('referrer','b0000003-0000-4000-8000-000000000003','2030-01','2030-01',1000,'T5');
+  v_batch := public.claim_payment_batch_items('referrer','b0000003-0000-4000-8000-000000000003','2026-03','2026-01',1000,'T5');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
   perform t_check(5, 'agency未紐付けreferrerの単独明細: 1件 / 1500円', v_cnt = 1 and v_amt = 1500.00,
                   format('件数=%s 金額=%s', v_cnt, v_amt));

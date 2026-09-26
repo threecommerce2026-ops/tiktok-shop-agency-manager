@@ -1,6 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import {
+  EARLIEST_CUTOFF_MONTH,
+  formatCutoffLabel,
+} from "@/lib/payments/cutoff-month";
 import { useActionState, useMemo, useState } from "react";
 
 import {
@@ -164,10 +168,18 @@ function downloadCsv(fileName: string, content: string) {
 
 export function PaymentsClient({
   overview,
-  defaultMonth,
+  cutoffMonth,
+  cutoffOptions,
+  cutoffError,
+  allTimeUnpaidAmount,
 }: {
   overview: PaymentOverview;
-  defaultMonth: string;
+  /** 締め対象月。画面の数字と支払明細の中身はすべてこの月まで */
+  cutoffMonth: string;
+  cutoffOptions: string[];
+  cutoffError: string | null;
+  /** 参考表示専用。支払判断には使わない */
+  allTimeUnpaidAmount: number;
 }) {
   const [tab, setTab] = useState<TabKey>("all");
   const [search, setSearch] = useState("");
@@ -248,6 +260,56 @@ export function PaymentsClient({
         </p>
       </div>
 
+      {/*
+        締め対象月。画面の数字も、作られる支払明細の中身も、すべてこの月まで。
+        サーバー側（Server Action と RPC）でも同じ月で検証するため、
+        ここを変えずに古い画面から実行しても締め月より後は claim されない。
+      */}
+      <form
+        method="get"
+        className="flex flex-wrap items-end gap-3 rounded-xl border border-[var(--accent-cyan)]/25 bg-[var(--accent-cyan)]/[0.06] px-4 py-3"
+      >
+        <label className="text-[11px] font-medium text-zinc-300">
+          締め対象月
+          <select
+            name="cutoff"
+            defaultValue={cutoffMonth}
+            className="mt-1 block min-h-[38px] rounded-lg border border-white/[0.12] bg-surface-1 px-3 text-sm text-zinc-100"
+          >
+            {cutoffOptions.map((month) => (
+              <option key={month} value={month}>
+                {formatCutoffLabel(month)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="submit"
+          className="min-h-[38px] rounded-lg bg-[var(--accent-cyan)] px-4 text-sm font-semibold text-black"
+        >
+          この月で締める
+        </button>
+        <p className="text-[11px] leading-relaxed text-zinc-400">
+          {formatCutoffLabel(cutoffMonth)}までの未払いだけを表示・支払います。
+          <br />
+          これより後の月は一覧にも今回支払額にも含まれません。
+        </p>
+      </form>
+
+      {cutoffError ? (
+        <p
+          className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+          role="alert"
+        >
+          {cutoffError}
+          <br />
+          <span className="text-[11px]">
+            安全側の既定（{formatCutoffLabel(cutoffMonth)}）で表示しています。
+            締め対象月を選び直してください。
+          </span>
+        </p>
+      ) : null}
+
       {overview.error ? (
         <p className="rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {overview.error}
@@ -255,6 +317,14 @@ export function PaymentsClient({
       ) : null}
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <Kpi
+          label={`締め対象（${formatCutoffLabel(cutoffMonth)}まで）`}
+          value={yen(
+            overview.totals.agencyUnpaidAmount + overview.totals.referrerUnpaidAmount,
+          )}
+          hint="この画面の支払判断はすべてこの金額が基準です"
+          tone="strong"
+        />
         <Kpi
           label="今回支払予定総額"
           value={yen(overview.totals.scheduledAmount)}
@@ -274,6 +344,19 @@ export function PaymentsClient({
           hint="いま支払明細を作れる支払先"
         />
         <Kpi
+          label="全期間 未払残高"
+          value={yen(allTimeUnpaidAmount)}
+          hint={`参考。締め対象より後の未払いを含みます（差 ${yen(
+            Math.round(
+              (allTimeUnpaidAmount -
+                overview.totals.agencyUnpaidAmount -
+                overview.totals.referrerUnpaidAmount) *
+                100,
+            ) / 100,
+          )}）`}
+          tone="muted"
+        />
+        <Kpi
           label="セラー未入金"
           value={yen(overview.totals.sellerUnpaidAmount)}
           hint={`発行済み ${overview.totals.sellerUnpaidCount} 件・支払総額には含みません`}
@@ -283,7 +366,7 @@ export function PaymentsClient({
 
       <div className="flex flex-wrap items-center gap-2">
         <Link
-          href="/payments/bulk"
+          href={`/payments/bulk?cutoff=${cutoffMonth}`}
           className="min-h-[40px] rounded-lg border border-white/[0.1] px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-white/[0.06]"
         >
           過去未払いを一括精算
@@ -519,15 +602,20 @@ export function PaymentsClient({
                               <form action={createAction} className="inline-flex flex-col items-end gap-1">
                                 <input type="hidden" name="payee_kind" value={row.payeeKind} />
                                 <input type="hidden" name="payee_id" value={row.payeeId} />
+                                {/*
+                                  上限は締め対象月に固定する。
+                                  未払い明細の最終月（データ由来）を送ると
+                                  代理店ごとに締め月がばらついてしまう。
+                                */}
                                 <input
                                   type="hidden"
-                                  name="start_month"
-                                  value={row.periodStartMonth ?? defaultMonth}
+                                  name="cutoff_month"
+                                  value={cutoffMonth}
                                 />
                                 <input
                                   type="hidden"
-                                  name="end_month"
-                                  value={row.periodEndMonth ?? defaultMonth}
+                                  name="start_month"
+                                  value={row.periodStartMonth ?? EARLIEST_CUTOFF_MONTH}
                                 />
                                 <span className="font-mono font-semibold text-emerald-300">
                                   {yen(row.unpaidAmount)}
@@ -590,6 +678,7 @@ export function PaymentsClient({
               支払明細を作成すると、その分は「支払予定中」へ移り、未払残高から外れます。
               支払先は代理店に一本化しており、代理店報酬とその代理店に帰属する
               紹介報酬を合算して1回だけ振り込みます。
+              対象は締め対象月（{formatCutoffLabel(cutoffMonth)}）までの未払いだけです。
               二重に支払対象へ現れることはありません。
             </p>
           </section>
@@ -617,6 +706,7 @@ function BatchTable({
             <tr>
               <th className={th}>種別</th>
               <th className={th}>支払先</th>
+              <th className={th}>締め対象</th>
               <th className={th}>対象期間</th>
               <th className={`${th} text-right`}>明細数</th>
               <th className={`${th} text-right`}>振込額</th>
@@ -628,7 +718,7 @@ function BatchTable({
           <tbody>
             {batches.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-sm text-zinc-500">
+                <td colSpan={9} className="px-4 py-10 text-center text-sm text-zinc-500">
                   {emptyMessage}
                 </td>
               </tr>
@@ -640,6 +730,9 @@ function BatchTable({
                   </td>
                   <td className={`${td} font-medium text-zinc-100`}>{batch.payeeName}</td>
                   <td className={`${td} font-mono text-zinc-300`}>
+                    {formatCutoffLabel(batch.cutoffMonth)}
+                  </td>
+                  <td className={`${td} font-mono text-zinc-400`}>
                     {batch.periodStartMonth === batch.periodEndMonth
                       ? batch.periodStartMonth
                       : `${batch.periodStartMonth}〜${batch.periodEndMonth}`}

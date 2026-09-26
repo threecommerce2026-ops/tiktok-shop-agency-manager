@@ -130,7 +130,7 @@ values
 set test.is_admin = 'false';
 select pg_temp.expect_error(
   '01 非管理者は支払明細を作成できない',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-05','2026-07',0,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-07', '2026-05',0,null)$$,
   '親管理者');
 set test.is_admin = 'true';
 
@@ -138,30 +138,30 @@ set test.is_admin = 'true';
 -- 2. 入力検証
 -- -----------------------------------------------------------------------------
 select pg_temp.expect_error('02 支払先区分が不正',
-  $$select public.claim_payment_batch_items('creator','00000000-0000-0000-0000-00000000a001','2026-05','2026-07',0,null)$$,
+  $$select public.claim_payment_batch_items('creator','00000000-0000-0000-0000-00000000a001','2026-07', '2026-05',0,null)$$,
   '支払先区分');
 
 select pg_temp.expect_error('03 対象月の形式が不正',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026/05','2026-07',0,null)$$,
-  '対象期間の形式');
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-07', '2026/05',0,null)$$,
+  '形式が不正');
 
-select pg_temp.expect_error('04 開始月が終了月より後',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-08','2026-07',0,null)$$,
+select pg_temp.expect_error('04 開始月が締め対象月より後',
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-07', '2026-08',0,null)$$,
   '開始月');
 
 -- -----------------------------------------------------------------------------
 -- 3. 保留条件（振込先・自社）
 -- -----------------------------------------------------------------------------
 select pg_temp.expect_error('05 振込先未登録の代理店は支払明細を作れない',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a002','2026-05','2026-07',0,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a002','2026-07', '2026-05',0,null)$$,
   '振込先が未登録');
 
 select pg_temp.expect_error('06 金融機関コード未登録は支払明細を作れない',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a004','2026-05','2026-07',0,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a004','2026-07', '2026-05',0,null)$$,
   'コード');
 
 select pg_temp.expect_error('07 自社代理店は支払対象外',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a003','2026-05','2026-07',0,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a003','2026-07', '2026-05',0,null)$$,
   '自社');
 
 -- -----------------------------------------------------------------------------
@@ -176,7 +176,7 @@ declare
   v_excluded integer;
 begin
   v_batch_id := public.claim_payment_batch_items(
-    'agency', '00000000-0000-0000-0000-00000000a001', '2026-05', '2026-06', 0, 'テスト');
+    'agency', '00000000-0000-0000-0000-00000000a001', '2026-06', '2026-05', 0, 'テスト');
 
   select * into v_batch from public.payment_batches where id = v_batch_id;
 
@@ -211,7 +211,7 @@ $$;
 -- 5. 二重占有の防止
 -- -----------------------------------------------------------------------------
 select pg_temp.expect_error('15 同じ期間で再作成すると対象0件で失敗する',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-05','2026-06',0,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-06', '2026-05',0,null)$$,
   '支払対象の未払い明細がありません');
 
 do $$
@@ -234,7 +234,7 @@ $$;
 -- 6. 支払基準額
 -- -----------------------------------------------------------------------------
 select pg_temp.expect_error('18 支払基準額に満たない場合は作成できない',
-  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-07','2026-07',999999,null)$$,
+  $$select public.claim_payment_batch_items('agency','00000000-0000-0000-0000-00000000a001','2026-07', '2026-07',999999,null)$$,
   '支払基準額');
 
 do $$
@@ -353,7 +353,7 @@ declare
 begin
   -- 2026-05..07 で作り直すと、支払済み3件は除外され 2026-07 の1件だけになる
   v_batch_id := public.claim_payment_batch_items(
-    'agency', '00000000-0000-0000-0000-00000000a001', '2026-05', '2026-07', 0, null);
+    'agency', '00000000-0000-0000-0000-00000000a001', '2026-07', '2026-05', 0, null);
   select * into v_batch from public.payment_batches where id = v_batch_id;
   perform pg_temp.expect('35 支払済み明細は再び支払対象にならない',
     v_batch.item_count = 1 and v_batch.payment_amount = 4000,
@@ -422,7 +422,7 @@ declare
   v_payout public.referral_payouts%rowtype;
 begin
   v_batch_id := public.claim_payment_batch_items(
-    'referrer', '00000000-0000-0000-0000-00000000b001', '2026-05', '2026-06', 1000, null);
+    'referrer', '00000000-0000-0000-0000-00000000b001', '2026-06', '2026-05', 1000, null);
   select * into v_batch from public.payment_batches where id = v_batch_id;
   perform pg_temp.expect('41 紹介者の支払明細が作られる（2件 / 1500円）',
     v_batch.item_count = 2 and v_batch.payment_amount = 1500,

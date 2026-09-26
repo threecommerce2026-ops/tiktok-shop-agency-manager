@@ -14,6 +14,7 @@ import {
   type PaymentCsvActionResult,
 } from "@/app/actions/payments";
 import { REWARD_KIND_LABEL, type PaymentBatchDetail } from "@/lib/db/payment-queries";
+import { formatCutoffLabel } from "@/lib/payments/cutoff-month";
 import { BankStateBadge } from "@/components/payments/PayeeBankForm";
 import { PAYEE_KIND_LABEL } from "@/lib/payments/payable";
 import {
@@ -133,6 +134,12 @@ export function PaymentBatchClient({
         <h1 className="mt-2 text-2xl font-bold tracking-tight text-zinc-50 sm:text-3xl">
           {batch.payeeName}
         </h1>
+        {/* この支払明細が何月末締めだったかを必ず残す */}
+        <p className="mt-2 text-sm">
+          <span className="rounded-md border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/[0.08] px-2 py-0.5 text-xs font-semibold text-[var(--accent-cyan)]">
+            締め対象：{formatCutoffLabel(batch.cutoffMonth)}
+          </span>
+        </p>
         <p className="mt-2 font-mono text-sm text-zinc-500">
           {batch.periodStartMonth === batch.periodEndMonth
             ? batch.periodStartMonth
