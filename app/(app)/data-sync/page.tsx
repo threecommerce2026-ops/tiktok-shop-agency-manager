@@ -22,6 +22,12 @@ const IMPORT_LINKS: LinkCard[] = [
       "CAP エクスポート（affiliate_order_lines）の XLSX を取り込みます。売上・代理店報酬・紹介者報酬のすべての計算元です。",
   },
   {
+    href: "/admin/creator-aliases",
+    title: "クリエイター改名の管理",
+    description:
+      "TikTokのユーザー名が変わったクリエイターの旧名を登録します。登録しないと同じ注文明細が二重登録されます。",
+  },
+  {
     href: "/admin/tap-orders-import",
     title: "TAP 注文 CSV 取込",
     description: "TAP 推定報酬（tap_affiliate_order_lines）の取り込み。参考値として保持します。",

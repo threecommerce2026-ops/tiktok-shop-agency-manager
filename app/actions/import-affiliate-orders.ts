@@ -1,5 +1,6 @@
 "use server";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { revalidatePath } from "next/cache";
 
 import {
@@ -9,6 +10,11 @@ import {
 import { requireAdminAction } from "@/lib/db/admin-access";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
+import {
+  buildCreatorAliasMap,
+  creatorAliasFromRow,
+  type CreatorAliasRecord,
+} from "@/lib/orders/creator-alias";
 import {
   COMPARE_DIGEST_PAGE_SIZE,
   FINGERPRINT_DB_COLUMNS,
@@ -81,6 +87,82 @@ function failureList(
   limit = 50,
 ): Array<{ rowNumber: number; error: string }> {
   return rows.slice(0, limit);
+}
+
+// =============================================================================
+// 0. クリエイター改名の別名表
+// =============================================================================
+
+export type CreatorAliasListResult =
+  | { ok: true; aliases: CreatorAliasRecord[] }
+  | { ok: false; error: string };
+
+const ALIAS_COLUMNS =
+  "alias_tiktok_id, canonical_tiktok_id, note, created_by_email, created_at";
+
+/**
+ * 別名表を取得する。
+ *
+ * ブラウザ側は解析直後にこれを取り、source_row_key を作る前に
+ * 正式名へ寄せる。サーバーも受信時に同じ表で検証するため、
+ * プレビューと本取込で解決がずれない。
+ */
+export async function listCreatorAliasesAction(): Promise<CreatorAliasListResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const { data, error } = await auth.supabase
+    .from("creator_tiktok_aliases")
+    .select(ALIAS_COLUMNS)
+    .order("alias_tiktok_id");
+
+  if (error) {
+    /*
+      migration 未適用でも取込自体は動くようにする。
+      別名が無い状態＝従来どおりの挙動。
+    */
+    if (MISSING_ALIAS_TABLE_CODES.has(error.code ?? "")) {
+      return { ok: true, aliases: [] };
+    }
+    return { ok: false, error: mapSupabaseErrorToJa(error.message) };
+  }
+
+  return {
+    ok: true,
+    aliases: (data ?? []).map((row) =>
+      creatorAliasFromRow(row as Record<string, unknown>),
+    ),
+  };
+}
+
+/** テーブル未作成を示すコードだけを「別名なし」として扱う */
+const MISSING_ALIAS_TABLE_CODES = new Set([
+  "42P01",
+  "PGRST205",
+  "PGRST106",
+]);
+
+/** サーバー側の再検証で使う別名表 */
+async function loadAliasMap(
+  supabase: SupabaseClient,
+): Promise<{ map: Map<string, string>; error: string | null }> {
+  const { data, error } = await supabase
+    .from("creator_tiktok_aliases")
+    .select(ALIAS_COLUMNS);
+
+  if (error) {
+    if (MISSING_ALIAS_TABLE_CODES.has(error.code ?? "")) {
+      return { map: new Map(), error: null };
+    }
+    return { map: new Map(), error: error.message };
+  }
+
+  return {
+    map: buildCreatorAliasMap(
+      (data ?? []).map((row) => creatorAliasFromRow(row as Record<string, unknown>)),
+    ),
+    error: null,
+  };
 }
 
 // =============================================================================
@@ -286,13 +368,24 @@ export async function importAffiliateOrderChunkAction(input: {
     return { ok: false, error: "取込セッションが見つかりません" };
   }
 
+  /*
+    ---- 別名表の読み込み ----
+    ブラウザ側と同じ表で検証する。
+    正式名へ寄せていない行はここで弾かれるため、
+    プレビューと本取込で解決がずれることはない。
+  */
+  const alias = await loadAliasMap(auth.supabase);
+  if (alias.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(alias.error) };
+  }
+
   // ---- 行ごとの再検証（source_row_key の再生成を含む）----
   const failures: Array<{ rowNumber: number; error: string }> = [];
   const validRows: AffiliateOrderPayloadRow[] = [];
   const seenKeys = new Set<string>();
 
   for (const candidate of incoming) {
-    const result = validateAffiliateOrderPayloadRow(candidate);
+    const result = validateAffiliateOrderPayloadRow(candidate, alias.map);
 
     if (!result.ok) {
       failures.push({ rowNumber: result.rowNumber, error: result.error });

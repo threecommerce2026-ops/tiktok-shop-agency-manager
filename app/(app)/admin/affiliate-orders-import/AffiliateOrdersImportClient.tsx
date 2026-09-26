@@ -7,8 +7,13 @@ import {
   fetchAffiliateOrderCompareDigestAction,
   finishAffiliateOrderImportAction,
   importAffiliateOrderChunkAction,
+  listCreatorAliasesAction,
   startAffiliateOrderImportAction,
 } from "@/app/actions/import-affiliate-orders";
+import {
+  applyCreatorAliases,
+  buildCreatorAliasMap,
+} from "@/lib/orders/creator-alias";
 import {
   buildPayloadChunks,
   compareAgainstDigest,
@@ -63,6 +68,9 @@ type PreviewState = {
   compareError: string | null;
   chunkCount: number;
   maxChunkBytes: number;
+  /** 改名で正式名へ寄せた行数 */
+  aliasedRowCount: number;
+  appliedAliases: Array<{ from: string; to: string; rowCount: number }>;
 };
 
 type ImportProgress = {
@@ -166,7 +174,32 @@ export function AffiliateOrdersImportClient() {
             ? parsed.failures[0].error
             : null;
 
-        const deduped = dedupeAffiliateOrderRows(parsed.rows);
+        /*
+          ---- クリエイター改名の別名を適用する ----
+
+          source_row_key を作る前に旧名を正式名へ寄せる。
+          これをしないと、改名されたクリエイターの同じ注文明細が
+          別キーになり新規行として二重に入る。
+
+          サーバー側も同じ別名表で検証し、寄せていない行は受け付けない。
+          そのためプレビューと本取込で解決がずれることはない。
+        */
+        setStatusText("クリエイターの別名を確認しています…");
+        const aliasResult = await listCreatorAliasesAction();
+        if (!aliasResult.ok) {
+          setError(`別名表を読み込めませんでした: ${aliasResult.error}`);
+          setPhase("failed");
+          setStatusText("");
+          return;
+        }
+
+        setStatusText("Excelを解析しています…");
+        const aliased = applyCreatorAliases(
+          parsed.rows,
+          buildCreatorAliasMap(aliasResult.aliases),
+        );
+
+        const deduped = dedupeAffiliateOrderRows(aliased.rows);
 
         const summary = summarizeAffiliateOrderRows(deduped.rows, {
           parsedRows: parsed.rows.length,
@@ -190,6 +223,8 @@ export function AffiliateOrdersImportClient() {
           compareError: null,
           chunkCount: chunks.length,
           maxChunkBytes,
+          aliasedRowCount: aliased.aliasedRowCount,
+          appliedAliases: aliased.appliedAliases,
         };
 
         if (blockers.length > 0 || deduped.rows.length === 0) {
@@ -525,6 +560,26 @@ export function AffiliateOrdersImportClient() {
               <p className="mt-2 text-[11px] text-zinc-500">照合していません。</p>
             )}
           </div>
+
+          {/* 改名の適用 */}
+          {preview.aliasedRowCount > 0 ? (
+            <div className="mt-5 rounded-xl border border-cyan-400/25 bg-cyan-400/[0.06] p-4 text-[11px] leading-relaxed text-cyan-100">
+              <p className="font-semibold">
+                クリエイターの改名を反映しました（{formatInt(preview.aliasedRowCount)} 行）
+              </p>
+              <ul className="mt-2 space-y-1 font-mono">
+                {preview.appliedAliases.map((alias) => (
+                  <li key={`${alias.from}-${alias.to}`}>
+                    {alias.from} → {alias.to}（{formatInt(alias.rowCount)} 行）
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-cyan-200/80">
+                旧名のままだと同じ注文明細が別々に登録されます。
+                元のユーザー名は取込データにそのまま保存されます。
+              </p>
+            </div>
+          ) : null}
 
           {/* 送信計画 */}
           <div className="mt-5 rounded-xl bg-black/25 p-4 text-[11px] leading-relaxed text-zinc-500">

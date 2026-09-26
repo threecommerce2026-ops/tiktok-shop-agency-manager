@@ -66,6 +66,7 @@ export const APP_NAV: readonly NavItem[] = [
     adminOnly: true,
     aliases: [
       "/admin/affiliate-orders-import",
+      "/admin/creator-aliases",
       "/admin/api-connections",
       "/admin/api-sync",
       "/csv-logs",

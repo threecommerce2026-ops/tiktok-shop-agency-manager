@@ -1,4 +1,5 @@
 import { buildAffiliateOrderSourceRowKey } from "@/lib/orders/affiliate-order-source-key";
+import { resolveCanonicalTiktokId } from "@/lib/orders/creator-alias";
 import type { AffiliateOrderImportRow } from "@/lib/orders/parse-affiliate-order-export";
 
 /*
@@ -447,6 +448,7 @@ const NULLABLE_NUMBER_FIELDS = [
  */
 export function validateAffiliateOrderPayloadRow(
   value: unknown,
+  aliasMap: Map<string, string> = new Map(),
 ): PayloadRowValidation {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false, rowNumber: 0, error: "行の形式が不正です" };
@@ -513,12 +515,28 @@ export function validateAffiliateOrderPayloadRow(
     return fail("元データ（raw）の形式が不正です");
   }
 
+  /*
+    ---- 改名の別名がすでに解決されていることを確認する ----
+
+    プレビューと本取込で解決がずれないよう、サーバーは
+    「正式名へ寄せ終わった行」しか受け付けない。
+    寄っていない行を黙って受けると、プレビューでは1件に見えたのに
+    保存すると別明細になる、という食い違いが起きる。
+  */
+  const canonicalTiktokId = resolveCanonicalTiktokId(creatorTiktokId, aliasMap);
+
+  if (canonicalTiktokId !== creatorTiktokId) {
+    return fail(
+      `クリエイター名が正式名へ寄せられていません（${creatorTiktokId} → ${canonicalTiktokId}）`,
+    );
+  }
+
   // ---- source_row_key の再生成と一致確認（改ざん検出）----
   const expectedKey = buildAffiliateOrderSourceRowKey({
     orderId,
     skuId: nullableTextValue(row.skuId),
     productId: nullableTextValue(row.productId),
-    creatorTiktokId,
+    creatorTiktokId: canonicalTiktokId,
     contentId: nullableTextValue(row.contentId),
     invitationId: nullableTextValue(row.invitationId),
     factorType: nullableTextValue(row.factorType),
@@ -531,6 +549,10 @@ export function validateAffiliateOrderPayloadRow(
 
   return {
     ok: true,
-    row: { ...(row as AffiliateOrderPayloadRow), sourceRowKey: expectedKey },
+    row: {
+      ...(row as AffiliateOrderPayloadRow),
+      creatorTiktokId: canonicalTiktokId,
+      sourceRowKey: expectedKey,
+    },
   };
 }
