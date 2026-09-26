@@ -8,12 +8,14 @@ import {
 import { useActionState, useMemo, useState } from "react";
 
 import {
+  approvePaymentBatchesBulkAction,
   createPaymentBatchAction,
   exportPaymentCsvAction,
+  type BulkApproveResult,
   type PaymentActionResult,
   type PaymentCsvActionResult,
 } from "@/app/actions/payments";
-import { PayeeBankForm } from "@/components/payments/PayeeBankForm";
+import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
 import type {
   PaymentBatchSummary,
   PaymentOverview,
@@ -49,6 +51,16 @@ const td = "whitespace-nowrap px-3 py-2 text-xs";
 
 const yen = (value: number | null | undefined) =>
   value == null ? "—" : `¥${Math.round(value).toLocaleString("ja-JP")}`;
+
+/*
+  一括承認の対象。
+
+  下書きの代理店明細だけを選ばせる。承認済み以降と紹介者明細は対象外。
+  ここは画面の絞り込みで、実際の判定はサーバーアクションと RPC が行う。
+*/
+function isBulkApprovable(batch: PaymentBatchSummary): boolean {
+  return batch.status === "draft" && batch.payeeKind === "agency";
+}
 
 const TABS = [
   { key: "all", label: "すべて" },
@@ -187,6 +199,25 @@ export function PaymentsClient({
   const [payableOnly, setPayableOnly] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  /*
+    一括承認。選択と確認ダイアログの状態はこの画面だけで持つ。
+    承認の判定はサーバーアクションと RPC が必ずやり直す。
+  */
+  const [approveSelected, setApproveSelected] = useState<Set<string>>(new Set());
+  const [confirmingApprove, setConfirmingApprove] = useState(false);
+
+  const [bulkApproveState, bulkApproveAction, bulkApprovePending] = useActionState(
+    async (prev: BulkApproveResult | null, formData: FormData) => {
+      const result = await approvePaymentBatchesBulkAction(prev, formData);
+      if (result.ok) {
+        setApproveSelected(new Set());
+        setConfirmingApprove(false);
+      }
+      return result;
+    },
+    null as BulkApproveResult | null,
+  );
+
   const [createState, createAction, createPending] = useActionState(
     createPaymentBatchAction,
     null as PaymentActionResult | null,
@@ -221,6 +252,26 @@ export function PaymentsClient({
   const openBatches = overview.batches.filter((batch) =>
     isOpenPaymentBatchStatus(batch.status),
   );
+
+  const approvableBatches = openBatches.filter(isBulkApprovable);
+  const approveTargets = approvableBatches.filter((batch) =>
+    approveSelected.has(batch.id),
+  );
+  const approveAmount =
+    Math.round(
+      approveTargets.reduce((total, batch) => total + batch.paymentAmount, 0) * 100,
+    ) / 100;
+  const approveCutoffs = [...new Set(approveTargets.map((batch) => batch.cutoffMonth))];
+
+  const toggleApprove = (batchId: string) => {
+    setApproveSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(batchId)) next.delete(batchId);
+      else next.add(batchId);
+      return next;
+    });
+    setConfirmingApprove(false);
+  };
   const historyBatches = overview.batches.filter(
     (batch) => !isOpenPaymentBatchStatus(batch.status),
   );
@@ -414,6 +465,20 @@ export function PaymentsClient({
       </nav>
 
       <Banner state={createState} />
+      {bulkApproveState ? (
+        <p
+          className={`whitespace-pre-line rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
+            bulkApproveState.ok
+              ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
+              : "border-red-500/25 bg-red-500/10 text-red-200"
+          }`}
+          role="status"
+        >
+          {bulkApproveState.ok
+            ? `${bulkApproveState.message}（合計 ${yen(bulkApproveState.approvedAmount)}）`
+            : bulkApproveState.error}
+        </p>
+      ) : null}
       <Banner
         state={
           csvState == null
@@ -460,10 +525,164 @@ export function PaymentsClient({
                   </form>
                 ) : null}
               </div>
+              {/*
+                一括承認。選べるのは下書きの代理店明細だけ。
+                押した瞬間には承認せず、必ず確認を挟む。
+              */}
+              {approvableBatches.length > 0 ? (
+                <div className="space-y-2 rounded-xl border border-white/[0.08] bg-surface-1/50 px-4 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setApproveSelected(new Set(approvableBatches.map((b) => b.id)));
+                        setConfirmingApprove(false);
+                      }}
+                      className="min-h-[32px] rounded-lg border border-white/[0.12] px-3 text-[11px] font-medium text-zinc-300 hover:bg-white/[0.06]"
+                    >
+                      下書きをすべて選択（{approvableBatches.length}）
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setApproveSelected(new Set());
+                        setConfirmingApprove(false);
+                      }}
+                      className="min-h-[32px] rounded-lg border border-white/[0.12] px-3 text-[11px] text-zinc-400 hover:bg-white/[0.06]"
+                    >
+                      選択を解除
+                    </button>
+                    <span className="text-[11px] text-zinc-400">
+                      選択中{" "}
+                      <span className="font-semibold text-zinc-200">
+                        {approveTargets.length} 件 / {yen(approveAmount)}
+                      </span>
+                      {approveCutoffs.length === 1 ? (
+                        <span className="ml-2 text-zinc-500">
+                          {formatCutoffLabel(approveCutoffs[0])}締め
+                        </span>
+                      ) : null}
+                    </span>
+                    {!confirmingApprove ? (
+                      <button
+                        type="button"
+                        disabled={approveTargets.length === 0}
+                        onClick={() => setConfirmingApprove(true)}
+                        className="min-h-[36px] rounded-lg bg-[var(--accent-cyan)] px-4 text-xs font-semibold text-black disabled:opacity-40"
+                      >
+                        選択した支払明細を一括承認
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {approveCutoffs.length > 1 ? (
+                    <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
+                      締め対象月が異なる支払明細は同時に承認できません（
+                      {approveCutoffs.map(formatCutoffLabel).join(" / ")}）。
+                      どちらかだけを選び直してください。
+                    </p>
+                  ) : null}
+
+                  {confirmingApprove && approveTargets.length > 0 ? (
+                    <div className="space-y-3 rounded-xl border border-[var(--accent-cyan)]/30 bg-[var(--accent-cyan)]/[0.06] px-4 py-3">
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-100">
+                          支払明細を一括承認します
+                        </p>
+                        <p className="mt-1 font-mono text-lg font-bold text-zinc-50">
+                          {approveTargets.length} 件 / 合計 {yen(approveAmount)}
+                        </p>
+                        {approveCutoffs.length === 1 ? (
+                          <p className="mt-0.5 text-[11px] text-zinc-400">
+                            締め対象：{formatCutoffLabel(approveCutoffs[0])}
+                          </p>
+                        ) : null}
+                      </div>
+
+                      <p className="text-[11px] leading-relaxed text-zinc-300">
+                        承認すると各支払明細に
+                        <span className="font-semibold text-zinc-100">
+                          現在登録されている振込先情報が固定されます。
+                        </span>
+                        承認後に代理店マスターの振込先を変更しても、この支払明細の
+                        振込先は変更されません。
+                        <br />
+                        承認しても支払済みにはなりません。実際の振込は振込CSVを出力して
+                        銀行で行い、そのあと「振込完了」を登録します。
+                      </p>
+
+                      <div className="overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950/60">
+                        <table className="min-w-[520px] w-full border-collapse">
+                          <thead>
+                            <tr>
+                              <th className={th}>代理店</th>
+                              <th className={`${th} text-right`}>金額</th>
+                              <th className={th}>振込先状態</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {approveTargets.map((batch) => (
+                              <tr key={batch.id} className="border-b border-zinc-800/70">
+                                <td className={`${td} font-medium text-zinc-100`}>
+                                  {batch.payeeName}
+                                </td>
+                                <td className={`${td} text-right font-mono text-zinc-100`}>
+                                  {yen(batch.paymentAmount)}
+                                </td>
+                                <td className={`${td} text-zinc-400`}>
+                                  {batch.bank ? (
+                                    <BankStateBadge state={batch.bank.state} />
+                                  ) : (
+                                    "振込先登録済（承認時に固定）"
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <form action={bulkApproveAction}>
+                          {approveTargets.map((batch) => (
+                            <input
+                              key={batch.id}
+                              type="hidden"
+                              name="batch_id"
+                              value={batch.id}
+                            />
+                          ))}
+                          <button
+                            type="submit"
+                            disabled={bulkApprovePending || approveCutoffs.length > 1}
+                            className="min-h-[40px] rounded-lg bg-[var(--accent-cyan)] px-5 text-sm font-semibold text-black disabled:opacity-50"
+                          >
+                            {bulkApprovePending
+                              ? "承認中…"
+                              : `${approveTargets.length} 件を承認して振込先を固定`}
+                          </button>
+                        </form>
+                        <button
+                          type="button"
+                          disabled={bulkApprovePending}
+                          onClick={() => setConfirmingApprove(false)}
+                          className="min-h-[40px] rounded-lg border border-white/[0.12] px-4 text-sm text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+                        >
+                          戻る
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               <BatchTable
                 title=""
                 batches={openBatches}
                 emptyMessage="進行中の支払明細はありません。"
+                selectable
+                selected={approveSelected}
+                onToggle={toggleApprove}
               />
             </section>
           ) : null}
@@ -681,15 +900,30 @@ export function PaymentsClient({
   );
 }
 
+/*
+  支払明細の一覧。
+
+  ■ 選択できるのは下書きの代理店明細だけ
+  承認・振込中・支払済み・失敗・取消は選択させない。
+  選択の可否を画面で絞るが、実際の判定はサーバーとRPCで必ずやり直す。
+*/
 function BatchTable({
   title,
   batches,
   emptyMessage,
+  selectable = false,
+  selected,
+  onToggle,
 }: {
   title: string;
   batches: PaymentBatchSummary[];
   emptyMessage: string;
+  selectable?: boolean;
+  selected?: Set<string>;
+  onToggle?: (batchId: string) => void;
 }) {
+  const canSelect = selectable && selected != null && onToggle != null;
+
   return (
     <section className="space-y-2">
       {title ? <h2 className="text-sm font-semibold text-zinc-200">{title}</h2> : null}
@@ -697,6 +931,7 @@ function BatchTable({
         <table className="min-w-[960px] w-full border-collapse">
           <thead>
             <tr>
+              {canSelect ? <th className={th}></th> : null}
               <th className={th}>種別</th>
               <th className={th}>支払先</th>
               <th className={th}>締め対象</th>
@@ -711,13 +946,27 @@ function BatchTable({
           <tbody>
             {batches.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-sm text-zinc-500">
+                <td
+                  colSpan={canSelect ? 10 : 9}
+                  className="px-4 py-10 text-center text-sm text-zinc-500"
+                >
                   {emptyMessage}
                 </td>
               </tr>
             ) : (
               batches.map((batch) => (
                 <tr key={batch.id} className="border-b border-zinc-800/70">
+                  {canSelect ? (
+                    <td className={td}>
+                      <input
+                        type="checkbox"
+                        disabled={!isBulkApprovable(batch)}
+                        checked={selected.has(batch.id)}
+                        onChange={() => onToggle(batch.id)}
+                        aria-label={`${batch.payeeName} の支払明細を選択`}
+                      />
+                    </td>
+                  ) : null}
                   <td className={`${td} text-zinc-400`}>
                     {PAYEE_KIND_LABEL[batch.payeeKind as PayeeKind]}
                   </td>

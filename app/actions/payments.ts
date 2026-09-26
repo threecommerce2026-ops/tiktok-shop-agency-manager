@@ -29,7 +29,10 @@ import {
   PAYEE_KIND_LABEL,
   type PayeeKind,
 } from "@/lib/payments/payable";
-import { isOpenPaymentBatchStatus } from "@/lib/payments/payment-status";
+import {
+  PAYMENT_BATCH_STATUS_LABEL,
+  isOpenPaymentBatchStatus,
+} from "@/lib/payments/payment-status";
 
 /*
   支払管理のサーバーアクション。
@@ -601,4 +604,109 @@ export async function previewBulkSettlementAction(
 export async function hasOpenPaymentBatches(): Promise<boolean> {
   const overview = await fetchPaymentOverview(getSupabaseAdmin());
   return overview.batches.some((batch) => isOpenPaymentBatchStatus(batch.status));
+}
+
+// =============================================================================
+// 支払明細の一括承認
+// =============================================================================
+
+export type BulkApproveResult =
+  | { ok: true; message: string; approvedCount: number; approvedAmount: number }
+  | { ok: false; error: string };
+
+/**
+ * 選択した支払明細をまとめて承認する。
+ *
+ * 承認の判定・振込先の固定・監査ログは RPC 内の1トランザクションで行う。
+ * 1件でも検証に失敗したら全件ロールバックされるので、部分的に承認された
+ * 状態にはならない。
+ *
+ * ブラウザから来た選択内容は信用しない。存在・状態・締め月の再確認はサーバー側で
+ * やり直す。金額・振込先・明細整合性の最終判定は RPC 側が行う。
+ */
+export async function approvePaymentBatchesBulkAction(
+  _prev: BulkApproveResult | null,
+  formData: FormData,
+): Promise<BulkApproveResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const batchIds = [...new Set(readList(formData, "batch_id"))].filter(
+    (id) => id.length > 0,
+  );
+
+  if (batchIds.length === 0) {
+    return { ok: false, error: "支払明細を1件以上選択してください" };
+  }
+
+  /*
+    画面の値を信用せず、承認対象をサーバー側で取り直して先に検証する。
+    RPC 側でも同じ検証をしているが、ここで弾いたほうが
+    「どの代理店の何が原因か」を分かりやすく返せる。
+  */
+  const overview = await fetchPaymentOverview(getSupabaseAdmin());
+  if (overview.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(overview.error) };
+  }
+
+  const selected = overview.batches.filter((batch) => batchIds.includes(batch.id));
+
+  if (selected.length !== batchIds.length) {
+    return {
+      ok: false,
+      error: "選択した支払明細が見つかりません。画面を再読み込みしてください。",
+    };
+  }
+
+  const notDraft = selected.filter((batch) => batch.status !== "draft");
+  if (notDraft.length > 0) {
+    return {
+      ok: false,
+      error: `下書き以外の支払明細が含まれています（${notDraft
+        .map((b) => `${b.payeeName}：${PAYMENT_BATCH_STATUS_LABEL[b.status]}`)
+        .join(" / ")}）。承認された支払明細はありません。`,
+    };
+  }
+
+  const cutoffMonths = [...new Set(selected.map((batch) => batch.cutoffMonth))];
+  if (cutoffMonths.length > 1) {
+    return {
+      ok: false,
+      error: `締め対象月が異なる支払明細は同時に承認できません（${cutoffMonths
+        .map(formatCutoffLabel)
+        .join(" / ")}）。承認された支払明細はありません。`,
+    };
+  }
+
+  const { data, error } = await auth.supabase.rpc("approve_payment_batches_bulk", {
+    p_batch_ids: batchIds,
+  });
+
+  if (error) {
+    return {
+      ok: false,
+      error: `一括承認できませんでした。${describeRpcError(
+        error.message,
+        error.code,
+      )} 承認された支払明細はありません。`,
+    };
+  }
+
+  revalidatePaymentViews();
+  for (const id of batchIds) revalidatePath(`/payments/${id}`);
+
+  const approvedCount = Number(data ?? batchIds.length);
+  const approvedAmount =
+    Math.round(
+      selected.reduce((total, batch) => total + batch.paymentAmount, 0) * 100,
+    ) / 100;
+
+  return {
+    ok: true,
+    approvedCount,
+    approvedAmount,
+    message: `${approvedCount} 件の支払明細を承認しました（${formatCutoffLabel(
+      cutoffMonths[0],
+    )}締め）。振込先を固定しました。まだ支払済みにはなっていません。`,
+  };
 }
