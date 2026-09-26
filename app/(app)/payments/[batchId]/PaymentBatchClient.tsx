@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState } from "react";
+import { Fragment, useActionState, useState } from "react";
 
 import {
   approvePaymentBatchAction,
@@ -13,7 +13,10 @@ import {
   type PaymentActionResult,
   type PaymentCsvActionResult,
 } from "@/app/actions/payments";
-import { REWARD_KIND_LABEL, type PaymentBatchDetail } from "@/lib/db/payment-queries";
+import type {
+  PaymentBatchDetail,
+  PaymentRewardBreakdown,
+} from "@/lib/db/payment-queries";
 import { formatCutoffLabel } from "@/lib/payments/cutoff-month";
 import { BankStateBadge } from "@/components/payments/PayeeBankForm";
 import { PAYEE_KIND_LABEL } from "@/lib/payments/payable";
@@ -122,6 +125,16 @@ export function PaymentBatchClient({
     Math.abs(detail.itemsTotalAmount - batch.paymentAmount) <= 0.005 &&
     detail.items.length === batch.itemCount;
 
+  /*
+    画面に出す内訳の合計が支払明細のスナップショットと一致しているか。
+    ずれているときは誤った数字を根拠として見せず、エラーとして扱う。
+  */
+  const breakdownTotal =
+    Math.round((detail.agencyRewardAmount + detail.referralRewardAmount) * 100) / 100;
+  const breakdownMatches =
+    detail.totalsMatchBatch &&
+    Math.abs(breakdownTotal - batch.paymentAmount) <= 0.005;
+
   return (
     <div className="space-y-6">
       <div>
@@ -147,6 +160,32 @@ export function PaymentBatchClient({
           {" / "}
           {batch.itemCount.toLocaleString("ja-JP")} 件
         </p>
+
+        {/* 振込予定額と、その内訳を最初に見せる */}
+        <div className="mt-4 flex flex-wrap items-end gap-x-8 gap-y-2">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+              振込予定額
+            </p>
+            <p className="mt-1 font-mono text-3xl font-bold text-zinc-50">
+              {yen(batch.paymentAmount)}
+            </p>
+          </div>
+          <div className="flex gap-6">
+            <div>
+              <p className="text-[11px] text-zinc-500">代理店分配報酬</p>
+              <p className="mt-0.5 font-mono text-base font-semibold text-sky-200">
+                {yen(detail.agencyRewardAmount)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] text-zinc-500">紹介制度報酬</p>
+              <p className="mt-0.5 font-mono text-base font-semibold text-violet-200">
+                {yen(detail.referralRewardAmount)}
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -175,11 +214,11 @@ export function PaymentBatchClient({
           {/* 支払は代理店へ1回だが、会計上の内訳は必ず残す */}
           <dl className="mt-2 space-y-0.5 text-[11px] text-zinc-500">
             <div className="flex justify-between gap-3">
-              <dt>{REWARD_KIND_LABEL.agency}</dt>
+              <dt>代理店分配報酬</dt>
               <dd className="font-mono">{yen(detail.agencyRewardAmount)}</dd>
             </div>
             <div className="flex justify-between gap-3">
-              <dt>{REWARD_KIND_LABEL.referral}</dt>
+              <dt>紹介制度報酬</dt>
               <dd className="font-mono">{yen(detail.referralRewardAmount)}</dd>
             </div>
           </dl>
@@ -385,77 +424,76 @@ export function PaymentBatchClient({
         ) : null}
       </section>
 
-      <section className="space-y-2">
-        <h2 className="text-sm font-semibold text-zinc-200">
-          対象明細（{detail.items.length.toLocaleString("ja-JP")}）
-        </h2>
-        <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950/60">
-          <table className="min-w-[900px] w-full border-collapse">
-            <thead>
-              <tr>
-                <th className={th}>報酬種別</th>
-                <th className={th}>対象月</th>
-                <th className={th}>クリエイター</th>
-                <th className={th}>TikTok ID</th>
-                <th className={`${th} text-right`}>報酬計算元</th>
-                <th className={`${th} text-right`}>報酬率</th>
-                <th className={`${th} text-right`}>報酬額</th>
-                <th className={th}>支払状態</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.items.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-sm text-zinc-500">
-                    対象明細がありません。
-                  </td>
-                </tr>
-              ) : (
-                detail.items.map((item) => (
-                  <tr key={item.id} className="border-b border-zinc-800/70">
-                    <td className={`${td} whitespace-normal`}>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                          item.rewardKind === "agency"
-                            ? "bg-sky-500/15 text-sky-200"
-                            : "bg-violet-500/15 text-violet-200"
-                        }`}
-                      >
-                        {REWARD_KIND_LABEL[item.rewardKind]}
-                      </span>
-                      {item.referrerName ? (
-                        <div className="mt-1 text-[10px] text-zinc-500">
-                          紹介者: {item.referrerName}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className={`${td} font-mono text-zinc-300`}>{item.targetMonth}</td>
-                    <td className={`${td} text-zinc-100`}>{item.creatorName}</td>
-                    <td className={`${td} font-mono text-zinc-500`}>{item.tiktokId}</td>
-                    <td className={`${td} text-right font-mono text-zinc-400`}>
-                      {yen(item.baseAmount)}
-                    </td>
-                    <td className={`${td} text-right font-mono text-zinc-400`}>
-                      {item.ratePct ? `${item.ratePct}%` : "—"}
-                    </td>
-                    <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
-                      {yen(item.rewardAmount)}
-                    </td>
-                    <td className={`${td} text-zinc-400`}>
-                      {item.isPaid ? "支払済み" : "未払い（占有中）"}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p className="text-[11px] text-zinc-500">
-          {batch.payeeKind === "agency"
-            ? "代理店報酬は agency_reward_items が正式source。報酬率（AK）は表示専用で、金額の計算には使いません。"
-            : "紹介者報酬は referral_reward_items が正式source。金額は上限調整後の adjusted_reward_amount です。"}
+      {!breakdownMatches ? (
+        <section
+          className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-4 text-sm text-red-100"
+          role="alert"
+        >
+          <p className="font-semibold">支払根拠の内訳が支払明細と一致しません</p>
+          <p className="mt-1 text-[11px] leading-relaxed">
+            内訳の合計 {yen(breakdownTotal)} と支払明細の {yen(batch.paymentAmount)} が
+            一致しないため、誤った根拠を表示しないよう内訳を伏せています。
+            再集計や明細の変更が入った可能性があります。承認せずに調査してください。
+          </p>
+        </section>
+      ) : null}
+
+      {/*
+        支払根拠。代理店分配報酬と紹介制度報酬を完全に別セクションにする。
+        最初から注文単位の大量明細を並べず、クリエイター別 → 月別の2階層で出す。
+      */}
+      {breakdownMatches ? (
+        <>
+      <RewardBreakdownSection
+        breakdown={detail.agencyBreakdown}
+        title="代理店分配報酬"
+        totalAmount={detail.agencyRewardAmount}
+        baseLabel="分配計算基準額"
+        baseHint="TikTokの「収益分配前のクリエイター収益」に相当します。"
+        rateLabel="分配率"
+        amountLabel="代理店分配額"
+        amountHint="TikTok側で分配率・明細単位の丸めを反映した実額です。この金額を支払額として採用します。"
+        accent="sky"
+      />
+
+      <RewardBreakdownSection
+        breakdown={detail.referralBreakdown}
+        title="紹介制度報酬"
+        totalAmount={detail.referralRewardAmount}
+        baseLabel="紹介計算基準額"
+        baseHint="紹介制度報酬の計算対象となる成果報酬ベースです。"
+        rateLabel="紹介率"
+        amountLabel="紹介制度報酬"
+        amountHint="紹介計算基準額に紹介率を適用した報酬です。"
+        accent="violet"
+      />
+
+      <section className="rounded-2xl border border-white/[0.08] bg-surface-1/50 px-4 py-4 sm:px-6">
+        <h2 className="text-sm font-semibold text-zinc-200">振込予定額の内訳</h2>
+        <dl className="mt-3 space-y-1.5 text-sm">
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-zinc-400">代理店分配報酬</dt>
+            <dd className="font-mono text-zinc-100">{yen(detail.agencyRewardAmount)}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-zinc-400">＋ 紹介制度報酬</dt>
+            <dd className="font-mono text-zinc-100">{yen(detail.referralRewardAmount)}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4 border-t border-white/[0.08] pt-2">
+            <dt className="font-semibold text-zinc-200">＝ 振込予定額</dt>
+            <dd className="font-mono text-lg font-bold text-zinc-50">
+              {yen(detail.agencyRewardAmount + detail.referralRewardAmount)}
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">
+          代理店分配報酬は TikTok が注文明細単位で算出した分配実額（AP）の合計です。
+          THREE 側で「分配計算基準額 × 分配率」を掛け直して作り直してはいません。
+          TAP収益はどちらにも含まれません。
         </p>
       </section>
+        </>
+      ) : null}
 
       <section className="space-y-2">
         <h2 className="text-sm font-semibold text-zinc-200">操作履歴</h2>
@@ -510,5 +548,174 @@ export function PaymentBatchClient({
         </div>
       </section>
     </div>
+  );
+}
+
+/*
+  支払根拠のセクション。
+
+  ■ クリエイター別 → 月別の2階層
+  注文単位の明細は1代理店で数百件になるため最初から並べない。
+  クリエイター単位で畳んで、必要なときだけ月別へ展開する。
+
+  ■ 金額は snapshot をそのまま出す
+  基準額 × 率をこの画面で掛け直して金額を作らない。
+  率と基準額は「なぜこの金額なのか」を説明するための表示値。
+*/
+function RewardBreakdownSection({
+  breakdown,
+  title,
+  totalAmount,
+  baseLabel,
+  baseHint,
+  rateLabel,
+  amountLabel,
+  amountHint,
+  accent,
+}: {
+  breakdown: PaymentRewardBreakdown;
+  title: string;
+  totalAmount: number;
+  baseLabel: string;
+  baseHint: string;
+  rateLabel: string;
+  amountLabel: string;
+  amountHint: string;
+  accent: "sky" | "violet";
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const badge =
+    accent === "sky" ? "bg-sky-500/15 text-sky-200" : "bg-violet-500/15 text-violet-200";
+  const isReferral = breakdown.rewardKind === "referral";
+
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-sm font-semibold text-zinc-200">
+          <span className={`mr-2 rounded px-1.5 py-0.5 text-[10px] font-medium ${badge}`}>
+            {title}
+          </span>
+          <span className="text-zinc-500">
+            クリエイター {breakdown.creators.length} 名 / 明細{" "}
+            {breakdown.itemCount.toLocaleString("ja-JP")} 件
+          </span>
+        </h2>
+        <p className="font-mono text-base font-bold text-zinc-100">{yen(totalAmount)}</p>
+      </div>
+
+      {breakdown.creators.length === 0 ? (
+        <p className="rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-6 text-center text-sm text-zinc-500">
+          この支払明細に{title}はありません。
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950/60">
+          <table className="min-w-[980px] w-full border-collapse">
+            <thead>
+              <tr>
+                <th className={th}></th>
+                {isReferral ? <th className={th}>紹介者</th> : null}
+                <th className={th}>クリエイター</th>
+                <th className={th}>TikTok ID</th>
+                <th className={th}>対象期間</th>
+                <th className={`${th} text-right`} title="売上規模を確認するための参考値です。報酬の直接の計算基準ではありません。">
+                  GMV（参考）
+                </th>
+                <th className={`${th} text-right`} title={baseHint}>
+                  {baseLabel}
+                </th>
+                <th className={`${th} text-right`}>{rateLabel}</th>
+                <th className={`${th} text-right`} title={amountHint}>
+                  {amountLabel}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {breakdown.creators.map((creator) => {
+                const key = `${creator.referrerName ?? ""}:${creator.creatorId}`;
+                const open = expanded.has(key);
+                return (
+                  <Fragment key={key}>
+                    <tr className="border-b border-zinc-800/70">
+                      <td className={td}>
+                        <button
+                          type="button"
+                          onClick={() => toggle(key)}
+                          aria-expanded={open}
+                          className="min-h-[28px] min-w-[28px] rounded-md border border-white/[0.12] text-[11px] text-zinc-300 hover:bg-white/[0.06]"
+                        >
+                          {open ? "−" : "+"}
+                        </button>
+                      </td>
+                      {isReferral ? (
+                        <td className={`${td} text-zinc-300`}>{creator.referrerName ?? "—"}</td>
+                      ) : null}
+                      <td className={`${td} font-medium text-zinc-100`}>{creator.creatorName}</td>
+                      <td className={`${td} font-mono text-zinc-500`}>{creator.tiktokId}</td>
+                      <td className={`${td} font-mono text-zinc-400`}>
+                        {creator.periodStartMonth === creator.periodEndMonth
+                          ? creator.periodStartMonth
+                          : `${creator.periodStartMonth}〜${creator.periodEndMonth}`}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-500`}>
+                        {yen(creator.gmv)}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-300`}>
+                        {yen(creator.baseAmount)}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-500`}>—</td>
+                      <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
+                        {yen(creator.rewardAmount)}
+                      </td>
+                    </tr>
+
+                    {open
+                      ? creator.months.map((month) => (
+                          <tr
+                            key={`${key}:${month.targetMonth}`}
+                            className="border-b border-zinc-800/40 bg-surface-1/30"
+                          >
+                            <td className={td}></td>
+                            {isReferral ? <td className={td}></td> : null}
+                            <td className={`${td} text-zinc-500`} colSpan={2}>
+                              <span className="text-[11px]">
+                                明細 {month.itemCount.toLocaleString("ja-JP")} 件
+                              </span>
+                            </td>
+                            <td className={`${td} font-mono text-zinc-300`}>
+                              {month.targetMonth}
+                            </td>
+                            <td className={`${td} text-right font-mono text-zinc-500`}>
+                              {yen(month.gmv)}
+                            </td>
+                            <td className={`${td} text-right font-mono text-zinc-300`}>
+                              {yen(month.baseAmount)}
+                            </td>
+                            <td className={`${td} text-right font-mono text-zinc-300`}>
+                              {month.ratePct ? `${month.ratePct}%` : "—"}
+                            </td>
+                            <td className={`${td} text-right font-mono text-zinc-100`}>
+                              {yen(month.rewardAmount)}
+                            </td>
+                          </tr>
+                        ))
+                      : null}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }

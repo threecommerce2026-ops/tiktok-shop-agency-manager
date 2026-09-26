@@ -652,9 +652,15 @@ export async function fetchPaymentOverview(
 export const REWARD_KINDS = ["agency", "referral"] as const;
 export type RewardKind = (typeof REWARD_KINDS)[number];
 
+/*
+  TAP と混同しないよう、画面表記は種別が分かる名前にする。
+  ・代理店分配報酬 … TikTok が算出した代理店への分配実額
+  ・紹介制度報酬   … 紹介制度によって発生する報酬
+  TAP 収益はどちらにも含まれない（別テーブル tap_affiliate_order_lines）。
+*/
 export const REWARD_KIND_LABEL: Record<RewardKind, string> = {
-  agency: "代理店報酬",
-  referral: "紹介報酬",
+  agency: "代理店分配報酬",
+  referral: "紹介制度報酬",
 };
 
 export type PaymentBatchItemRow = {
@@ -675,6 +681,57 @@ export type PaymentBatchItemRow = {
   isPaid: boolean;
 };
 
+/*
+  支払根拠の内訳。
+
+  ■ 金額は claim 済み明細の snapshot だけを使う
+  affiliate_order_lines から作り直さない。所属変更・分配率変更・売上再取込が
+  あっても、支払明細の根拠が動かないようにするため。
+
+  ■ 代理店分配額は AP をそのまま合計する
+  AJ（分配計算基準額）× AK（分配率）を掛け直して作らない。TikTok は注文明細
+  単位で計算・丸めをしているので、THREE 側で再計算すると実額とずれる。
+  AJ と AK は「なぜこの金額なのか」を説明するための表示値。
+
+  TODO: 支払時点の名称まで完全に snapshot するなら、reward item へ
+  creator_name / creator_tiktok_id、batch へ agency_name を持たせる検討が必要。
+  現在は creator_id からの live join で、改名すると過去明細の表示名が変わる。
+*/
+export type PaymentRewardMonthRow = {
+  targetMonth: string;
+  /** 参考値。分配・紹介いずれの計算基準でもない */
+  gmv: number;
+  /** 代理店=creator_revenue_before_split(AJ) / 紹介=base_amount(AD) */
+  baseAmount: number;
+  /** 代理店=agency_split_rate(%) / 紹介=reward_rate を % 化した値 */
+  ratePct: number;
+  /** 代理店=reward_amount(AP実額) / 紹介=adjusted または reward_amount */
+  rewardAmount: number;
+  itemCount: number;
+};
+
+export type PaymentRewardCreatorGroup = {
+  creatorId: string;
+  creatorName: string;
+  tiktokId: string;
+  /** 紹介制度報酬のときだけ入る紹介者名 */
+  referrerName: string | null;
+  periodStartMonth: string;
+  periodEndMonth: string;
+  gmv: number;
+  baseAmount: number;
+  rewardAmount: number;
+  itemCount: number;
+  months: PaymentRewardMonthRow[];
+};
+
+export type PaymentRewardBreakdown = {
+  rewardKind: RewardKind;
+  creators: PaymentRewardCreatorGroup[];
+  totalAmount: number;
+  itemCount: number;
+};
+
 export type PaymentBatchAuditRow = {
   id: string;
   action: PaymentBatchAction;
@@ -693,10 +750,19 @@ export type PaymentBatchDetail = {
   auditLogs: PaymentBatchAuditRow[];
   /** 明細実額の合計。支払明細のスナップショットと突き合わせる検算用 */
   itemsTotalAmount: number;
-  /** 内訳: 代理店報酬ぶんの合計 */
+  /** 内訳: 代理店分配報酬ぶんの合計 */
   agencyRewardAmount: number;
-  /** 内訳: 紹介報酬ぶんの合計 */
+  /** 内訳: 紹介制度報酬ぶんの合計 */
   referralRewardAmount: number;
+  /** 代理店分配報酬の根拠（creator別 → 月別） */
+  agencyBreakdown: PaymentRewardBreakdown;
+  /** 紹介制度報酬の根拠（紹介者×creator別 → 月別） */
+  referralBreakdown: PaymentRewardBreakdown;
+  /**
+   * 画面合計と支払明細スナップショットが一致しているか。
+   * false のときは画面に金額を出さずエラーとして扱う。
+   */
+  totalsMatchBatch: boolean;
   error: string | null;
 };
 
@@ -704,6 +770,13 @@ export async function fetchPaymentBatchDetail(
   supabase: SupabaseClient,
   batchId: string,
 ): Promise<PaymentBatchDetail> {
+  const emptyBreakdown = (rewardKind: RewardKind): PaymentRewardBreakdown => ({
+    rewardKind,
+    creators: [],
+    totalAmount: 0,
+    itemCount: 0,
+  });
+
   const empty: PaymentBatchDetail = {
     batch: null,
     items: [],
@@ -711,6 +784,9 @@ export async function fetchPaymentBatchDetail(
     itemsTotalAmount: 0,
     agencyRewardAmount: 0,
     referralRewardAmount: 0,
+    agencyBreakdown: emptyBreakdown("agency"),
+    referralBreakdown: emptyBreakdown("referral"),
+    totalsMatchBatch: true,
     error: null,
   };
 
@@ -761,7 +837,7 @@ export async function fetchPaymentBatchDetail(
       ? fetchAllFrom<Record<string, unknown>>(
           supabase,
           "agency_reward_items",
-          "id, target_month, creator_id, commission_base, agency_split_rate, reward_amount, is_paid",
+          "id, target_month, creator_id, commission_base, commission_gmv, creator_revenue_before_split, agency_split_rate, reward_amount, is_paid",
           (query) => query.eq("payment_batch_id", batchId),
         )
       : Promise.resolve({
@@ -772,7 +848,7 @@ export async function fetchPaymentBatchDetail(
     fetchAllFrom<Record<string, unknown>>(
       supabase,
       "referral_reward_items",
-      "id, target_month, creator_id, referrer_id, base_amount, reward_rate, reward_amount, adjusted_reward_amount, is_paid",
+      "id, target_month, creator_id, referrer_id, source_row_key, base_amount, reward_rate, reward_amount, adjusted_reward_amount, is_paid",
       (query) => query.eq("payment_batch_id", batchId),
     ),
     supabase
@@ -828,6 +904,50 @@ export async function fetchPaymentBatchDetail(
       String(row.referrer_name ?? row.name ?? "（削除済み紹介者）"),
     ]),
   );
+
+  /*
+    紹介制度報酬の GMV は参考値。referral_reward_items が持たないので
+    注文行から引く。金額の計算には一切使わない（使うと snapshot ではなくなる）。
+
+    source_row_key で .in() すると URL が巨大になり 414 になる
+    （1キーあたり URL エンコードで約256バイト）。短い UUID の creator_id で
+    引いて、source_row_key の突き合わせはメモリで行う。
+  */
+  const referralSourceKeys = new Set(
+    referralItemsResult.data
+      .map((row) => (row.source_row_key == null ? null : String(row.source_row_key)))
+      .filter((value): value is string => value != null && value.length > 0),
+  );
+
+  const referralCreatorIds = [
+    ...new Set(
+      referralItemsResult.data
+        .map((row) => (row.creator_id == null ? null : String(row.creator_id)))
+        .filter((value): value is string => value != null),
+    ),
+  ];
+
+  const gmvBySourceKey = new Map<string, number>();
+
+  if (referralCreatorIds.length > 0) {
+    const linesResult = await fetchAllFrom<{
+      source_row_key: string | null;
+      commission_gmv: number | string | null;
+    }>(
+      supabase,
+      "affiliate_order_lines",
+      "id, source_row_key, commission_gmv",
+      (query) => query.in("creator_id", referralCreatorIds),
+    );
+
+    if (linesResult.error) return { ...empty, batch, error: linesResult.error };
+
+    for (const line of linesResult.data) {
+      const key = String(line.source_row_key ?? "");
+      if (!referralSourceKeys.has(key)) continue;
+      gmvBySourceKey.set(key, toAmount(line.commission_gmv));
+    }
+  }
 
   const creatorsResult =
     creatorIds.length > 0
@@ -899,6 +1019,68 @@ export async function fetchPaymentBatchDetail(
   */
   const sum = sumAgencyAmounts;
 
+  /*
+    代理店分配報酬の根拠。
+    基準額は AJ（creator_revenue_before_split）、率は AK（agency_split_rate）、
+    金額は AP（reward_amount）の実額。GMV は commission_gmv で参考値。
+  */
+  const agencyBreakdown = buildRewardBreakdown(
+    "agency",
+    agencyItemsResult.data.map((row) => {
+      const creator = creatorById.get(String(row.creator_id));
+      return {
+        creatorId: String(row.creator_id ?? ""),
+        creatorName: creator?.creatorName ?? "—",
+        tiktokId: creator?.tiktokId ?? "",
+        referrerName: null,
+        targetMonth: String(row.target_month ?? ""),
+        gmv: toAmount(row.commission_gmv),
+        baseAmount: toAmount(row.creator_revenue_before_split),
+        ratePct: toAmount(row.agency_split_rate),
+        rewardAmount: toAmount(row.reward_amount),
+      };
+    }),
+    sumAgencyAmounts,
+  );
+
+  /*
+    紹介制度報酬の根拠。
+    基準額は AD（base_amount）、率は reward_rate（0.05 → 5%）、
+    金額は adjusted_reward_amount ないし reward_amount。
+    GMV はこのテーブルに無いので、同じ明細の注文行から参考値として引く。
+  */
+  const referralBreakdown = buildRewardBreakdown(
+    "referral",
+    referralItemsResult.data.map((row) => {
+      const creator = creatorById.get(String(row.creator_id));
+      return {
+        creatorId: String(row.creator_id ?? ""),
+        creatorName: creator?.creatorName ?? "—",
+        tiktokId: creator?.tiktokId ?? "",
+        referrerName:
+          referrerNameById.get(String(row.referrer_id)) ?? "（不明な紹介者）",
+        targetMonth: String(row.target_month ?? ""),
+        gmv: toAmount(gmvBySourceKey.get(String(row.source_row_key ?? "")) ?? 0),
+        baseAmount: toAmount(row.base_amount),
+        ratePct: toAmount(row.reward_rate) * 100,
+        rewardAmount: resolveRewardItemAmount(row),
+      };
+    }),
+    sumReferralAmounts,
+  );
+
+  const itemsTotalAmount = sum(items.map((item) => item.rewardAmount));
+  const agencyRewardAmount = agencyBreakdown.totalAmount;
+  const referralRewardAmount = referralBreakdown.totalAmount;
+
+  /*
+    画面合計と支払明細スナップショットの突き合わせ。
+    ずれているときは画面に金額を出さずエラーとして扱う。
+  */
+  const totalsMatchBatch =
+    Math.abs(sum([agencyRewardAmount, referralRewardAmount]) - batch.paymentAmount) <=
+    0.005;
+
   return {
     batch,
     items,
@@ -913,16 +1095,128 @@ export async function fetchPaymentBatchDetail(
       note: (row.note as string | null) ?? null,
       createdAt: String(row.created_at ?? ""),
     })),
-    itemsTotalAmount: sum(items.map((item) => item.rewardAmount)),
-    agencyRewardAmount: sum(
-      items.filter((item) => item.rewardKind === "agency").map((item) => item.rewardAmount),
-    ),
-    referralRewardAmount: sumReferralAmounts(
-      items
-        .filter((item) => item.rewardKind === "referral")
-        .map((item) => item.rewardAmount),
-    ),
+    itemsTotalAmount,
+    agencyRewardAmount,
+    referralRewardAmount,
+    agencyBreakdown,
+    referralBreakdown,
+    totalsMatchBatch,
     error: null,
+  };
+}
+
+/*
+  claim 済み明細を creator別 → 月別へ束ねる。
+
+  金額は明細の snapshot をそのまま足すだけで、基準額×率の再計算はしない。
+  GMV は参考値なので合計はするが、どの計算にも使わない。
+*/
+function buildRewardBreakdown(
+  rewardKind: RewardKind,
+  rows: Array<{
+    creatorId: string;
+    creatorName: string;
+    tiktokId: string;
+    referrerName: string | null;
+    targetMonth: string;
+    gmv: number;
+    baseAmount: number;
+    ratePct: number;
+    rewardAmount: number;
+  }>,
+  sumAmounts: (values: number[]) => number,
+): PaymentRewardBreakdown {
+  /*
+    紹介制度報酬は「紹介者 × クリエイター」で1グループにする。
+    同じクリエイターを別の紹介者が紹介している場合に混ざらないようにするため。
+  */
+  const groupKeyOf = (row: { creatorId: string; referrerName: string | null }) =>
+    rewardKind === "referral"
+      ? `${row.referrerName ?? ""}::${row.creatorId}`
+      : row.creatorId;
+
+  type Bucket = {
+    creatorId: string;
+    creatorName: string;
+    tiktokId: string;
+    referrerName: string | null;
+    months: Map<
+      string,
+      { gmv: number[]; base: number[]; reward: number[]; rates: Set<number>; count: number }
+    >;
+  };
+
+  const buckets = new Map<string, Bucket>();
+
+  for (const row of rows) {
+    const key = groupKeyOf(row);
+    const bucket =
+      buckets.get(key) ??
+      ({
+        creatorId: row.creatorId,
+        creatorName: row.creatorName,
+        tiktokId: row.tiktokId,
+        referrerName: rewardKind === "referral" ? row.referrerName : null,
+        months: new Map(),
+      } satisfies Bucket);
+
+    const month =
+      bucket.months.get(row.targetMonth) ??
+      { gmv: [], base: [], reward: [], rates: new Set<number>(), count: 0 };
+
+    month.gmv.push(row.gmv);
+    month.base.push(row.baseAmount);
+    month.reward.push(row.rewardAmount);
+    month.rates.add(row.ratePct);
+    month.count += 1;
+
+    bucket.months.set(row.targetMonth, month);
+    buckets.set(key, bucket);
+  }
+
+  const creators: PaymentRewardCreatorGroup[] = [...buckets.values()].map((bucket) => {
+    const months: PaymentRewardMonthRow[] = [...bucket.months.entries()]
+      .map(([targetMonth, month]) => ({
+        targetMonth,
+        gmv: sumAgencyAmounts(month.gmv),
+        baseAmount: sumAgencyAmounts(month.base),
+        /*
+          率は明細ごとに同じ想定。混在していたら最大値を出し、
+          金額は明細の実額合計なので率の表示に引きずられない。
+        */
+        ratePct: month.rates.size === 0 ? 0 : Math.max(...month.rates),
+        rewardAmount: sumAmounts(month.reward),
+        itemCount: month.count,
+      }))
+      .sort((a, b) => a.targetMonth.localeCompare(b.targetMonth));
+
+    return {
+      creatorId: bucket.creatorId,
+      creatorName: bucket.creatorName,
+      tiktokId: bucket.tiktokId,
+      referrerName: bucket.referrerName,
+      periodStartMonth: months[0]?.targetMonth ?? "",
+      periodEndMonth: months.at(-1)?.targetMonth ?? "",
+      gmv: sumAgencyAmounts(months.map((m) => m.gmv)),
+      baseAmount: sumAgencyAmounts(months.map((m) => m.baseAmount)),
+      rewardAmount: sumAmounts(months.map((m) => m.rewardAmount)),
+      itemCount: months.reduce((total, m) => total + m.itemCount, 0),
+      months,
+    };
+  });
+
+  creators.sort(
+    (a, b) =>
+      b.rewardAmount - a.rewardAmount ||
+      a.tiktokId.localeCompare(b.tiktokId) ||
+      a.creatorName.localeCompare(b.creatorName, "ja"),
+  );
+
+  return {
+    rewardKind,
+    creators,
+    totalAmount: sumAmounts(creators.map((c) => c.rewardAmount)),
+    itemCount: creators.reduce((total, c) => total + c.itemCount, 0),
   };
 }
 
