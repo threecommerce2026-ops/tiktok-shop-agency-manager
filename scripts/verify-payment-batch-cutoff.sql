@@ -67,9 +67,9 @@ insert into public.agency_reward_items
   (agency_id, creator_id, target_month, source_row_key, order_id, product_id,
    commission_base, commission_gmv, creator_revenue_before_split, agency_split_rate,
    reward_amount, is_reward_target, is_paid) values
-  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-06','ct-a-06','o1','p1',1000,1000,900,10,100,true,false),
-  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-07','ct-a-07','o2','p1',2000,2000,1800,10,200,true,false),
-  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-08','ct-a-08','o3','p1',9000,9000,8000,10,900,true,false),
+  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-06','ct-a-06','o1','p1',10000,10000,9000,10,1000,true,false),
+  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-07','ct-a-07','o2','p1',20000,20000,18000,10,2000,true,false),
+  ('c0a00001-0000-4000-8000-000000000001','c0c00001-0000-4000-8000-000000000001','2026-08','ct-a-08','o3','p1',90000,90000,80000,10,9000,true,false),
   ('c0a00002-0000-4000-8000-000000000002','c0c00001-0000-4000-8000-000000000001','2026-07','ct-b-07','o4','p1',5000,5000,4500,10,500,true,false),
   ('c0a00003-0000-4000-8000-000000000003','c0c00001-0000-4000-8000-000000000001','2026-07','ct-c-07','o5','p1',7000,7000,6300,10,700,true,false);
 
@@ -197,9 +197,9 @@ begin
     into v_cnt, v_amt, v_cut, v_end
     from public.payment_batches where id = v_batch;
 
-  -- 代理店分配報酬のみ 100+200=300 → 2件 / 300.00（紹介報酬は claim しない）
-  perform t_check(1, 'cutoff=2026-07 で7月までの代理店分配報酬だけを claim（2件 / 300.00円）',
-    v_cnt = 2 and v_amt = 300.00, format('件数=%s 金額=%s', v_cnt, v_amt));
+  -- 代理店分配報酬のみ 1000+2000=3000 → 2件 / 3000.00（紹介報酬は claim しない）
+  perform t_check(1, 'cutoff=2026-07 で7月までの代理店分配報酬だけを claim（2件 / 3000.00円）',
+    v_cnt = 2 and v_amt = 3000.00, format('件数=%s 金額=%s', v_cnt, v_amt));
 
   perform t_check(2, '8月の代理店報酬は claim されない',
     (select payment_batch_id from public.agency_reward_items where source_row_key='ct-a-08') is null, null);
@@ -249,6 +249,8 @@ begin
   v_batch := public.claim_payment_batch_items('agency','c0a00001-0000-4000-8000-000000000001','2026-07');
   perform t_check(11, 'release 後に同じ cutoff で再作成できる',
     (select item_count from public.payment_batches where id = v_batch) = 2, null);
+  perform t_check(1101, '最低支払額を満たすので承認へ進める',
+    (select payment_amount from public.payment_batches where id = v_batch) >= 1000, null);
 
   -- TEST 3 準備: 7月分を paid にする
   perform public.approve_payment_batch(v_batch);
@@ -273,9 +275,9 @@ begin
   select item_count, payment_amount into v_cnt, v_amt
     from public.payment_batches where id = v_batch;
 
-  -- 代理店分配報酬のみ 900 → 1件 / 900.00
-  perform t_check(3, '7月paid済みなら cutoff=2026-08 で8月の代理店分配報酬だけ（1件 / 900.00円）',
-    v_cnt = 1 and v_amt = 900.00, format('件数=%s 金額=%s', v_cnt, v_amt));
+  -- 代理店分配報酬のみ 9000 → 1件 / 9000.00
+  perform t_check(3, '7月paid済みなら cutoff=2026-08 で8月の代理店分配報酬だけ（1件 / 9000.00円）',
+    v_cnt = 1 and v_amt = 9000.00, format('件数=%s 金額=%s', v_cnt, v_amt));
 
   select min(target_month) into v_min
     from public.agency_reward_items where payment_batch_id = v_batch;

@@ -7,6 +7,7 @@ import {
   sumReferralAmounts,
 } from "@/lib/referrals/referral-reward-engine";
 import { toAmount } from "@/lib/revenue/amount";
+import { AGENCY_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
 import {
   bankAccountFromRow,
   toBankAccountView,
@@ -532,9 +533,21 @@ export async function fetchPaymentOverview(
     };
   };
 
+  /*
+    代理店にも最低支払額を適用する。
+    判定額は締め月までの未払い累積（acc.claimable の合計）で、
+    紹介制度報酬は含まれない。未満なら below_threshold で翌月へ繰り越す。
+  */
   for (const [agencyId, acc] of agencyAcc) {
     rows.push(
-      buildRow("agency", agencyId, acc, agencyById.get(agencyId), sumAgencyAmounts, 0),
+      buildRow(
+        "agency",
+        agencyId,
+        acc,
+        agencyById.get(agencyId),
+        sumAgencyAmounts,
+        AGENCY_PAYOUT_THRESHOLD_YEN,
+      ),
     );
   }
 

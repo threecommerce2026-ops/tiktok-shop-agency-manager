@@ -65,11 +65,12 @@ select a.id, 'f0c00001-0000-4000-8000-000000000001', '2026-07',
        'ba-' || a.name, 'o-' || a.name, 'p1', 10000, 10000, 9000, 10,
        amt, true, false
 from (values
-  ('f0a00001-0000-4000-8000-000000000001'::uuid, 800::numeric),
-  ('f0a00002-0000-4000-8000-000000000002', 200),
-  ('f0a00003-0000-4000-8000-000000000003', 100),
-  ('f0a00004-0000-4000-8000-000000000004', 400),
-  ('f0a00005-0000-4000-8000-000000000005', 300)
+  -- 金額はいずれも最低支払額（¥1,000）以上にする。未満だと承認できない
+  ('f0a00001-0000-4000-8000-000000000001'::uuid, 8000::numeric),
+  ('f0a00002-0000-4000-8000-000000000002', 2000),
+  ('f0a00003-0000-4000-8000-000000000003', 1000),
+  ('f0a00004-0000-4000-8000-000000000004', 4000),
+  ('f0a00005-0000-4000-8000-000000000005', 3000)
 ) v(aid, amt)
 join public.agencies a on a.id = v.aid;
 
@@ -244,6 +245,7 @@ declare v_b uuid := current_setting('test.b2')::uuid; v_err text; v_amt numeric;
 begin
   -- TEST 11: スナップショットの金額を改ざんして承認を試す
   select payment_amount into v_amt from public.payment_batches where id = v_b;
+  -- 最低支払額は満たしたまま、明細合計とだけずらす
   update public.payment_batches set payment_amount = v_amt + 1 where id = v_b;
   begin
     perform public.approve_payment_batches_bulk(array[v_b]);
@@ -282,6 +284,25 @@ begin
   perform t_check(10, '対象明細が無い支払明細は承認しない',
     v_err like '%対象明細がありません%', v_err);
   update public.agency_reward_items set payment_batch_id = v_b where source_row_key = 'ba-BA_Full2';
+end $blk$;
+
+-- =========================================================================
+-- 最低支払額（¥1,000）未満は承認できない
+-- =========================================================================
+do $blk$
+declare v_b uuid := current_setting('test.b2')::uuid; v_err text; v_amt numeric;
+begin
+  select payment_amount into v_amt from public.payment_batches where id = v_b;
+  update public.payment_batches set payment_amount = 800 where id = v_b;
+  begin
+    perform public.approve_payment_batches_bulk(array[v_b]);
+    v_err := '(例外が出なかった)';
+  exception when others then v_err := sqlerrm; end;
+  perform t_check(2801, '最低支払額未満の支払明細は一括承認できない',
+    v_err like '%最低支払額に達していない%', v_err);
+  perform t_check(2802, '拒否された支払明細は draft のまま',
+    (select status from public.payment_batches where id = v_b) = 'draft', null);
+  update public.payment_batches set payment_amount = v_amt where id = v_b;
 end $blk$;
 
 -- =========================================================================

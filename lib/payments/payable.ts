@@ -15,6 +15,11 @@ import type { BankAccountState } from "@/lib/payments/bank-account";
   代理店が決まっていないクリエイターには報酬明細そのものが作られないため、
   支払先として現れない。ここで代理店を推測して割り当てることはしない。
 
+  ■ 最低支払額
+  未払い累積が最低支払額（既定 1,000円）に達しない支払先は below_threshold で
+  保留し、翌月以降へ繰り越す。明細は消さない。判定は単月ではなく
+  「締め月までの未払い累積」に対して行う。
+
   ■ 支払先は代理店に一本化する
   紹介者は独立した支払先ではない。紹介者報酬は referrers.agency_id が指す
   代理店へ合算して支払う。代理店が決まっていない紹介者は
@@ -52,7 +57,7 @@ export const PAYMENT_HOLD_REASON_LABEL: Record<PaymentHoldReason, string> = {
   referrer_agency_unassigned: "所属代理店未設定",
   bank_missing: "振込先未登録",
   bank_incomplete: "銀行コード / 支店コード未登録",
-  below_threshold: "支払基準額未達",
+  below_threshold: "最低支払額未満（翌月へ繰越）",
 };
 
 export const PAYMENT_HOLD_REASON_HINT: Record<PaymentHoldReason, string> = {
@@ -68,7 +73,7 @@ export const PAYMENT_HOLD_REASON_HINT: Record<PaymentHoldReason, string> = {
   bank_incomplete:
     "振込CSVの出力に金融機関コードと支店コードが必要です。支払先マスタへ登録してください。",
   below_threshold:
-    "未払残高が支払基準額に達していません。基準額に達するまで翌月へ繰り越します。",
+    "未払残高が最低支払額に達していません。明細は消さず、達するまで翌月へ繰り越します。",
 };
 
 export type PayableInput = {
@@ -79,9 +84,8 @@ export type PayableInput = {
   /** 未払残高（占有中を除いた、いま支払える額） */
   unpaidAmount: number;
   /**
-   * 支払基準額。
-   * 代理店の支払明細は合算額に対して 0（基準額なし）。
-   * 代理店へ未帰属の紹介者だけ 1,000（環境変数で変更可）を使う。
+   * 最低支払額。代理店・紹介者いずれも 1,000（環境変数で変更可）。
+   * 判定対象は締め月までの未払い累積で、単月ではない。
    */
   thresholdAmount: number;
   /** 月別所属が未確定の明細を含むか（代理店のみ） */

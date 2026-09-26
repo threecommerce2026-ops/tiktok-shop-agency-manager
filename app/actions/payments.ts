@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { AGENCY_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
 import {
   EARLIEST_CUTOFF_MONTH,
   formatCutoffLabel,
@@ -136,8 +137,19 @@ function validateCutoff(
   return null;
 }
 
+/*
+  支払基準額（最低支払額）。代理店・紹介者いずれも 1,000円。
+
+  判定対象は締め月までの未払い累積。claim RPC が占有した明細の合計に対して
+  判定するので、単月判定にはならない。基準額に達しない分は消さず、
+  達した時点でまとめて支払う。
+
+  代理店の判定額に紹介制度報酬は含まれない（代理店へは支払わないため）。
+*/
 function thresholdFor(payeeKind: PayeeKind): number {
-  return payeeKind === "referrer" ? REFERRAL_PAYOUT_THRESHOLD_YEN : 0;
+  return payeeKind === "referrer"
+    ? REFERRAL_PAYOUT_THRESHOLD_YEN
+    : AGENCY_PAYOUT_THRESHOLD_YEN;
 }
 
 // =============================================================================

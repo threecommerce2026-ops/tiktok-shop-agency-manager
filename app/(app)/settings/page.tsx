@@ -5,6 +5,7 @@ import { SignOutButton } from "@/components/app/SignOutButton";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
 import { ACCOUNT_MANAGEMENT_TYPE_OPTIONS } from "@/lib/creators/account-management-type";
+import { AGENCY_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
 import { REFERRAL_PAYOUT_THRESHOLD_YEN } from "@/lib/referrals/referral-reward-engine";
 import { formatYenPrecise } from "@/lib/revenue/calc";
 
@@ -78,8 +79,18 @@ export default async function SettingsPage() {
             {formatYenPrecise(REFERRAL_PAYOUT_THRESHOLD_YEN)} 以上で支払対象になります。
           </li>
           <li>{formatYenPrecise(REFERRAL_PAYOUT_THRESHOLD_YEN)} 未満の報酬は消えず、翌月へ繰り越されます。</li>
+          <li>
+            代理店分配報酬も同じく、
+            <strong className="text-zinc-200">締め月までの未払い累積</strong>が{" "}
+            {formatYenPrecise(AGENCY_PAYOUT_THRESHOLD_YEN)} 以上で支払対象になります。
+            単月ではなく累積で判定します。
+          </li>
+          <li>
+            {formatYenPrecise(AGENCY_PAYOUT_THRESHOLD_YEN)}{" "}
+            未満の代理店分配報酬も消えず、累積が達した時点でまとめて支払います。
+          </li>
           <li>支払い済みの明細は再集計しても二重払いされません。</li>
-          <li>代理店報酬に TAP 収益は含まれません。</li>
+          <li>代理店への支払は代理店分配報酬のみです。紹介制度報酬と TAP 収益は含まれません。</li>
         </ul>
       </section>
 

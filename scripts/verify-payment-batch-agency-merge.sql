@@ -89,8 +89,8 @@ insert into public.agency_reward_items
    commission_base, commission_gmv, creator_revenue_before_split, agency_split_rate,
    reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id) values
   -- A1: 通常2件（claim対象）
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-1','o1','p1',1000,1000,900,10,100,true,false,null,null),
-  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-2','o2','p1',2000,2000,1800,10,200,true,false,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-1','o1','p1',10000,10000,9000,10,1000,true,false,null,null),
+  ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-2','o2','p1',20000,20000,18000,10,2000,true,false,null,null),
   -- A1: 除外されるべき3件
   ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-paid','o3','p1',9000,9000,8000,10,1000,true,true,null,null),
   ('a0000001-0000-4000-8000-000000000001','c0000001-0000-4000-8000-000000000001','2026-03','mg-a1-payout','o4','p1',9000,9000,8000,10,2000,true,false,'d0000001-0000-4000-8000-000000000001',null),
@@ -100,7 +100,7 @@ insert into public.agency_reward_items
   -- A2（口座未登録）/ A3（自社）/ A4（代理店報酬のみ）
   ('a0000002-0000-4000-8000-000000000002','c0000001-0000-4000-8000-000000000001','2026-03','mg-a2-1','o7','p1',5000,5000,4500,10,500,true,false,null,null),
   ('a0000003-0000-4000-8000-000000000003','c0000001-0000-4000-8000-000000000001','2026-03','mg-a3-1','o8','p1',7000,7000,6300,10,700,true,false,null,null),
-  ('a0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2026-03','mg-a4-1','o9','p1',9000,9000,8100,10,900,true,false,null,null);
+  ('a0000004-0000-4000-8000-000000000004','c0000001-0000-4000-8000-000000000001','2026-03','mg-a4-1','o9','p1',90000,90000,81000,10,9000,true,false,null,null);
 
 -- ---- 紹介者報酬 ----
 insert into public.referral_reward_items
@@ -171,7 +171,7 @@ declare v_batch uuid; v_cnt int; v_amt numeric; v_released int;
 begin
   v_batch := public.claim_payment_batch_items('agency','a0000004-0000-4000-8000-000000000004','2026-03','2026-01',0,'T1');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
-  perform t_check(1, '代理店報酬のみ: 1件 / 900円', v_cnt = 1 and v_amt = 900,
+  perform t_check(1, '代理店報酬のみ: 1件 / 9000円', v_cnt = 1 and v_amt = 9000,
                   format('件数=%s 金額=%s', v_cnt, v_amt));
 
   -- TEST 7/8/9 の一部: cancelled batch が占有している行は巻き込まれない
@@ -214,8 +214,8 @@ begin
   v_batch := public.claim_payment_batch_items('agency','a0000001-0000-4000-8000-000000000001','2026-03','2026-01',0,'T3');
   select item_count, payment_amount into v_cnt, v_amt from public.payment_batches where id = v_batch;
 
-  -- 代理店分配報酬のみ 100+200=300 → 2件 / 300.00
-  perform t_check(3, '代理店分配報酬だけを claim: 2件 / 300.00円', v_cnt = 2 and v_amt = 300.00,
+  -- 代理店分配報酬のみ 1000+2000=3000 → 2件 / 3000.00
+  perform t_check(3, '代理店分配報酬だけを claim: 2件 / 3000.00円', v_cnt = 2 and v_amt = 3000.00,
                   format('件数=%s 金額=%s', v_cnt, v_amt));
 
   -- 除外条件テスト用の mg-r1-batch は別の（取消済み）batchを指しているので対象外
