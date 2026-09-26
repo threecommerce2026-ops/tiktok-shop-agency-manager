@@ -1,6 +1,5 @@
 import { ReferrersAdminClient } from "@/app/(app)/admin/referrers/ReferrersAdminClient";
 import { ReferrerMaintenanceSection } from "@/components/master/ReferrerMaintenanceSection";
-import { PayeeBankSection } from "@/components/payments/PayeeBankSection";
 import { fetchReferrerMaintenanceData } from "@/lib/db/referrer-maintenance-queries";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import {
@@ -39,6 +38,21 @@ export default async function ReferrersAdminPage({
   const params = await searchParams;
   const selectedReferrerId = params.referrerId?.trim() || null;
   const referrersResult = await fetchReferrerAdminRows(supabase, month);
+
+  /*
+    所属代理店の選択肢。紹介報酬は所属代理店へ合算して支払うため、
+    自社代理店も選べるようにする（自社なら外部振込対象外になる）。
+  */
+  const { data: agencyRows } = await getSupabaseAdmin()
+    .from("agencies")
+    .select("id, name, is_in_house")
+    .eq("is_active", true)
+    .order("name");
+  const agencies = (agencyRows ?? []).map((row) => ({
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    isInHouse: row.is_in_house === true,
+  }));
   const referralLinks: Record<string, string> = {};
   for (const referrer of referrersResult.data) {
     if (referrer.referralCode) {
@@ -87,11 +101,25 @@ export default async function ReferrersAdminPage({
         <ReferrerMaintenanceSection data={maintenanceData} />
       )}
 
-      {/* 支払管理で使う振込先。登録しないと支払明細を作成できない */}
-      <PayeeBankSection payeeKind="referrer" />
+      {/*
+        振込先は代理店側だけで管理する。
+        紹介者報酬は所属代理店へ合算して支払うため、紹介者に口座は登録しない。
+      */}
+      <div className="rounded-xl border border-white/[0.06] bg-surface-1/40 px-4 py-3 text-xs leading-relaxed text-zinc-400">
+        <p className="font-semibold text-zinc-300">振込先は代理店側で登録します</p>
+        <p className="mt-1">
+          紹介者は独立した支払先ではありません。紹介者報酬は下の「所属代理店」へ合算し、
+          代理店へ1回だけ振り込みます。振込先口座は{" "}
+          <Link href="/payments" className="text-[var(--accent-cyan)] hover:underline">
+            支払管理
+          </Link>{" "}
+          で代理店に登録してください。
+        </p>
+      </div>
 
       <ReferrersAdminClient
         referrers={referrersResult.data}
+        agencies={agencies}
         referralLinks={referralLinks}
         targetMonth={month}
         selectedReferrerId={selectedReferrerId}

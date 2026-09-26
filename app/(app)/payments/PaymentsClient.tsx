@@ -49,7 +49,7 @@ const yen = (value: number | null | undefined) =>
 const TABS = [
   { key: "all", label: "すべて" },
   { key: "agency", label: "代理店" },
-  { key: "referrer", label: "紹介者" },
+  { key: "referrer", label: "代理店未設定の紹介者" },
   { key: "hold", label: "振込保留" },
   { key: "history", label: "支払履歴" },
   { key: "seller", label: "セラー請求" },
@@ -261,8 +261,8 @@ export function PaymentsClient({
           hint={`支払明細 ${overview.totals.scheduledBatchCount} 件（未振込）`}
           tone="strong"
         />
-        <Kpi label="代理店未払" value={yen(overview.totals.agencyUnpaidAmount)} />
-        <Kpi label="紹介者未払" value={yen(overview.totals.referrerUnpaidAmount)} />
+        <Kpi label="代理店報酬 未払" value={yen(overview.totals.agencyUnpaidAmount)} />
+        <Kpi label="紹介報酬 未払" value={yen(overview.totals.referrerUnpaidAmount)} />
         <Kpi
           label="振込保留"
           value={yen(overview.totals.holdAmount)}
@@ -422,6 +422,8 @@ export function PaymentsClient({
                     <th className={`${th} text-right`}>発生額</th>
                     <th className={`${th} text-right`}>過去支払済</th>
                     <th className={`${th} text-right`}>支払予定中</th>
+                    <th className={`${th} text-right`}>代理店報酬</th>
+                    <th className={`${th} text-right`}>紹介報酬</th>
                     <th className={`${th} text-right`}>未払残高</th>
                     <th className={`${th} text-right`}>今回支払額</th>
                     <th className={th}>振込先状態</th>
@@ -432,7 +434,7 @@ export function PaymentsClient({
                 <tbody>
                   {unpaidRows.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="px-4 py-10 text-center text-sm text-zinc-500">
+                      <td colSpan={14} className="px-4 py-10 text-center text-sm text-zinc-500">
                         該当する支払先がありません。
                       </td>
                     </tr>
@@ -455,14 +457,25 @@ export function PaymentsClient({
                           </td>
                           <td className={`${td} whitespace-normal`}>
                             <div className="font-medium text-zinc-100">{row.payeeName}</div>
-                            <div className="mt-2 max-w-md">
-                              <PayeeBankForm
-                                payeeKind={row.payeeKind}
-                                payeeId={row.payeeId}
-                                payeeName={row.payeeName}
-                                bank={row.bank}
-                              />
-                            </div>
+                            {/*
+                              振込先は代理店側だけで管理する。紹介者報酬は所属代理店へ
+                              合算して支払うため、紹介者に口座は登録しない。
+                            */}
+                            {row.payeeKind === "agency" ? (
+                              <div className="mt-2 max-w-md">
+                                <PayeeBankForm
+                                  payeeKind={row.payeeKind}
+                                  payeeId={row.payeeId}
+                                  payeeName={row.payeeName}
+                                  bank={row.bank}
+                                />
+                              </div>
+                            ) : (
+                              <p className="mt-2 max-w-md text-[11px] leading-relaxed text-amber-200">
+                                所属代理店が未設定です。紹介者報酬は所属代理店へ合算して
+                                支払うため、「紹介者管理」で所属代理店を設定してください。
+                              </p>
+                            )}
                           </td>
                           <td className={`${td} font-mono text-zinc-300`}>
                             {row.periodStartMonth
@@ -479,6 +492,24 @@ export function PaymentsClient({
                           </td>
                           <td className={`${td} text-right font-mono text-indigo-200`}>
                             {row.claimedAmount > 0 ? yen(row.claimedAmount) : "—"}
+                          </td>
+                          {/* 支払先は代理店へ統合するが、会計上の報酬種別は必ず見せる */}
+                          <td className={`${td} text-right font-mono text-zinc-300`}>
+                            {row.agencyRewardAmount > 0 ? yen(row.agencyRewardAmount) : "—"}
+                          </td>
+                          <td className={`${td} text-right font-mono text-zinc-300`}>
+                            {row.referralRewardAmount > 0 ? (
+                              <>
+                                {yen(row.referralRewardAmount)}
+                                {row.referrerCount > 0 ? (
+                                  <div className="text-[10px] text-zinc-500">
+                                    紹介者 {row.referrerCount} 名
+                                  </div>
+                                ) : null}
+                              </>
+                            ) : (
+                              "—"
+                            )}
                           </td>
                           <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
                             {yen(row.unpaidAmount)}
@@ -557,6 +588,8 @@ export function PaymentsClient({
             <p className="text-[11px] leading-relaxed text-zinc-500">
               「未払残高」は、支払明細に組み入れていない明細だけの合計です。
               支払明細を作成すると、その分は「支払予定中」へ移り、未払残高から外れます。
+              支払先は代理店に一本化しており、代理店報酬とその代理店に帰属する
+              紹介報酬を合算して1回だけ振り込みます。
               二重に支払対象へ現れることはありません。
             </p>
           </section>

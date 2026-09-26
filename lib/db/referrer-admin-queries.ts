@@ -17,6 +17,9 @@ import {
 export type ReferrerAdminRow = {
   id: string;
   referrerName: string;
+  /** 帰属する代理店。紹介報酬はこの代理店へ合算して支払う */
+  agencyId: string | null;
+  agencyName: string | null;
   email: string | null;
   phone: string | null;
   memo: string | null;
@@ -37,10 +40,13 @@ export async function fetchReferrerAdminRows(
     { data: referrals, error: referralsError },
     { data: rewardItems, error: rewardItemsError },
     { data: payouts, error: payoutsError },
+    { data: agencies, error: agenciesError },
   ] = await Promise.all([
     supabase
       .from("referrers")
-      .select("id, referrer_name, email, phone, memo, referral_code, is_active")
+      .select(
+        "id, referrer_name, email, phone, memo, referral_code, is_active, agency_id",
+      )
       .order("referrer_name"),
     supabase.from("creator_referrals").select("id, referrer_id, creator_id, is_active"),
     supabase
@@ -52,9 +58,16 @@ export async function fetchReferrerAdminRows(
       .from("referral_payouts")
       .select("referrer_id, target_month, is_payable")
       .eq("target_month", targetMonth),
+    supabase.from("agencies").select("id, name"),
   ]);
 
-  if (referrersError || referralsError || rewardItemsError || payoutsError) {
+  if (
+    referrersError ||
+    referralsError ||
+    rewardItemsError ||
+    payoutsError ||
+    agenciesError
+  ) {
     return {
       data: [],
       error:
@@ -62,9 +75,14 @@ export async function fetchReferrerAdminRows(
         referralsError?.message ??
         rewardItemsError?.message ??
         payoutsError?.message ??
+        agenciesError?.message ??
         null,
     };
   }
+
+  const agencyNameById = new Map<string, string>(
+    (agencies ?? []).map((agency) => [String(agency.id), String(agency.name ?? "")]),
+  );
 
   const creatorCountByReferrer = new Map<string, Set<string>>();
   for (const referral of referrals ?? []) {
@@ -98,9 +116,13 @@ export async function fetchReferrerAdminRows(
   return {
     data: (referrers ?? []).map((referrer) => {
       const id = referrer.id as string;
+      const agencyId =
+        referrer.agency_id == null ? null : String(referrer.agency_id);
       return {
         id,
         referrerName: referrer.referrer_name as string,
+        agencyId,
+        agencyName: agencyId ? agencyNameById.get(agencyId) ?? "（削除済み代理店）" : null,
         email: (referrer.email as string | null) ?? null,
         phone: (referrer.phone as string | null) ?? null,
         memo: (referrer.memo as string | null) ?? null,

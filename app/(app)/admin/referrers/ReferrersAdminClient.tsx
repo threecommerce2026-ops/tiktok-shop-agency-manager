@@ -2,6 +2,7 @@
 
 import {
   saveReferrerAction,
+  saveReferrerAgencyAction,
   type AdminActionResult,
 } from "@/app/actions/admin-referrers";
 import type { ReferrerAdminCreatorRow, ReferrerAdminRow } from "@/lib/db/referrer-admin-queries";
@@ -11,6 +12,8 @@ import { useActionState } from "react";
 
 type Props = {
   referrers: ReferrerAdminRow[];
+  /** 所属代理店の選択肢（有効な代理店のみ） */
+  agencies: Array<{ id: string; name: string; isInHouse: boolean }>;
   referralLinks: Record<string, string>;
   targetMonth: string;
   selectedReferrerId: string | null;
@@ -21,6 +24,64 @@ type Props = {
 const inputClass =
   "mt-1.5 w-full rounded-xl border border-white/[0.08] bg-surface-0 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-[var(--accent-cyan)]/40";
 const labelClass = "text-[11px] font-medium uppercase tracking-wider text-zinc-500";
+
+/*
+  所属代理店の設定。
+
+  紹介者は独立した支払先ではない。紹介報酬は所属代理店へ合算し、
+  代理店へ1回だけ支払う。振込先も代理店側だけで管理する。
+*/
+function ReferrerAgencyForm({
+  referrer,
+  agencies,
+}: {
+  referrer: ReferrerAdminRow;
+  agencies: Array<{ id: string; name: string; isInHouse: boolean }>;
+}) {
+  const [state, formAction, isPending] = useActionState(
+    saveReferrerAgencyAction,
+    null as AdminActionResult | null,
+  );
+
+  return (
+    <form action={formAction} className="flex flex-col gap-1">
+      <input type="hidden" name="referrer_id" value={referrer.id} />
+      <div className="flex items-center gap-1.5">
+        <select
+          name="agency_id"
+          defaultValue={referrer.agencyId ?? ""}
+          aria-label={`${referrer.referrerName} の所属代理店`}
+          className="min-h-[32px] rounded-lg border border-white/[0.08] bg-surface-0 px-2 text-xs text-zinc-100 outline-none focus:border-[var(--accent-cyan)]/40"
+        >
+          <option value="">（未設定）</option>
+          {agencies.map((agency) => (
+            <option key={agency.id} value={agency.id}>
+              {agency.name}
+              {agency.isInHouse ? "（自社）" : ""}
+            </option>
+          ))}
+        </select>
+        <button
+          type="submit"
+          disabled={isPending}
+          className="min-h-[32px] rounded-lg border border-white/[0.12] px-2.5 text-[11px] text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+        >
+          {isPending ? "保存中…" : "保存"}
+        </button>
+      </div>
+      {state ? (
+        <p
+          className={`max-w-xs text-[10px] leading-relaxed ${
+            state.ok ? "text-emerald-300" : "text-red-300"
+          }`}
+          role="status"
+        >
+          {state.ok ? state.message : state.error}
+        </p>
+      ) : null}
+    </form>
+  );
+}
 
 function ReferrerForm({ referrer }: { referrer?: ReferrerAdminRow }) {
   const [state, formAction, isPending] = useActionState(saveReferrerAction, null as AdminActionResult | null);
@@ -76,6 +137,7 @@ function ReferrerForm({ referrer }: { referrer?: ReferrerAdminRow }) {
 
 export function ReferrersAdminClient({
   referrers,
+  agencies,
   referralLinks,
   targetMonth,
   selectedReferrerId,
@@ -98,6 +160,7 @@ export function ReferrersAdminClient({
           <thead className="border-b border-white/[0.06] text-xs uppercase tracking-wider text-zinc-500">
             <tr>
               <th className="px-4 py-3">紹介者名</th>
+              <th className="px-4 py-3">所属代理店（支払先）</th>
               <th className="px-4 py-3">メール</th>
               <th className="px-4 py-3">電話</th>
               <th className="px-4 py-3">紹介リンク</th>
@@ -113,6 +176,9 @@ export function ReferrersAdminClient({
             {referrers.map((referrer) => (
               <tr key={referrer.id} className="border-b border-white/[0.04] text-zinc-200">
                 <td className="px-4 py-3 font-medium">{referrer.referrerName}</td>
+                <td className="px-4 py-3">
+                  <ReferrerAgencyForm referrer={referrer} agencies={agencies} />
+                </td>
                 <td className="px-4 py-3">{referrer.email ?? "—"}</td>
                 <td className="px-4 py-3">{referrer.phone ?? "—"}</td>
                 <td className="px-4 py-3">

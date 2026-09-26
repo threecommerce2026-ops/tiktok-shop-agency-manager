@@ -51,6 +51,21 @@ export async function savePayeeBankAccountAction(
     return { ok: false, error: "支払先を指定してください" };
   }
 
+  /*
+    振込先は代理店側だけで管理する。
+    紹介者報酬は所属代理店へ合算して支払うため、紹介者に口座を
+    二重登録する運用にはしない。所属代理店が未設定なら、口座登録ではなく
+    「紹介者管理」で所属代理店を設定するのが正しい解決。
+    既存の紹介者口座データは残す（参照しなくなるだけ）。
+  */
+  if (payeeKind === "referrer") {
+    return {
+      ok: false,
+      error:
+        "紹介者への振込先は登録しません。紹介者報酬は所属代理店へ合算して支払います。「紹介者管理」で所属代理店を設定し、その代理店に振込先を登録してください。",
+    };
+  }
+
   const admin = getSupabaseAdmin();
   const table = payeeKind === "agency" ? "agencies" : "referrers";
 
@@ -102,10 +117,7 @@ export async function savePayeeBankAccountAction(
 
   const payload: Record<string, unknown> = bankAccountToRow(validation.account);
 
-  // referrers には updated_at があるが agencies には無い
-  if (payeeKind === "referrer") {
-    payload.updated_at = new Date().toISOString();
-  }
+  // agencies には updated_at が無いので触らない
 
   const { data, error } = await admin
     .from(table)

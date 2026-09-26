@@ -86,7 +86,17 @@ function describeRpcError(message: string, code?: string | null): string {
   return mapSupabaseErrorToJa(message);
 }
 
-/** 支払基準額。紹介者のみ下限がある（環境変数で変更可） */
+/*
+  支払基準額。
+
+  代理店の支払明細は「代理店報酬 + 帰属する紹介者報酬」の合算額に対して
+  基準額なし（0円）で判定する。紹介者単体の 1,000 円基準は、代理店へ
+  正常に帰属している紹介者の支払判定には使わない。
+
+  残る 1,000 円判定は、代理店へ未帰属の紹介者に対する legacy 経路のみ。
+  通常UIではそれらは referrer_agency_unassigned で保留されるため、
+  ここへは到達しない。
+*/
 function thresholdFor(payeeKind: PayeeKind): number {
   return payeeKind === "referrer" ? REFERRAL_PAYOUT_THRESHOLD_YEN : 0;
 }
@@ -467,6 +477,10 @@ export type BulkSettlementPreviewRow = {
   payeeName: string;
   itemCount: number;
   amount: number;
+  /** 内訳: 代理店報酬ぶん */
+  agencyRewardAmount: number;
+  /** 内訳: この支払先へ合算した紹介報酬ぶん */
+  referralRewardAmount: number;
   bankState: string;
   holdReasons: string[];
   isPayable: boolean;
@@ -525,6 +539,8 @@ export async function previewBulkSettlementAction(
     payeeName: row.payeeName,
     itemCount: row.itemCount,
     amount: row.unpaidAmount,
+    agencyRewardAmount: row.agencyRewardAmount,
+    referralRewardAmount: row.referralRewardAmount,
     bankState: row.bank.state,
     holdReasons: row.holdReasons,
     isPayable: row.isPayable,

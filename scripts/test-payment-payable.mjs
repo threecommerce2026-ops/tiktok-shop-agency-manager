@@ -336,3 +336,103 @@ test("セラー請求は支払予定総額に混ざらない", () => {
   assert.deepEqual([...payable.PAYEE_KINDS], ["agency", "referrer"]);
   assert.equal(payable.isPayeeKind("seller"), false);
 });
+
+// =============================================================================
+// 紹介者 → 代理店 への支払統合
+// =============================================================================
+test("所属代理店が未設定の紹介者は referrer_agency_unassigned で保留される", () => {
+  const reasons = payable.resolvePaymentHoldReasons({
+    isInHouse: false,
+    bankState: "registered",
+    unpaidAmount: 5000,
+    thresholdAmount: 1000,
+    hasUnconfirmedAssignment: false,
+    hasUnconfirmedReward: false,
+    hasUnassignedReferrerAgency: true,
+  });
+  assert.deepEqual(reasons, ["referrer_agency_unassigned"]);
+  assert.equal(
+    payable.isPayable({
+      isInHouse: false,
+      bankState: "registered",
+      unpaidAmount: 5000,
+      thresholdAmount: 1000,
+      hasUnconfirmedAssignment: false,
+      hasUnconfirmedReward: false,
+      hasUnassignedReferrerAgency: true,
+    }),
+    false,
+  );
+});
+
+test("所属代理店が設定済みなら保留理由にならない", () => {
+  const reasons = payable.resolvePaymentHoldReasons({
+    isInHouse: false,
+    bankState: "registered",
+    unpaidAmount: 5000,
+    thresholdAmount: 0,
+    hasUnconfirmedAssignment: false,
+    hasUnconfirmedReward: false,
+    hasUnassignedReferrerAgency: false,
+  });
+  assert.deepEqual(reasons, []);
+});
+
+test("代理店の支払明細は合算額を基準額0で判定する（案1）", () => {
+  // 代理店報酬 900 + 紹介報酬 500 = 1,400 を1回で支払う
+  const agencyReward = 900;
+  const referralReward = 500;
+  const input = {
+    isInHouse: false,
+    bankState: "registered",
+    unpaidAmount: agencyReward + referralReward,
+    thresholdAmount: 0,
+    hasUnconfirmedAssignment: false,
+    hasUnconfirmedReward: false,
+  };
+  assert.equal(input.unpaidAmount, 1400);
+  assert.deepEqual(payable.resolvePaymentHoldReasons(input), []);
+  assert.equal(payable.isPayable(input), true);
+
+  // 紹介報酬単体の1,000円基準を合算額へ持ち込むと支払えてしまわない
+  const withReferralThreshold = { ...input, thresholdAmount: 1000 };
+  assert.deepEqual(payable.resolvePaymentHoldReasons(withReferralThreshold), []);
+
+  // 紹介報酬だけを単体判定すると繰越になる（採用しない案3の挙動）
+  const referralOnly = { ...input, unpaidAmount: referralReward, thresholdAmount: 1000 };
+  assert.deepEqual(payable.resolvePaymentHoldReasons(referralOnly), ["below_threshold"]);
+});
+
+test("自社代理店へ帰属した紹介報酬は in_house で支払対象外になる", () => {
+  const reasons = payable.resolvePaymentHoldReasons({
+    isInHouse: true,
+    bankState: "registered",
+    unpaidAmount: 43261.3,
+    thresholdAmount: 0,
+    hasUnconfirmedAssignment: false,
+    hasUnconfirmedReward: false,
+  });
+  assert.ok(reasons.includes("in_house"));
+  assert.equal(
+    payable.isPayable({
+      isInHouse: true,
+      bankState: "registered",
+      unpaidAmount: 43261.3,
+      thresholdAmount: 0,
+      hasUnconfirmedAssignment: false,
+      hasUnconfirmedReward: false,
+    }),
+    false,
+  );
+});
+
+test("hold理由の定義に referrer_agency_unassigned のラベルとヒントがある", () => {
+  assert.ok(payable.PAYMENT_HOLD_REASONS.includes("referrer_agency_unassigned"));
+  assert.equal(
+    payable.PAYMENT_HOLD_REASON_LABEL.referrer_agency_unassigned,
+    "所属代理店未設定",
+  );
+  assert.ok(
+    payable.PAYMENT_HOLD_REASON_HINT.referrer_agency_unassigned.includes("所属代理店"),
+  );
+});

@@ -278,6 +278,8 @@ function PreviewTable({
               <th className={th}>種別</th>
               <th className={th}>支払先</th>
               <th className={`${th} text-right`}>明細数</th>
+              <th className={`${th} text-right`}>代理店報酬</th>
+              <th className={`${th} text-right`}>紹介報酬</th>
               <th className={`${th} text-right`}>金額</th>
               <th className={th}>振込先状態</th>
               <th className={th}>保留理由</th>
@@ -287,7 +289,7 @@ function PreviewTable({
             {rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={selectable ? 7 : 6}
+                  colSpan={selectable ? 9 : 8}
                   className="px-4 py-10 text-center text-sm text-zinc-500"
                 >
                   {emptyMessage}
@@ -312,6 +314,13 @@ function PreviewTable({
                   <td className={`${td} font-medium text-zinc-100`}>{row.payeeName}</td>
                   <td className={`${td} text-right font-mono text-zinc-400`}>
                     {row.itemCount.toLocaleString("ja-JP")}
+                  </td>
+                  {/* 支払は代理店へ1回だが、会計上の内訳は保持する */}
+                  <td className={`${td} text-right font-mono text-zinc-300`}>
+                    {row.agencyRewardAmount > 0 ? yen(row.agencyRewardAmount) : "—"}
+                  </td>
+                  <td className={`${td} text-right font-mono text-zinc-300`}>
+                    {row.referralRewardAmount > 0 ? yen(row.referralRewardAmount) : "—"}
                   </td>
                   <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
                     {yen(row.amount)}

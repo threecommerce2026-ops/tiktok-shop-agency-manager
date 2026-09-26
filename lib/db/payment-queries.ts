@@ -37,6 +37,13 @@ import {
   「対象月時点の年初来累積スナップショット」で行をまたいで重複するため、
   このモジュールでは金額の根拠として一切使わない。
 
+  ■ 支払先は代理店に一本化する
+  紹介者は独立した支払先ではない。referrers.agency_id が指す代理店へ
+  紹介者報酬を合算し、代理店単位で1行にまとめる。会計上の報酬種別は
+  agencyRewardAmount / referralRewardAmount として保持する。
+  agency_id が未設定の紹介者だけ従来どおり紹介者の行として出し、
+  referrer_agency_unassigned で保留する（名前から推測して寄せない）。
+
   ■ 報酬計算はしない
   既存 Finance Engine が確定させた明細を読み、支払状態ごとに束ねるだけ。
 
@@ -116,8 +123,14 @@ export type PaymentUnpaidRow = {
   paidAmount: number;
   /** 支払予定中（draft / approved / processing に占有されている額） */
   claimedAmount: number;
-  /** 未払残高＝今回支払額の初期値 */
+  /** 未払残高＝今回支払額の初期値（代理店報酬＋紹介者報酬） */
   unpaidAmount: number;
+  /** 内訳: 代理店報酬ぶんの未払残高 */
+  agencyRewardAmount: number;
+  /** 内訳: この支払先へ合算した紹介者報酬ぶんの未払残高 */
+  referralRewardAmount: number;
+  /** 合算した紹介者の数（代理店行のみ） */
+  referrerCount: number;
   itemCount: number;
   creatorCount: number;
   thresholdAmount: number;
@@ -180,12 +193,20 @@ type PayeeAccumulator = {
   paid: number[];
   claimed: number[];
   claimable: number[];
+  /** 内訳: 代理店報酬ぶんの未払い */
+  agencyClaimable: number[];
+  /** 内訳: 合算した紹介者報酬ぶんの未払い */
+  referralClaimable: number[];
+  /** 合算した紹介者（代理店行のみ） */
+  referrers: Set<string>;
   itemCount: number;
   creators: Set<string>;
   minMonth: string | null;
   maxMonth: string | null;
   hasUnconfirmedAssignment: boolean;
   hasUnconfirmedReward: boolean;
+  /** 紹介者の所属代理店が未設定（紹介者行のみ） */
+  hasUnassignedReferrerAgency: boolean;
 };
 
 function createAccumulator(): PayeeAccumulator {
@@ -194,12 +215,16 @@ function createAccumulator(): PayeeAccumulator {
     paid: [],
     claimed: [],
     claimable: [],
+    agencyClaimable: [],
+    referralClaimable: [],
+    referrers: new Set<string>(),
     itemCount: 0,
     creators: new Set<string>(),
     minMonth: null,
     maxMonth: null,
     hasUnconfirmedAssignment: false,
     hasUnconfirmedReward: false,
+    hasUnassignedReferrerAgency: false,
   };
 }
 
@@ -318,7 +343,7 @@ export async function fetchPaymentOverview(
     supabase
       .from("referrers")
       .select(
-        "id, name, referrer_name, is_in_house, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
+        "id, name, referrer_name, is_in_house, agency_id, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
       ),
     supabase
       .from("payment_batches")
@@ -348,6 +373,8 @@ export async function fetchPaymentOverview(
     name: string;
     isInHouse: boolean;
     bank: PayeeBankAccount;
+    /** 紹介者の帰属先代理店。代理店自身では常に null */
+    agencyId: string | null;
   };
 
   const agencyById = new Map<string, PayeeMeta>();
@@ -356,6 +383,7 @@ export async function fetchPaymentOverview(
       name: String(row.name ?? "（削除済み代理店）"),
       isInHouse: row.is_in_house === true,
       bank: bankAccountFromRow(row as Record<string, unknown>),
+      agencyId: null,
     });
   }
 
@@ -365,6 +393,7 @@ export async function fetchPaymentOverview(
       name: String(row.referrer_name ?? row.name ?? "（削除済み紹介者）"),
       isInHouse: row.is_in_house === true,
       bank: bankAccountFromRow(row as Record<string, unknown>),
+      agencyId: row.agency_id == null ? null : String(row.agency_id),
     });
   }
 
@@ -383,6 +412,7 @@ export async function fetchPaymentOverview(
 
     if (isClaimable(item) && inClaimRange(item.target_month)) {
       acc.claimable.push(value);
+      acc.agencyClaimable.push(value);
       acc.itemCount += 1;
       acc.creators.add(item.creator_id);
       trackMonth(acc, item.target_month);
@@ -395,11 +425,21 @@ export async function fetchPaymentOverview(
     agencyAcc.set(item.agency_id, acc);
   }
 
+  /*
+    紹介者報酬は帰属先代理店の行へ合算する。
+    帰属先の判定は referrers.agency_id のみ。名前では寄せない。
+    agency_id が未設定の紹介者だけ従来どおり紹介者の行として残す。
+  */
   const referralAcc = new Map<string, PayeeAccumulator>();
 
   for (const item of referralItems.data) {
-    const acc = referralAcc.get(item.referrer_id) ?? createAccumulator();
     const value = resolveRewardItemAmount(item);
+    const referrerMeta = referrerById.get(item.referrer_id);
+    const mergeAgencyId = referrerMeta?.agencyId ?? null;
+
+    const acc = mergeAgencyId
+      ? agencyAcc.get(mergeAgencyId) ?? createAccumulator()
+      : referralAcc.get(item.referrer_id) ?? createAccumulator();
 
     if (item.is_reward_target) {
       acc.gross.push(value);
@@ -409,13 +449,17 @@ export async function fetchPaymentOverview(
 
     if (isClaimable(item) && inClaimRange(item.target_month)) {
       acc.claimable.push(value);
+      acc.referralClaimable.push(value);
       acc.itemCount += 1;
       acc.creators.add(item.creator_id);
       trackMonth(acc, item.target_month);
       if (!(value > 0)) acc.hasUnconfirmedReward = true;
+      if (mergeAgencyId) acc.referrers.add(item.referrer_id);
+      else acc.hasUnassignedReferrerAgency = true;
     }
 
-    referralAcc.set(item.referrer_id, acc);
+    if (mergeAgencyId) agencyAcc.set(mergeAgencyId, acc);
+    else referralAcc.set(item.referrer_id, acc);
   }
 
   // ---- 支払明細 -------------------------------------------------------------
@@ -460,6 +504,7 @@ export async function fetchPaymentOverview(
       thresholdAmount,
       hasUnconfirmedAssignment: acc.hasUnconfirmedAssignment,
       hasUnconfirmedReward: acc.hasUnconfirmedReward,
+      hasUnassignedReferrerAgency: acc.hasUnassignedReferrerAgency,
     };
 
     return {
@@ -475,6 +520,9 @@ export async function fetchPaymentOverview(
       paidAmount: sum(acc.paid),
       claimedAmount: sum(acc.claimed),
       unpaidAmount,
+      agencyRewardAmount: sum(acc.agencyClaimable),
+      referralRewardAmount: sum(acc.referralClaimable),
+      referrerCount: acc.referrers.size,
       itemCount: acc.itemCount,
       creatorCount: acc.creators.size,
       thresholdAmount,
@@ -554,13 +602,15 @@ export async function fetchPaymentOverview(
         scheduledBatches.map((batch) => batch.paymentAmount),
       ),
       scheduledBatchCount: scheduledBatches.length,
+      /*
+        支払先は代理店へ統合したが、この2つのKPIは「報酬種別」の内訳を
+        表す。支払先の束ね方が変わっても会計上の内訳は保つ。
+      */
       agencyUnpaidAmount: sumAgencyAmounts(
-        rows.filter((row) => row.payeeKind === "agency").map((row) => row.unpaidAmount),
+        rows.map((row) => row.agencyRewardAmount),
       ),
       referrerUnpaidAmount: sumReferralAmounts(
-        rows
-          .filter((row) => row.payeeKind === "referrer")
-          .map((row) => row.unpaidAmount),
+        rows.map((row) => row.referralRewardAmount),
       ),
       holdAmount: sumAgencyAmounts(holdRows.map((row) => row.unpaidAmount)),
       holdCount: holdRows.length,
@@ -587,8 +637,24 @@ export async function fetchPaymentOverview(
 // 支払明細の詳細
 // =============================================================================
 
+/*
+  会計上の報酬種別。支払先は代理店へ統合するが、明細では必ず
+  どちらの報酬なのかを判別できるようにする。
+*/
+export const REWARD_KINDS = ["agency", "referral"] as const;
+export type RewardKind = (typeof REWARD_KINDS)[number];
+
+export const REWARD_KIND_LABEL: Record<RewardKind, string> = {
+  agency: "代理店報酬",
+  referral: "紹介報酬",
+};
+
 export type PaymentBatchItemRow = {
   id: string;
+  /** この明細がどちらの報酬か。agency_reward_items / referral_reward_items の由来 */
+  rewardKind: RewardKind;
+  /** 紹介報酬のときの紹介者名。代理店報酬では null */
+  referrerName: string | null;
   targetMonth: string;
   creatorId: string;
   creatorName: string;
@@ -619,6 +685,10 @@ export type PaymentBatchDetail = {
   auditLogs: PaymentBatchAuditRow[];
   /** 明細実額の合計。支払明細のスナップショットと突き合わせる検算用 */
   itemsTotalAmount: number;
+  /** 内訳: 代理店報酬ぶんの合計 */
+  agencyRewardAmount: number;
+  /** 内訳: 紹介報酬ぶんの合計 */
+  referralRewardAmount: number;
   error: string | null;
 };
 
@@ -631,6 +701,8 @@ export async function fetchPaymentBatchDetail(
     items: [],
     auditLogs: [],
     itemsTotalAmount: 0,
+    agencyRewardAmount: 0,
+    referralRewardAmount: 0,
     error: null,
   };
 
@@ -672,37 +744,29 @@ export async function fetchPaymentBatchDetail(
 
   const batch = mapBatchRow(record, payeeName);
 
-  const [itemsResult, auditResult] = await Promise.all([
+  /*
+    代理店の支払明細には、帰属する紹介者の紹介報酬も組み入れている。
+    どちらの報酬かはテーブルの由来で判別する（種別を失わない）。
+  */
+  const [agencyItemsResult, referralItemsResult, auditResult] = await Promise.all([
     payeeKind === "agency"
-      ? fetchAllFrom<{
-          id: string;
-          target_month: string;
-          creator_id: string;
-          commission_base: number | string | null;
-          agency_split_rate: number | string | null;
-          reward_amount: number | string | null;
-          is_paid: boolean;
-        }>(
+      ? fetchAllFrom<Record<string, unknown>>(
           supabase,
           "agency_reward_items",
           "id, target_month, creator_id, commission_base, agency_split_rate, reward_amount, is_paid",
           (query) => query.eq("payment_batch_id", batchId),
         )
-      : fetchAllFrom<{
-          id: string;
-          target_month: string;
-          creator_id: string;
-          base_amount: number | string | null;
-          reward_rate: number | string | null;
-          reward_amount: number | string | null;
-          adjusted_reward_amount: number | string | null;
-          is_paid: boolean;
-        }>(
-          supabase,
-          "referral_reward_items",
-          "id, target_month, creator_id, base_amount, reward_rate, reward_amount, adjusted_reward_amount, is_paid",
-          (query) => query.eq("payment_batch_id", batchId),
-        ),
+      : Promise.resolve({
+          data: [] as Array<Record<string, unknown>>,
+          error: null,
+          errorCode: null,
+        }),
+    fetchAllFrom<Record<string, unknown>>(
+      supabase,
+      "referral_reward_items",
+      "id, target_month, creator_id, referrer_id, base_amount, reward_rate, reward_amount, adjusted_reward_amount, is_paid",
+      (query) => query.eq("payment_batch_id", batchId),
+    ),
     supabase
       .from("payment_batch_audit_logs")
       .select(
@@ -712,18 +776,50 @@ export async function fetchPaymentBatchDetail(
       .order("created_at", { ascending: false }),
   ]);
 
-  if (itemsResult.error) return { ...empty, batch, error: itemsResult.error };
+  if (agencyItemsResult.error) {
+    return { ...empty, batch, error: agencyItemsResult.error };
+  }
+  if (referralItemsResult.error) {
+    return { ...empty, batch, error: referralItemsResult.error };
+  }
   if (auditResult.error) {
     return { ...empty, batch, error: auditResult.error.message };
   }
 
   const creatorIds = [
     ...new Set(
-      (itemsResult.data as Array<{ creator_id: string }>).map(
-        (item) => item.creator_id,
+      [...agencyItemsResult.data, ...referralItemsResult.data].map((item) =>
+        String(item.creator_id),
       ),
     ),
   ];
+
+  const referrerIds = [
+    ...new Set(
+      referralItemsResult.data
+        .map((item) => (item.referrer_id == null ? null : String(item.referrer_id)))
+        .filter((value): value is string => value != null),
+    ),
+  ];
+
+  const batchReferrersResult =
+    referrerIds.length > 0
+      ? await supabase
+          .from("referrers")
+          .select("id, name, referrer_name")
+          .in("id", referrerIds)
+      : { data: [] as Array<Record<string, unknown>>, error: null };
+
+  if (batchReferrersResult.error) {
+    return { ...empty, batch, error: batchReferrersResult.error.message };
+  }
+
+  const referrerNameById = new Map(
+    (batchReferrersResult.data ?? []).map((row) => [
+      String(row.id),
+      String(row.referrer_name ?? row.name ?? "（削除済み紹介者）"),
+    ]),
+  );
 
   const creatorsResult =
     creatorIds.length > 0
@@ -747,39 +843,53 @@ export async function fetchPaymentBatchDetail(
     ]),
   );
 
-  const items: PaymentBatchItemRow[] = (
-    itemsResult.data as Array<Record<string, unknown>>
-  ).map((row) => {
+  const buildItem = (
+    row: Record<string, unknown>,
+    rewardKind: RewardKind,
+  ): PaymentBatchItemRow => {
     const creator = creatorById.get(String(row.creator_id));
-    const rewardAmount =
-      payeeKind === "agency"
-        ? toAmount(row.reward_amount)
-        : resolveRewardItemAmount(row as Record<string, unknown>);
+    const isAgency = rewardKind === "agency";
 
     return {
       id: String(row.id),
+      rewardKind,
+      referrerName: isAgency
+        ? null
+        : referrerNameById.get(String(row.referrer_id)) ?? "（不明な紹介者）",
       targetMonth: String(row.target_month ?? ""),
       creatorId: String(row.creator_id ?? ""),
       creatorName: creator?.creatorName ?? "—",
       tiktokId: creator?.tiktokId ?? "",
-      baseAmount: toAmount(
-        payeeKind === "agency" ? row.commission_base : row.base_amount,
-      ),
-      ratePct:
-        payeeKind === "agency"
-          ? toAmount(row.agency_split_rate)
-          : toAmount(row.reward_rate) * 100,
-      rewardAmount,
+      baseAmount: toAmount(isAgency ? row.commission_base : row.base_amount),
+      ratePct: isAgency
+        ? toAmount(row.agency_split_rate)
+        : toAmount(row.reward_rate) * 100,
+      rewardAmount: isAgency ? toAmount(row.reward_amount) : resolveRewardItemAmount(row),
       isPaid: row.is_paid === true,
     };
-  });
+  };
 
+  const items: PaymentBatchItemRow[] = [
+    ...agencyItemsResult.data.map((row) => buildItem(row, "agency")),
+    ...referralItemsResult.data.map((row) => buildItem(row, "referral")),
+  ];
+
+  /*
+    報酬種別ごとにまとめて並べる。代理店報酬を先、紹介報酬を後。
+    同種別の中では対象月 → 金額の降順。
+  */
   items.sort(
     (a, b) =>
-      a.targetMonth.localeCompare(b.targetMonth) || b.rewardAmount - a.rewardAmount,
+      a.rewardKind.localeCompare(b.rewardKind) ||
+      a.targetMonth.localeCompare(b.targetMonth) ||
+      b.rewardAmount - a.rewardAmount,
   );
 
-  const sum = payeeKind === "agency" ? sumAgencyAmounts : sumReferralAmounts;
+  /*
+    丸めは代理店・紹介者いずれも Math.round(x * 100) / 100 で同一実装なので
+    合算しても丸め不整合は生じない。
+  */
+  const sum = sumAgencyAmounts;
 
   return {
     batch,
@@ -796,6 +906,14 @@ export async function fetchPaymentBatchDetail(
       createdAt: String(row.created_at ?? ""),
     })),
     itemsTotalAmount: sum(items.map((item) => item.rewardAmount)),
+    agencyRewardAmount: sum(
+      items.filter((item) => item.rewardKind === "agency").map((item) => item.rewardAmount),
+    ),
+    referralRewardAmount: sumReferralAmounts(
+      items
+        .filter((item) => item.rewardKind === "referral")
+        .map((item) => item.rewardAmount),
+    ),
     error: null,
   };
 }

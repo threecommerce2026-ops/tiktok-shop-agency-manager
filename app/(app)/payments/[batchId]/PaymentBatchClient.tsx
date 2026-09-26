@@ -13,7 +13,7 @@ import {
   type PaymentActionResult,
   type PaymentCsvActionResult,
 } from "@/app/actions/payments";
-import type { PaymentBatchDetail } from "@/lib/db/payment-queries";
+import { REWARD_KIND_LABEL, type PaymentBatchDetail } from "@/lib/db/payment-queries";
 import { BankStateBadge } from "@/components/payments/PayeeBankForm";
 import { PAYEE_KIND_LABEL } from "@/lib/payments/payable";
 import {
@@ -165,6 +165,17 @@ export function PaymentBatchClient({
           <p className="mt-1 text-[11px] text-zinc-500">
             {amountMatches ? "支払明細と一致" : "支払明細と不一致（振込完了は拒否されます）"}
           </p>
+          {/* 支払は代理店へ1回だが、会計上の内訳は必ず残す */}
+          <dl className="mt-2 space-y-0.5 text-[11px] text-zinc-500">
+            <div className="flex justify-between gap-3">
+              <dt>{REWARD_KIND_LABEL.agency}</dt>
+              <dd className="font-mono">{yen(detail.agencyRewardAmount)}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt>{REWARD_KIND_LABEL.referral}</dt>
+              <dd className="font-mono">{yen(detail.referralRewardAmount)}</dd>
+            </div>
+          </dl>
         </div>
         <div className="rounded-xl border border-white/[0.08] bg-surface-1 px-4 py-4">
           <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
@@ -375,6 +386,7 @@ export function PaymentBatchClient({
           <table className="min-w-[900px] w-full border-collapse">
             <thead>
               <tr>
+                <th className={th}>報酬種別</th>
                 <th className={th}>対象月</th>
                 <th className={th}>クリエイター</th>
                 <th className={th}>TikTok ID</th>
@@ -387,13 +399,29 @@ export function PaymentBatchClient({
             <tbody>
               {detail.items.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
+                  <td colSpan={8} className="px-4 py-10 text-center text-sm text-zinc-500">
                     対象明細がありません。
                   </td>
                 </tr>
               ) : (
                 detail.items.map((item) => (
                   <tr key={item.id} className="border-b border-zinc-800/70">
+                    <td className={`${td} whitespace-normal`}>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          item.rewardKind === "agency"
+                            ? "bg-sky-500/15 text-sky-200"
+                            : "bg-violet-500/15 text-violet-200"
+                        }`}
+                      >
+                        {REWARD_KIND_LABEL[item.rewardKind]}
+                      </span>
+                      {item.referrerName ? (
+                        <div className="mt-1 text-[10px] text-zinc-500">
+                          紹介者: {item.referrerName}
+                        </div>
+                      ) : null}
+                    </td>
                     <td className={`${td} font-mono text-zinc-300`}>{item.targetMonth}</td>
                     <td className={`${td} text-zinc-100`}>{item.creatorName}</td>
                     <td className={`${td} font-mono text-zinc-500`}>{item.tiktokId}</td>
