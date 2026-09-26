@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { AGENCY_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
+
 import { AgencyStatementView } from "@/app/(print)/statements/agency/AgencyStatementView";
 import { loadAgencyStatementsForCutoff } from "@/app/(print)/statements/agency/load-statements";
 import { CUTOFF_MONTH_PATTERN, defaultCutoffMonth } from "@/lib/payments/cutoff-month";
@@ -81,6 +83,7 @@ export default async function AgencyStatementsPage({
       rejected={result.rejected}
       backHref={backHref}
       cutoffMonth={cutoffMonth}
+      minimumPayoutYen={AGENCY_PAYOUT_THRESHOLD_YEN}
     />
   );
 }

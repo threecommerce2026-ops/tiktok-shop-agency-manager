@@ -30,12 +30,15 @@ export function AgencyStatementView({
   statements,
   backHref,
   cutoffMonth,
+  minimumPayoutYen,
   /** 出力できなかった支払明細。件数を隠さず理由ごと見せる */
   rejected,
 }: {
   statements: AgencyStatement[];
   backHref: string;
   cutoffMonth: string | null;
+  /** 最低支払額。サーバー側の設定値を受け取って注記に出す */
+  minimumPayoutYen: number;
   rejected: { agencyName: string; message: string }[];
 }) {
   const total = statements.reduce((sum, s) => sum + s.paymentAmount, 0);
@@ -109,6 +112,7 @@ export function AgencyStatementView({
         <AgencyStatementDocument
           key={statement.batchId}
           statement={statement}
+          minimumPayoutYen={minimumPayoutYen}
         />
       ))}
     </div>

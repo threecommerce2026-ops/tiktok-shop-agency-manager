@@ -248,8 +248,14 @@ function jstDate(value: string | null): string {
 
 export function AgencyStatementDocument({
   statement,
+  /*
+    最低支払額。サーバー側の設定値をそのまま受け取る。
+    帳票側で 1000 を書かない（画面・claim・承認と同じ値を使う）。
+  */
+  minimumPayoutYen,
 }: {
   statement: AgencyStatement;
+  minimumPayoutYen: number;
 }) {
   const issueDate = jstDate(statement.approvedAt);
   const periodLabel = formatStatementPeriodLabel(
@@ -401,7 +407,9 @@ export function AgencyStatementDocument({
             紹介制度報酬は代理店へのお支払対象ではないため、本明細書には含まれません。
           </li>
           <li>
-            未払残高が最低支払額に達していない場合、その分は翌月以降へ繰り越しとなります。
+            最低支払額は ¥{minimumPayoutYen.toLocaleString("ja-JP")} です。
+            締め時点の未払残高が ¥{minimumPayoutYen.toLocaleString("ja-JP")}
+            未満の場合、その分は消さずに翌月以降へ繰り越してお支払いします。
           </li>
           <li>
             本明細書に関するお問い合わせは、上記発行元までご連絡ください。
