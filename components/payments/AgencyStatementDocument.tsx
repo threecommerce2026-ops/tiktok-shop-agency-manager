@@ -108,7 +108,7 @@ export const STATEMENT_PRINT_STYLES = `
   font-variant-numeric: tabular-nums;
 }
 .stmt-section-title {
-  margin: 28px 0 8px;
+  margin: 26px 0 8px;
   font-size: 12px;
   font-weight: 700;
   border-left: 3px solid #18181b;
@@ -145,13 +145,34 @@ export const STATEMENT_PRINT_STYLES = `
   font-weight: 700;
   border-top: 2px solid #18181b;
 }
-.stmt-notes {
-  margin-top: 24px;
-  font-size: 10px;
-  line-height: 1.9;
-  color: #52525b;
+.stmt-bank-line {
+  margin: 0;
+  font-size: 11px;
+  color: #3f3f46;
 }
-.stmt-notes ul { margin: 6px 0 0; padding-left: 18px; }
+/*
+  注記は本文より小さいが、読み飛ばされない大きさを保つ。
+  文章量を絞ったぶん行間と上の余白を広げ、詰まって見えないようにする。
+*/
+.stmt-notes {
+  margin-top: 26px;
+  color: #3f3f46;
+}
+.stmt-notes-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #27272a;
+}
+.stmt-note {
+  margin: 0 0 5px;
+  font-size: 10.5px;
+  line-height: 1.75;
+  /* ※ のぶんだけ2行目以降を下げ、行頭を揃える */
+  padding-left: 1em;
+  text-indent: -1em;
+}
+.stmt-note:last-child { margin-bottom: 0; }
 .stmt-footer {
   margin-top: 28px;
   padding-top: 12px;
@@ -319,7 +340,7 @@ export function AgencyStatementDocument({
           <tr>
             <th>クリエイター</th>
             <th>対象期間</th>
-            <th className="stmt-num">成果報酬GMV（参考）</th>
+            <th className="stmt-num">GMV（参考）</th>
             <th className="stmt-num">分配計算基準額</th>
             <th className="stmt-num">分配率</th>
             <th className="stmt-num">代理店分配報酬</th>
@@ -384,37 +405,27 @@ export function AgencyStatementDocument({
 
       {/* ---------------- 振込先 ---------------- */}
       <h2 className="stmt-section-title">お振込先</h2>
-      <p style={{ fontSize: 10.5, color: "#52525b", margin: 0 }}>
+      <p className="stmt-bank-line">
         {statement.bankRegistered
-          ? "ご登録いただいている口座へお振り込みいたします。口座情報の詳細は本書には記載しておりません。"
+          ? "ご登録いただいている口座へお振り込みいたします。"
           : "お振込先が未登録です。口座情報をご連絡ください。"}
       </p>
 
-      {/* ---------------- 注記 ---------------- */}
+      {/*
+        ご確認事項。
+        代理店が判断に使う3点だけに絞る。支払対象でない社内制度の説明は載せない。
+        金額は帳票側に書かず、サーバーから渡された最低支払額をそのまま出す。
+      */}
       <div className="stmt-notes">
-        <p style={{ margin: 0, fontWeight: 600, color: "#3f3f46" }}>ご確認事項</p>
-        <ul>
-          <li>
-            本明細書の金額は、TikTok Shop から確定した実績値に基づいています。
-            成果報酬GMVは参考値で、分配報酬の計算基準ではありません。
-          </li>
-          <li>
-            代理店分配報酬は、TikTok Shop 側で明細単位に算出された分配額の合計です。
-            「分配計算基準額 × 分配率」と一致しない場合がありますが、
-            これは明細単位の端数処理によるもので、実際のお支払額は上記合計のとおりです。
-          </li>
-          <li>
-            紹介制度報酬は代理店へのお支払対象ではないため、本明細書には含まれません。
-          </li>
-          <li>
-            最低支払額は ¥{minimumPayoutYen.toLocaleString("ja-JP")} です。
-            締め時点の未払残高が ¥{minimumPayoutYen.toLocaleString("ja-JP")}
-            未満の場合、その分は消さずに翌月以降へ繰り越してお支払いします。
-          </li>
-          <li>
-            本明細書に関するお問い合わせは、上記発行元までご連絡ください。
-          </li>
-        </ul>
+        <p className="stmt-notes-title">ご確認事項</p>
+        <p className="stmt-note">
+          ※GMVは参考値です。代理店分配報酬は、TikTok Shop側で確定した実績に基づく金額を記載しています。
+        </p>
+        <p className="stmt-note">
+          ※最低支払額は{minimumPayoutYen.toLocaleString("ja-JP")}円です。
+          未払報酬の累計が{minimumPayoutYen.toLocaleString("ja-JP")}円未満の場合は、翌月以降へ繰り越されます。
+        </p>
+        <p className="stmt-note">※振込先はご登録済みの口座です。</p>
       </div>
 
       <div className="stmt-footer">
