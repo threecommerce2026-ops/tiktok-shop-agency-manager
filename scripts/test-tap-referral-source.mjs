@@ -425,3 +425,184 @@ test("dry-run スクリプトは書き込みを行わない", () => {
     assert.equal(code.includes(banned), false, `dry-run に ${banned} がある`);
   }
 });
+
+// -----------------------------------------------------------------------------
+// 認証（画面の制御だけに頼らない）
+// -----------------------------------------------------------------------------
+const IMPORT_PAGE = fs.readFileSync("app/admin/tap-orders-import/page.tsx", "utf8");
+const IMPORT_CLIENT = fs.readFileSync(
+  "app/admin/tap-orders-import/TapOrdersImportClient.tsx",
+  "utf8",
+);
+const LOCK_MIGRATION = fs.readFileSync(
+  "supabase/migrations/20260927110000_claim_referral_finalized_lock.sql",
+  "utf8",
+);
+
+test("TAP取込アクションは親管理者だけが実行できる", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /requireAdminAction/);
+  // 認可がファイル読み取りより前にあること
+  const authAt = code.indexOf("await requireAdminAction()");
+  const fileAt = code.indexOf('formData.get("file")');
+  assert.ok(authAt >= 0, "requireAdminAction を呼んでいない");
+  assert.ok(authAt < fileAt, "認可より先にファイルを読んでいる");
+});
+
+test("認可は既存の共通実装を使う（独自認証を作らない）", () => {
+  assert.match(IMPORT_SOURCE, /from "@\/lib\/db\/admin-access"/);
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.equal(code.includes("is_app_admin"), false);
+  assert.equal(code.includes("auth.getUser()"), false);
+});
+
+test("プレビューも確定取込も同じ認可を通る", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  // dry_run の判定より前に認可がある＝両方に効く
+  assert.ok(code.indexOf("await requireAdminAction()") < code.indexOf('formData.get("dry_run")'));
+});
+
+test("TAP取込ページは未ログイン / 非admin を弾く", () => {
+  assert.match(IMPORT_PAGE, /redirect\("\/login\?next=\/admin\/tap-orders-import"\)/);
+  assert.match(IMPORT_PAGE, /isAdminRole\(appUser\.data\.role\)/);
+  assert.match(IMPORT_PAGE, /redirect\("\/dashboard"\)/);
+  // ページ自体はサーバーコンポーネント（"use client" を持たない）
+  assert.equal(IMPORT_PAGE.includes('"use client"'), false);
+});
+
+// -----------------------------------------------------------------------------
+// 確定取込のガード
+// -----------------------------------------------------------------------------
+test("未登録クリエイターがあると確定取込を拒否する（サーバー側）", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /if \(!dryRun\) \{[\s\S]*?if \(unknownCreators\.length > 0\)/);
+  assert.match(code, /未登録のクリエイターが/);
+});
+
+test("プレビューと違うファイルなら確定取込を拒否する", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /preview_file_hash/);
+  assert.match(code, /if \(confirmedHash !== fileHash\)/);
+  assert.match(code, /先にプレビューで内容を確認してください/);
+});
+
+test("拒否されたときに取込履歴だけ残さない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  // 取込履歴の INSERT は、すべての検査を通ったあとにある
+  const guardAt = code.indexOf("if (!dryRun) {");
+  const insertAt = code.indexOf('.from("tap_affiliate_order_import_batches")\n      .insert(');
+  assert.ok(guardAt >= 0 && insertAt >= 0);
+  assert.ok(guardAt < insertAt, "検査より先に取込履歴を作っている");
+});
+
+test("画面は未登録クリエイターがあると確定取込を押せない", () => {
+  assert.match(IMPORT_CLIENT, /const canConfirm = Boolean\(preview\) && unknownCount === 0/);
+  assert.match(IMPORT_CLIENT, /disabled=\{!canConfirm\}/);
+  // ファイルを変えたらプレビューを捨てる
+  assert.match(IMPORT_CLIENT, /setPreview\(null\)/);
+});
+
+test("画面は処理中に二重送信できない", () => {
+  assert.match(IMPORT_CLIENT, /disabled=\{!file \|\| isPending\}/);
+  assert.match(IMPORT_CLIENT, /const canConfirm = Boolean\(preview\) && unknownCount === 0 && !isPending/);
+});
+
+test("画面はプレビューであることを明示する", () => {
+  assert.match(IMPORT_CLIENT, /これはプレビューです。まだデータベースには保存されていません。/);
+});
+
+test("プレビュー画面に必要な項目が出る", () => {
+  for (const label of [
+    "ファイル名", "ファイルhash", "総行数", "対象期間",
+    "新規候補", "更新候補", "スキップ", "成果報酬ベース総額",
+    "クリエイター数", "既知クリエイター", "別名で寄せた行", "未登録クリエイター",
+  ]) {
+    assert.ok(IMPORT_CLIENT.includes(label), `プレビューに「${label}」が無い`);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// 支払ロック
+// -----------------------------------------------------------------------------
+test("ロックが claim の referrer 分岐へ接続されている", () => {
+  assert.match(
+    LOCK_MIGRATION,
+    /if p_payee_kind = 'referrer' then\s*\n\s*perform public\.assert_referral_months_finalized\(v_start_month, p_cutoff_month\);/,
+  );
+});
+
+test("ロックの範囲は claim が占有する範囲と同じ", () => {
+  // claim は target_month between v_start_month and p_cutoff_month を占有する
+  assert.match(LOCK_MIGRATION, /target_month >= v_start_month/);
+  assert.match(LOCK_MIGRATION, /assert_referral_months_finalized\(v_start_month, p_cutoff_month\)/);
+});
+
+test("明細が1件も無い月も未確定として扱う", () => {
+  // TAP 未取込で明細ゼロの月を「問題なし」と通さない
+  assert.match(LOCK_MIGRATION, /generate_series/);
+  assert.match(LOCK_MIGRATION, /coalesce\(\s*\n?\s*\(select s\.status from public\.referral_month_settlements s/);
+  assert.match(LOCK_MIGRATION, /'unfinalized'\s*\n?\s*\) <> 'finalized'/);
+});
+
+test("代理店の支払にはロックを掛けない", () => {
+  const fn = LOCK_MIGRATION.slice(LOCK_MIGRATION.indexOf("claim_payment_batch_items"));
+  // agency 分岐に assert が入っていないこと
+  const agencyBranch = fn.slice(fn.indexOf("if p_payee_kind = 'agency' then"));
+  const referrerAssert = agencyBranch.indexOf("assert_referral_months_finalized");
+  const elseAt = agencyBranch.indexOf("\n  else\n");
+  assert.ok(
+    referrerAssert === -1 || (elseAt >= 0 && referrerAssert > elseAt),
+    "agency 分岐にロックが入っている",
+  );
+});
+
+test("旧の代理店帰属ガードを今回は外さない", () => {
+  assert.match(LOCK_MIGRATION, /は代理店に帰属しています/);
+});
+
+test("ロック接続のmigrationは報酬の金額・支払状態を書き換えない", () => {
+  // 追加・削除はしない
+  for (const banned of [
+    "delete from public.referral_reward_items",
+    "insert into public.referral_reward_items",
+  ]) {
+    assert.equal(LOCK_MIGRATION.includes(banned), false, `${banned} がある`);
+  }
+
+  /*
+    referral_reward_items の UPDATE は claim 本来の占有だけ。
+    金額・支払状態の列に代入していないことを確かめる。
+  */
+  // SET句だけを取り出す（WHERE句の比較を代入と誤認しないため）
+  const setClauses = [
+    ...LOCK_MIGRATION.matchAll(
+      /update\s+public\.referral_reward_items\s+set([\s\S]*?)\s+where/gi,
+    ),
+  ].map((m) => m[1]);
+  assert.ok(setClauses.length > 0, "claim の UPDATE が見つからない");
+
+  for (const col of [
+    "reward_amount", "adjusted_reward_amount", "original_reward_amount",
+    "base_amount", "reward_rate", "referrer_id", "creator_id",
+    "is_paid", "payout_id", "paid_at", "is_reward_target",
+  ]) {
+    for (const clause of setClauses) {
+      assert.equal(
+        new RegExp(`\\b${col}\\s*=`).test(clause),
+        false,
+        `${col} に代入している: ${clause.trim()}`,
+      );
+    }
+  }
+  // 代入されるのは占有の2列だけ
+  for (const clause of setClauses) {
+    const assigned = [...clause.matchAll(/(\w+)\s*=/g)].map((m) => m[1]).sort();
+    assert.deepEqual(assigned, ["payment_batch_id", "updated_at"]);
+  }
+  // 占有は payment_batch_id だけ
+  assert.match(LOCK_MIGRATION, /set payment_batch_id = v_batch_id/);
+
+  // settlement を勝手に finalized にしない
+  assert.equal(/update public\.referral_month_settlements/.test(LOCK_MIGRATION), false);
+  assert.equal(/insert into public\.referral_month_settlements/.test(LOCK_MIGRATION), false);
+});

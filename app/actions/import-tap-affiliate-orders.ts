@@ -12,6 +12,7 @@ import {
   type UnknownCreatorSummary,
 } from "@/lib/orders/tap-creator-alias";
 import { tapLineExclusionReason } from "@/lib/referrals/tap-referral-source";
+import { requireAdminAction } from "@/lib/db/admin-access";
 
 /*
   TAP 取込の結果とプレビュー。
@@ -89,6 +90,17 @@ export async function importTapAffiliateOrdersAction(
   formData: FormData,
 ): Promise<ImportResult> {
   try {
+    /*
+      TAP は紹介者報酬の正データなので、取込は親管理者だけに限る。
+      画面を隠すだけでは足りない。server action は直接呼べるため、
+      ここで必ず判定する。プレビューも確定取込も同じ扱いにする。
+      判定は既存の requireAdminAction をそのまま使う（独自の認証を作らない）。
+    */
+    const auth = await requireAdminAction();
+    if (!auth.ok) {
+      return { ok: false, message: auth.error };
+    }
+
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
@@ -166,29 +178,6 @@ export async function importTapAffiliateOrdersAction(
     */
     const dryRun = formData.get("dry_run") === "1";
 
-    const { data: batch, error: batchError } = dryRun
-      ? { data: null, error: null }
-      : await supabase
-      .from("tap_affiliate_order_import_batches")
-      .insert({
-        file_name: file.name,
-        file_hash: fileHash,
-        row_count: rows.length,
-        inserted_count: 0,
-        updated_count: 0,
-        skipped_count: 0,
-      })
-      .select("id")
-      .single();
-
-    if (!dryRun && (batchError || !batch)) {
-      throw new Error(
-        `取込履歴の作成に失敗しました: ${
-          batchError?.message ?? "unknown error"
-        }`,
-      );
-    }
-
     /*
       まずExcel内のTikTok IDをユニーク化。
     */
@@ -256,7 +245,10 @@ export async function importTapAffiliateOrdersAction(
       source_row_keyを一意キーとしてupsert。
       金額や支払い状況が後日変わった場合は既存行を更新。
     */
-    const payload = linkedRows.map((row) => {
+    /*
+      取込履歴IDは検査を通ったあとで決まるので、行の組み立ては関数にしておく。
+    */
+    const buildPayload = (batchId: string) => linkedRows.map((row) => {
       const creator = creatorMap.get(
         normalizeTikTokId(row.creatorTikTokId),
       );
@@ -310,7 +302,7 @@ export async function importTapAffiliateOrdersAction(
         delivered_at: row.deliveredAt,
         paid_at: row.paidAt,
 
-        import_batch_id: batch?.id ?? null,
+        import_batch_id: batchId,
         raw_row_json: row.rawRowJson,
 
         updated_at: new Date().toISOString(),
@@ -386,6 +378,46 @@ export async function importTapAffiliateOrdersAction(
       duplicateFile: false,
     };
 
+    /*
+      確定取込の前に2つ確かめる。どちらも画面側の制御だけにしない。
+
+      1) 未登録クリエイターが残っていないこと
+         一部のクリエイターが抜けたまま取り込むと、その月を
+         「全部入った」と扱えなくなる。紹介者への支払根拠が濁る。
+
+      2) プレビューしたファイルと同じファイルであること
+         プレビューでAを確認し、確定でBを送る差し替えを防ぐ。
+         画面から預かったハッシュと、いま計算したハッシュを突き合わせる。
+    */
+    if (!dryRun) {
+      if (unknownCreators.length > 0) {
+        return {
+          ok: false,
+          message: `未登録のクリエイターが ${unknownCreators.length} 名います（${unknownCreators
+            .slice(0, 5)
+            .map((c) => c.tiktokId)
+            .join(", ")}${unknownCreators.length > 5 ? " ほか" : ""}）。先にクリエイター登録または別名設定を行ってから取り込んでください。`,
+          unknownCreatorCount: unknownCreators.length,
+          preview,
+        };
+      }
+
+      const confirmedHash = String(formData.get("preview_file_hash") ?? "");
+      if (!confirmedHash) {
+        return {
+          ok: false,
+          message: "先にプレビューで内容を確認してください。",
+        };
+      }
+      if (confirmedHash !== fileHash) {
+        return {
+          ok: false,
+          message:
+            "プレビューしたファイルと違うファイルが選ばれています。もう一度プレビューからやり直してください。",
+        };
+      }
+    }
+
     if (dryRun) {
       return {
         ok: true,
@@ -399,8 +431,33 @@ export async function importTapAffiliateOrdersAction(
     }
 
     /*
+      ここまでの検査をすべて通ってから取込履歴を作る。
+      先に作ると、未登録クリエイターやファイル差し替えで拒否したときに
+      「取り込んでいないのに履歴だけ残る」状態になる。
+    */
+    const { data: batch, error: batchError } = await supabase
+      .from("tap_affiliate_order_import_batches")
+      .insert({
+        file_name: file.name,
+        file_hash: fileHash,
+        row_count: rows.length,
+        inserted_count: 0,
+        updated_count: 0,
+        skipped_count: 0,
+      })
+      .select("id")
+      .single();
+
+    if (batchError || !batch) {
+      throw new Error(
+        `取込履歴の作成に失敗しました: ${batchError?.message ?? "unknown error"}`,
+      );
+    }
+
+    /*
       大量データなので1000件ずつupsert。
     */
+    const payload = buildPayload(batch.id);
     const chunkSize = 1000;
     let processedCount = 0;
 
@@ -428,7 +485,7 @@ export async function importTapAffiliateOrdersAction(
       .update({
         inserted_count: processedCount,
       })
-      .eq("id", batch!.id);
+      .eq("id", batch.id);
 
     if (updateBatchError) {
       console.error(
