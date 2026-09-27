@@ -11,7 +11,6 @@ import {
   computeReferralReward,
   isReferralMonthActive,
   REFERRAL_PAYOUT_THRESHOLD_YEN,
-  REFERRAL_REWARD_RATE,
   resolveAnnualPayoutState,
   resolveReferralRate,
   resolveRewardItemAmount,
@@ -26,6 +25,18 @@ import {
   計算そのものは referral-reward-engine が単一ソース。
   ここは「DBから読む / 上限を適用する / 書き戻す」だけを担当する。
 */
+
+/*
+  紹介者報酬の正データソース。
+
+  ■ 業務ルール（2026-09-27 確定）
+  紹介者報酬は TAP（tap_affiliate_order_lines）だけを元に計算する。
+  affiliate_order_lines は代理店報酬・売上集計で使い続けるが、
+  紹介者報酬の計算元にはしない。両テーブルは同じ注文を別々のキーで
+  持っているため（order_id+product_id+sku_id で 8,606 行が重複）、
+  合算すると紹介者へ二重に支払うことになる。
+*/
+export const REFERRAL_SOURCE_TABLE = "tap_affiliate_order_lines" as const;
 
 const ORDER_LINE_COLUMNS =
   "source_row_key, order_id, product_id, creator_id, target_month, commission_base, payment_status, order_status, refund_status";
@@ -80,7 +91,7 @@ export type SyncReferralRewardsResult = {
 };
 
 /**
- * 対象月の紹介者報酬明細を affiliate_order_lines から再生成する。
+ * 対象月の紹介者報酬明細を TAP（tap_affiliate_order_lines）から再生成する。
  *
  * ・source_row_key を一意キーとするため、何度実行しても二重計上しない
  * ・支払い済み明細は一切書き換えない
@@ -111,9 +122,13 @@ export async function syncReferralRewardsForMonth(
           "creator_id, referrer_id, referral_rate, start_month, end_month, is_active, lifetime_payout_cap, lifetime_paid_amount",
         )
         .order("created_at", { ascending: false }),
+      /*
+        紹介者報酬の元データは TAP だけ。affiliate_order_lines は読まない。
+        両者は同じ注文を別のキーで持っており、合算すると二重計上になる。
+      */
       fetchAllFrom<ReferralOrderLine>(
         supabase,
-        "affiliate_order_lines",
+        REFERRAL_SOURCE_TABLE,
         ORDER_LINE_COLUMNS,
         (query) => query.eq("target_month", targetMonth),
       ),
@@ -227,15 +242,25 @@ export async function syncReferralRewardsForMonth(
     const config = creatorConfigById.get(creatorId);
     if (!config) continue;
 
+    /*
+      紹介関係は creator_referrals（期間つき）だけを採用する。
+
+      以前は creators.referred_by_referrer_id を優先し、
+      creator_referrals が無ければ期間の判定そのものを飛ばしていた。
+      その経路では「今この紹介者に紐づいている」という現在値だけで
+      過去の全月へ報酬が付いてしまう。紹介者報酬が TAP を正とする
+      支払根拠になった以上、期間を持たない紐付けは採用しない。
+
+      期間情報を持たない creators.referred_by_referrer_id だけの
+      クリエイターは、報酬を作らず未紐付けとして残す。
+    */
     const referral = referralByCreator.get(creatorId);
-    const referrerId = config.referrerId ?? referral?.referrerId ?? null;
+    if (!referral) continue;
+    const referrerId = referral.referrerId;
     if (!referrerId) continue;
 
     // 紹介契約の有効期間外は対象外
-    if (
-      referral &&
-      !isReferralMonthActive(targetMonth, referral.startMonth, referral.endMonth)
-    ) {
+    if (!isReferralMonthActive(targetMonth, referral.startMonth, referral.endMonth)) {
       continue;
     }
 
@@ -246,7 +271,7 @@ export async function syncReferralRewardsForMonth(
         referrerId,
         accountManagementType: config.accountManagementType,
       },
-      referral?.referralRate ?? REFERRAL_REWARD_RATE,
+      referral.referralRate,
     );
 
     if (!computed) continue;
@@ -256,9 +281,8 @@ export async function syncReferralRewardsForMonth(
     const allocated = allocatedUnpaidByPair.get(pairKey) ?? 0;
     const capped = applyReferralRewardCap({
       originalRewardAmount: computed.rewardAmount,
-      lifetimePayoutCap:
-        referral?.lifetimePayoutCap ?? DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN,
-      lifetimePaidAmount: (referral?.lifetimePaidAmount ?? 0) + allocated,
+      lifetimePayoutCap: referral.lifetimePayoutCap,
+      lifetimePaidAmount: referral.lifetimePaidAmount + allocated,
       eligible: true,
     });
 

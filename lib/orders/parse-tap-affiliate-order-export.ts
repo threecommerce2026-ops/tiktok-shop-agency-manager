@@ -108,6 +108,41 @@ function monthFromDate(value: unknown): string | null {
   return `${year}-${String(Number(month)).padStart(2, "0")}`;
 }
 
+/*
+  TAP 明細の一意キー。
+
+  金額・支払い状況は含めない。同じ明細が後日更新されたときに
+  同じキーで upsert して1行に収めるため。
+
+  ■ affiliate_order_lines のキーとは別物
+  あちらは factorType も含む8項目で、同じ注文でも文字列が一致しない。
+  紹介者報酬は TAP だけを正とするため、両者のキーを突き合わせない。
+
+  ■ 別名（改名）との関係
+  キーにクリエイター名が入るので、改名されると同じ明細でもキーが変わる。
+  そのため別名を適用して正式名へ寄せた「あと」にキーを作り直す。
+  組み立てルールはこの関数ひとつだけが持つ。
+*/
+export function buildTapAffiliateOrderSourceRowKey(input: {
+  orderId: string | null;
+  skuId: string | null;
+  productId: string | null;
+  creatorTikTokId: string | null;
+  contentId: string | null;
+  invitationId: string | null;
+  commissionType: string | null;
+}): string {
+  return [
+    input.orderId,
+    input.skuId,
+    input.productId,
+    input.creatorTikTokId,
+    input.contentId,
+    input.invitationId,
+    input.commissionType,
+  ].join("|");
+}
+
 export function getTapFileHash(buffer: Buffer): string {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
@@ -158,11 +193,7 @@ export function parseTapAffiliateOrderExport(
       "Commission type",
     ]);
 
-    /*
-      sourceRowKeyには金額・支払い状況を含めない。
-      同じ明細が後日更新された場合は同じキーでupsertするため。
-    */
-    const sourceRowKey = [
+    const sourceRowKey = buildTapAffiliateOrderSourceRowKey({
       orderId,
       skuId,
       productId,
@@ -170,7 +201,7 @@ export function parseTapAffiliateOrderExport(
       contentId,
       invitationId,
       commissionType,
-    ].join("|");
+    });
 
     const partnerEstimatedCommission = num(
       first(row, [
