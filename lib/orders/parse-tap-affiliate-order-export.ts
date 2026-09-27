@@ -1,5 +1,4 @@
 import * as XLSX from "xlsx";
-import crypto from "node:crypto";
 
 export type TapAffiliateOrderRow = {
   sourceRowKey: string;
@@ -143,15 +142,49 @@ export function buildTapAffiliateOrderSourceRowKey(input: {
   ].join("|");
 }
 
-export function getTapFileHash(buffer: Buffer): string {
-  return crypto.createHash("sha256").update(buffer).digest("hex");
+/*
+  ファイルの同一性を見るためのハッシュ。
+
+  ■ ブラウザとサーバーで同じ値になること
+  取込はブラウザで解析し、行だけをサーバーへ送る形にした。
+  ハッシュもブラウザ側で出すため、Node の crypto ではなく
+  どちらにもある Web Crypto を使う。
+  同じバイト列から同じ SHA-256 が出ることはテストで固定している。
+
+  ■ ハッシュの役割
+  「同じファイルか」を見分けるためだけに使う。
+  ファイルが本物かの保証には使わない（クライアントが送る値なので）。
+  実データの検査はサーバー側が行内容そのものに対して行う。
+*/
+export async function getTapFileHash(
+  bytes: ArrayBuffer | Uint8Array,
+): Promise<string> {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  /*
+    ArrayBuffer をそのまま渡す。Uint8Array の場合は
+    使っている範囲だけを切り出してから渡す（byteOffset を無視しない）。
+  */
+  const source = view.buffer.slice(
+    view.byteOffset,
+    view.byteOffset + view.byteLength,
+  ) as ArrayBuffer;
+  const digest = await crypto.subtle.digest("SHA-256", source);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
+/**
+ * TAP Excel を解析する。
+ * ブラウザ（ArrayBuffer / Uint8Array）とサーバー（Buffer）の両方から呼べる。
+ * 列の対応・正規化・一意キーの作り方は変えていない。
+ */
 export function parseTapAffiliateOrderExport(
-  buffer: Buffer,
+  bytes: ArrayBuffer | Uint8Array,
 ): TapAffiliateOrderRow[] {
-  const workbook = XLSX.read(buffer, {
-    type: "buffer",
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const workbook = XLSX.read(data, {
+    type: "array",
     raw: false,
   });
 

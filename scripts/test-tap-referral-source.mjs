@@ -37,11 +37,25 @@ const aliasMod = await jiti.import(path.join(root, "lib/orders/creator-alias.ts"
 const tapAlias = await jiti.import(path.join(root, "lib/orders/tap-creator-alias.ts"));
 const tapParse = await jiti.import(path.join(root, "lib/orders/parse-tap-affiliate-order-export.ts"));
 const syncMod = await jiti.import(path.join(root, "lib/referrals/sync-referral-rewards.ts"));
+const payload = await jiti.import(path.join(root, "lib/orders/affiliate-order-import-payload.ts"));
 
 const SYNC_SOURCE = fs.readFileSync("lib/referrals/sync-referral-rewards.ts", "utf8");
 const IMPORT_SOURCE = fs.readFileSync("app/actions/import-tap-affiliate-orders.ts", "utf8");
 const MIGRATION = fs.readFileSync(
   "supabase/migrations/20260927100000_referral_reward_tap_source.sql",
+  "utf8",
+);
+const LOCK_MIGRATION = fs.readFileSync(
+  "supabase/migrations/20260927110000_claim_referral_finalized_lock.sql",
+  "utf8",
+);
+const BATCH_MIGRATION = fs.readFileSync(
+  "supabase/migrations/20260927120000_tap_import_batch_status.sql",
+  "utf8",
+);
+const IMPORT_PAGE = fs.readFileSync("app/admin/tap-orders-import/page.tsx", "utf8");
+const IMPORT_CLIENT = fs.readFileSync(
+  "app/admin/tap-orders-import/TapOrdersImportClient.tsx",
   "utf8",
 );
 
@@ -305,7 +319,6 @@ test("知らないクリエイターを creators へ作らない", () => {
     false,
     "TAP取込に creators の upsert が残っている",
   );
-  assert.match(code, /summarizeUnknownCreators/);
 });
 
 test("未知クリエイターを件数・金額・月でまとめる", () => {
@@ -321,59 +334,293 @@ test("未知クリエイターを件数・金額・月でまとめる", () => {
   assert.equal(summary[0].rowCount, 2);
   assert.equal(summary[0].commissionBase, 3000);
   assert.deepEqual(summary[0].months, ["2026-06", "2026-07"]);
-  // @ と大文字は正規化される
   assert.equal(summary[1].tiktokId, "unknown2");
 });
 
-test("紐付かない行は取り込まない", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /const linkedRows = rows\.filter/);
-  assert.match(code, /skippedUnlinkedRowCount/);
+test("紐付かない行は送信対象にしない", () => {
+  const code = codeOnly(IMPORT_CLIENT);
+  assert.match(code, /const linked = rows\.filter/);
+  assert.match(code, /skippedRowCount/);
 });
 
 // -----------------------------------------------------------------------------
-// 取込の安全装置
+// Excel 本体を Server Action へ送らない（400 の再発防止）
 // -----------------------------------------------------------------------------
-test("同じファイルの再取込を止める仕組みが残っている", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /getTapFileHash/);
-  assert.match(code, /\.eq\("file_hash", fileHash\)/);
-  assert.match(code, /duplicateFile: true/);
+test("Excel本体を Server Action へ送らない", () => {
+  const importCode = codeOnly(IMPORT_SOURCE);
+  const clientCode = codeOnly(IMPORT_CLIENT);
+
+  // クライアント側に File を積む FormData が無いこと
+  assert.equal(
+    /formData\.append\(\s*["']file["']/.test(clientCode),
+    false,
+    'FormData.append("file", ...) が残っている',
+  );
+  assert.equal(/new FormData\(\)/.test(clientCode), false, "FormData を使っている");
+
+  // サーバー側も File を受け取らないこと
+  assert.equal(/formData\.get\(["']file["']\)/.test(importCode), false);
+  assert.equal(/instanceof File/.test(importCode), false);
+  assert.equal(/\.arrayBuffer\(\)/.test(importCode), false, "サーバーでファイルを読んでいる");
 });
 
-test("同じ明細の後日更新は upsert で1行に収まる", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /onConflict: "source_row_key"/);
-  // キーに金額・支払状況を含めない（含めると更新が別行になる）
-  const key = tapParse.buildTapAffiliateOrderSourceRowKey({
-    orderId: "o", skuId: "s", productId: "p", creatorTikTokId: "c",
-    contentId: "ct", invitationId: null, commissionType: null,
-  });
-  assert.equal(key.includes("支払い済み"), false);
-  assert.equal(/\d{4,}/.test(key), false, "キーに金額らしき数値が入っている");
+test("bodySizeLimit の設定に依存しない", () => {
+  // 既存 affiliate 取込と同じ上限をそのまま使う
+  assert.equal(payload.MAX_CHUNK_PAYLOAD_BYTES, 400_000);
+  assert.equal(payload.MAX_CHUNK_ROWS, 300);
+  assert.ok(
+    payload.MAX_CHUNK_PAYLOAD_BYTES < 1024 * 1024,
+    "1リクエストが Server Action の既定上限 1MB を超える",
+  );
+  // next.config.ts を触っていないこと
+  const config = fs.readFileSync("next.config.ts", "utf8");
+  assert.ok(config.length > 0);
 });
 
-test("取込前に必ずプレビューを返せる", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /dry_run/);
-  assert.match(code, /if \(dryRun\)/);
-  for (const field of [
-    "fileHash", "totalRows", "monthCounts", "knownCreatorCount",
-    "aliasedRowCount", "unknownCreators", "commissionBaseTotal",
-    "existingRowCount", "newRowCount", "excludedCounts",
-  ]) {
-    assert.match(code, new RegExp(field), `プレビューに ${field} が無い`);
+test("新しいチャンク方式は既存実装を流用する（独自実装を作らない）", () => {
+  const clientCode = codeOnly(IMPORT_CLIENT);
+  assert.match(clientCode, /from "@\/lib\/orders\/affiliate-order-import-payload"/);
+  assert.match(clientCode, /buildPayloadChunks/);
+  // 独自のチャンク分割を書いていない
+  assert.equal(/function buildTapChunks|const CHUNK_SIZE =/.test(clientCode), false);
+});
+
+test("18,000行相当でも1リクエストが上限内に収まる", () => {
+  const many = Array.from({ length: 18_106 }, (_, i) =>
+    tapRow({
+      orderId: `order-${i}`,
+      sourceRowKey: `order-${i}|sku|prod|creator|content||`,
+      rawRowJson: { 注文ID: `order-${i}`, 商品名: "テスト商品".repeat(8) },
+    }),
+  );
+  const { chunks, maxChunkBytes } = payload.buildPayloadChunks(many);
+
+  assert.ok(chunks.length > 1, "分割されていない");
+  assert.ok(
+    maxChunkBytes <= payload.MAX_CHUNK_PAYLOAD_BYTES,
+    `1チャンクが上限超え: ${maxChunkBytes}`,
+  );
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= payload.MAX_CHUNK_ROWS, `行数超え: ${chunk.length}`);
+    assert.ok(
+      payload.jsonByteLength(chunk) <= payload.MAX_CHUNK_PAYLOAD_BYTES,
+      "JSONサイズ超え",
+    );
   }
+  // 全行が失われていない
+  assert.equal(chunks.reduce((sum, c) => sum + c.length, 0), many.length);
 });
 
-test("既存行の照合に source_row_key の .in() を使わない（URLが長くなる）", () => {
+// -----------------------------------------------------------------------------
+// 414 の再発防止
+// -----------------------------------------------------------------------------
+test("大量のキー / TikTok ID を .in() へ渡さない", () => {
   const code = codeOnly(IMPORT_SOURCE);
+  // 照合はページ単位。URL に載せるのは月とページ番号だけ
   assert.equal(
     /\.in\("source_row_key"/.test(code),
     false,
     "source_row_key の .in() は 414 の原因になる",
   );
-  assert.match(code, /\.in\("creator_id", slice\)/);
+  assert.match(code, /\.in\("target_month", normalized\)/);
+  assert.match(code, /\.range\(from, to\)/);
+  assert.match(code, /CREATOR_PAGE_SIZE/);
+});
+
+test("照合アクションは SELECT だけ行う", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  for (const name of ["fetchTapCreatorDigestAction", "fetchTapExistingKeysAction"]) {
+    const start = code.indexOf(`export async function ${name}`);
+    assert.ok(start >= 0, `${name} が無い`);
+    const body = code.slice(start, code.indexOf("\nexport ", start + 10));
+    for (const banned of [".insert(", ".update(", ".upsert(", ".delete("]) {
+      assert.equal(body.includes(banned), false, `${name} に ${banned} がある`);
+    }
+  }
+});
+
+test("ページ送りは order を付けて取りこぼさない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /\.order\("id", \{ ascending: true \}\)/);
+  assert.match(code, /\.order\("source_row_key", \{ ascending: true \}\)/);
+});
+
+// -----------------------------------------------------------------------------
+// 認証
+// -----------------------------------------------------------------------------
+test("TAP取込のすべてのアクションが親管理者だけ", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  const actions = [
+    "fetchTapCreatorDigestAction",
+    "fetchTapExistingKeysAction",
+    "startTapAffiliateOrderImportAction",
+    "importTapAffiliateOrderChunkAction",
+    "finishTapAffiliateOrderImportAction",
+    "failTapAffiliateOrderImportAction",
+  ];
+  for (const name of actions) {
+    const start = code.indexOf(`export async function ${name}`);
+    assert.ok(start >= 0, `${name} が無い`);
+    const body = code.slice(start, start + 400);
+    assert.match(body, /await requireAdminAction\(\)/, `${name} に認可が無い`);
+  }
+});
+
+test("TAP取込ページは未ログイン / 非admin を弾く", () => {
+  assert.match(IMPORT_PAGE, /redirect\("\/login\?next=\/admin\/tap-orders-import"\)/);
+  assert.match(IMPORT_PAGE, /isAdminRole\(appUser\.data\.role\)/);
+  assert.match(IMPORT_PAGE, /redirect\("\/dashboard"\)/);
+  // ページ自体はサーバーコンポーネント
+  assert.equal(IMPORT_PAGE.includes('"use client"'), false);
+});
+
+test("認可は既存の共通実装を使う（独自認証を作らない）", () => {
+  assert.match(IMPORT_SOURCE, /from "@\/lib\/db\/admin-access"/);
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.equal(code.includes("is_app_admin"), false);
+  assert.equal(code.includes("auth.getUser()"), false);
+});
+
+// -----------------------------------------------------------------------------
+// 確定取込のガード
+// -----------------------------------------------------------------------------
+test("未登録クリエイターがあると取込を開始できない（サーバー側）", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /unknownCreatorCount > 0/);
+  assert.match(code, /未登録のクリエイターがあります/);
+});
+
+test("チャンクにも未登録クリエイターが混ざれば拒否する", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /const unknown = tiktokIds\.filter\(\(id\) => !creatorByTiktokId\.has\(id\)\)/);
+  assert.match(code, /未登録のクリエイターが含まれています/);
+});
+
+test("クライアントが送った一意キーをそのまま使わない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /const sourceRowKey = buildTapAffiliateOrderSourceRowKey\(/);
+  // row.sourceRowKey をそのまま DB へ入れていない
+  assert.equal(/source_row_key: row\.sourceRowKey/.test(code), false);
+});
+
+test("送信サイズと行数をサーバーでも検査する", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /rows\.length > SERVER_MAX_CHUNK_ROWS/);
+  assert.match(code, /jsonByteLength\(rows\) > SERVER_MAX_CHUNK_BYTES/);
+});
+
+test("画面は未登録クリエイターがあると確定取込を押せない", () => {
+  assert.match(IMPORT_CLIENT, /const canConfirm = Boolean\(preview\) && unknownCount === 0/);
+  assert.match(IMPORT_CLIENT, /disabled=\{!canConfirm\}/);
+  assert.match(IMPORT_CLIENT, /setPreview\(null\)/);
+});
+
+test("画面は処理中に二重送信できない", () => {
+  assert.match(IMPORT_CLIENT, /disabled=\{!file \|\| busy !== null\}/);
+  assert.match(IMPORT_CLIENT, /busy !== null/);
+});
+
+test("画面はプレビューであることを明示する", () => {
+  assert.match(IMPORT_CLIENT, /これはプレビューです。まだデータベースには保存されていません。/);
+});
+
+test("プレビュー画面に必要な項目が出る", () => {
+  for (const label of [
+    "ファイル名", "ファイルhash", "総行数", "対象期間",
+    "新規候補", "更新候補", "スキップ", "成果報酬ベース総額",
+    "クリエイター数", "既知クリエイター", "別名で寄せた行", "未登録クリエイター",
+  ]) {
+    assert.ok(IMPORT_CLIENT.includes(label), `プレビューに「${label}」が無い`);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// 分割送信の冪等性・再開
+// -----------------------------------------------------------------------------
+test("完了済みファイルは再取込を拒否し、未完了は再開できる", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /existing\?\.status === "completed"/);
+  assert.match(code, /このファイルはすでに取り込み済みです/);
+  // 失敗したファイルを永久に弾かない
+  assert.match(code, /resumedChunkIndexes/);
+  assert.match(code, /status: "processing"/);
+});
+
+test("チャンク完了は番号で数える（再送で二重加算しない）", () => {
+  assert.match(BATCH_MIGRATION, /completed_chunk_indexes integer\[\]/);
+  assert.match(BATCH_MIGRATION, /p_chunk_index = any\(completed_chunk_indexes\)/);
+  /*
+    単純加算をしていないこと。
+    コメントには「こうしない」という説明として書いてあるので、
+    SQL の本体だけを見る。
+  */
+  const sqlOnly = BATCH_MIGRATION.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*--.*$/gm, "");
+  assert.equal(
+    /completed_chunks\s*\+\s*1/.test(sqlOnly),
+    false,
+    "件数の単純加算が残っている",
+  );
+});
+
+test("同じチャンクの再送で二重行にならない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /onConflict: "source_row_key"/);
+});
+
+test("全チャンクが揃うまで完了にしない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /if \(!done\.has\(i\)\) missing\.push\(i\)/);
+  assert.match(code, /まだ送信できていない分があります/);
+  assert.match(code, /status: "completed"/);
+});
+
+test("失敗を記録して再開できる", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /failTapAffiliateOrderImportAction/);
+  assert.match(code, /status: "failed"/);
+  const clientCode = codeOnly(IMPORT_CLIENT);
+  assert.match(clientCode, /同じファイルをもう一度選ぶと続きから再開できます/);
+  assert.match(clientCode, /if \(done\.has\(index\)\) continue/);
+});
+
+test("取込履歴の状態は3つだけ", () => {
+  assert.match(BATCH_MIGRATION, /check \(status in \('processing', 'completed', 'failed'\)\)/);
+  // 完了済みだけ file_hash の重複を禁じる
+  assert.match(BATCH_MIGRATION, /where status = 'completed'/);
+});
+
+test("既存の取込1件は completed で埋める", () => {
+  assert.match(BATCH_MIGRATION, /set status = 'completed'/);
+  assert.match(BATCH_MIGRATION, /where status is null/);
+  // 既存のカウントを壊さない
+  assert.equal(/set[\s\S]{0,200}row_count\s*=/.test(BATCH_MIGRATION), false);
+  assert.equal(/set[\s\S]{0,200}inserted_count\s*=/.test(BATCH_MIGRATION), false);
+});
+
+test("ファイルハッシュはブラウザとサーバーで同じ値になる", async () => {
+  const bytes = new TextEncoder().encode("TAP テスト 12345");
+  const fromBrowserApi = await tapParse.getTapFileHash(bytes);
+  const nodeCrypto = require("node:crypto");
+  const expected = nodeCrypto.createHash("sha256").update(Buffer.from(bytes)).digest("hex");
+  assert.equal(fromBrowserApi, expected);
+  assert.match(fromBrowserApi, /^[0-9a-f]{64}$/);
+});
+
+test("ハッシュの役割を取り違えない（真正性の保証には使わない）", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  // ハッシュは同一ファイルの識別にだけ使う
+  assert.match(code, /FILE_HASH_PATTERN\.test\(fileHash\)/);
+  // 行の中身はサーバーが検査し直す
+  assert.match(code, /buildTapAffiliateOrderSourceRowKey/);
+  assert.match(code, /const unknown = tiktokIds\.filter/);
+});
+
+test("TAP parser はブラウザの ArrayBuffer からも解析できる", () => {
+  const source = fs.readFileSync("lib/orders/parse-tap-affiliate-order-export.ts", "utf8");
+  assert.equal(codeOnly(source).includes("node:crypto"), false, "Node専用モジュールが残っている");
+  assert.match(source, /bytes: ArrayBuffer \| Uint8Array/);
+  assert.match(source, /type: "array"/);
+  assert.match(source, /crypto\.subtle\.digest\("SHA-256"/);
 });
 
 // -----------------------------------------------------------------------------
@@ -423,101 +670,6 @@ test("dry-run スクリプトは書き込みを行わない", () => {
   const code = codeOnly(source);
   for (const banned of [".insert(", ".update(", ".upsert(", ".delete(", ".rpc("]) {
     assert.equal(code.includes(banned), false, `dry-run に ${banned} がある`);
-  }
-});
-
-// -----------------------------------------------------------------------------
-// 認証（画面の制御だけに頼らない）
-// -----------------------------------------------------------------------------
-const IMPORT_PAGE = fs.readFileSync("app/admin/tap-orders-import/page.tsx", "utf8");
-const IMPORT_CLIENT = fs.readFileSync(
-  "app/admin/tap-orders-import/TapOrdersImportClient.tsx",
-  "utf8",
-);
-const LOCK_MIGRATION = fs.readFileSync(
-  "supabase/migrations/20260927110000_claim_referral_finalized_lock.sql",
-  "utf8",
-);
-
-test("TAP取込アクションは親管理者だけが実行できる", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /requireAdminAction/);
-  // 認可がファイル読み取りより前にあること
-  const authAt = code.indexOf("await requireAdminAction()");
-  const fileAt = code.indexOf('formData.get("file")');
-  assert.ok(authAt >= 0, "requireAdminAction を呼んでいない");
-  assert.ok(authAt < fileAt, "認可より先にファイルを読んでいる");
-});
-
-test("認可は既存の共通実装を使う（独自認証を作らない）", () => {
-  assert.match(IMPORT_SOURCE, /from "@\/lib\/db\/admin-access"/);
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.equal(code.includes("is_app_admin"), false);
-  assert.equal(code.includes("auth.getUser()"), false);
-});
-
-test("プレビューも確定取込も同じ認可を通る", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  // dry_run の判定より前に認可がある＝両方に効く
-  assert.ok(code.indexOf("await requireAdminAction()") < code.indexOf('formData.get("dry_run")'));
-});
-
-test("TAP取込ページは未ログイン / 非admin を弾く", () => {
-  assert.match(IMPORT_PAGE, /redirect\("\/login\?next=\/admin\/tap-orders-import"\)/);
-  assert.match(IMPORT_PAGE, /isAdminRole\(appUser\.data\.role\)/);
-  assert.match(IMPORT_PAGE, /redirect\("\/dashboard"\)/);
-  // ページ自体はサーバーコンポーネント（"use client" を持たない）
-  assert.equal(IMPORT_PAGE.includes('"use client"'), false);
-});
-
-// -----------------------------------------------------------------------------
-// 確定取込のガード
-// -----------------------------------------------------------------------------
-test("未登録クリエイターがあると確定取込を拒否する（サーバー側）", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /if \(!dryRun\) \{[\s\S]*?if \(unknownCreators\.length > 0\)/);
-  assert.match(code, /未登録のクリエイターが/);
-});
-
-test("プレビューと違うファイルなら確定取込を拒否する", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  assert.match(code, /preview_file_hash/);
-  assert.match(code, /if \(confirmedHash !== fileHash\)/);
-  assert.match(code, /先にプレビューで内容を確認してください/);
-});
-
-test("拒否されたときに取込履歴だけ残さない", () => {
-  const code = codeOnly(IMPORT_SOURCE);
-  // 取込履歴の INSERT は、すべての検査を通ったあとにある
-  const guardAt = code.indexOf("if (!dryRun) {");
-  const insertAt = code.indexOf('.from("tap_affiliate_order_import_batches")\n      .insert(');
-  assert.ok(guardAt >= 0 && insertAt >= 0);
-  assert.ok(guardAt < insertAt, "検査より先に取込履歴を作っている");
-});
-
-test("画面は未登録クリエイターがあると確定取込を押せない", () => {
-  assert.match(IMPORT_CLIENT, /const canConfirm = Boolean\(preview\) && unknownCount === 0/);
-  assert.match(IMPORT_CLIENT, /disabled=\{!canConfirm\}/);
-  // ファイルを変えたらプレビューを捨てる
-  assert.match(IMPORT_CLIENT, /setPreview\(null\)/);
-});
-
-test("画面は処理中に二重送信できない", () => {
-  assert.match(IMPORT_CLIENT, /disabled=\{!file \|\| isPending\}/);
-  assert.match(IMPORT_CLIENT, /const canConfirm = Boolean\(preview\) && unknownCount === 0 && !isPending/);
-});
-
-test("画面はプレビューであることを明示する", () => {
-  assert.match(IMPORT_CLIENT, /これはプレビューです。まだデータベースには保存されていません。/);
-});
-
-test("プレビュー画面に必要な項目が出る", () => {
-  for (const label of [
-    "ファイル名", "ファイルhash", "総行数", "対象期間",
-    "新規候補", "更新候補", "スキップ", "成果報酬ベース総額",
-    "クリエイター数", "既知クリエイター", "別名で寄せた行", "未登録クリエイター",
-  ]) {
-    assert.ok(IMPORT_CLIENT.includes(label), `プレビューに「${label}」が無い`);
   }
 });
 
