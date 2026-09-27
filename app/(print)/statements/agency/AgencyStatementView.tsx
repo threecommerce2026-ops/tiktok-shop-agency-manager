@@ -6,6 +6,7 @@ import { AgencyStatementDocument } from "@/components/payments/AgencyStatementDo
 import type { AgencyStatement } from "@/lib/payments/agency-statement";
 import {
   formatStatementCutoffLabel,
+  formatStatementMonthLabel,
   statementFileBaseName,
 } from "@/lib/payments/agency-statement";
 
@@ -54,8 +55,8 @@ export function AgencyStatementView({
           statements[0].agencyName,
         )
       : cutoffMonth
-        ? `${cutoffMonth}_代理店報酬支払明細書_${statements.length}件`
-        : "代理店報酬支払明細書";
+        ? `${formatStatementMonthLabel(cutoffMonth)}_代理店報酬支払明細_${statements.length}件`
+        : "代理店報酬支払明細";
 
   return (
     <div className="stmt-root">

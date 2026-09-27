@@ -294,13 +294,18 @@ console.log("");
 console.log("【8】ファイル名");
 check(
   "通常",
-  mod.statementFileBaseName("2026-07", "LUMN") === "2026-07_LUMN_支払明細",
+  mod.statementFileBaseName("2026-07", "LUMN") === "LUMN_2026年7月_代理店報酬支払明細",
   mod.statementFileBaseName("2026-07", "LUMN"),
 );
 check(
   "ZIP名",
-  mod.statementZipFileName("2026-07") === "2026-07_代理店支払明細.zip",
+  mod.statementZipFileName("2026-07") === "2026年7月_代理店報酬支払明細.zip",
   mod.statementZipFileName("2026-07"),
+);
+check(
+  "月の先頭ゼロを付けない",
+  mod.statementZipFileName("2026-08") === "2026年8月_代理店報酬支払明細.zip",
+  mod.statementZipFileName("2026-08"),
 );
 check(
   "スラッシュを含む代理店名",
@@ -313,8 +318,14 @@ check(
   mod.sanitizeStatementFileName("株式会社ハイライト") === "株式会社ハイライト",
 );
 check(
-  "感嘆符を含む代理店名（BUZZ L!VE）",
-  mod.statementFileBaseName("2026-07", "BUZZ L!VE") === "2026-07_BUZZ-L!VE_支払明細",
+  "スペースを残す",
+  mod.sanitizeStatementFileName("BUZZ L!VE") === "BUZZ L!VE",
+  mod.sanitizeStatementFileName("BUZZ L!VE"),
+);
+check(
+  "感嘆符とスペースを残す（BUZZ L!VE）",
+  mod.statementFileBaseName("2026-07", "BUZZ L!VE") ===
+    "BUZZ L!VE_2026年7月_代理店報酬支払明細",
   mod.statementFileBaseName("2026-07", "BUZZ L!VE"),
 );
 check("空文字は既定名", mod.sanitizeStatementFileName("   ") === "支払明細");

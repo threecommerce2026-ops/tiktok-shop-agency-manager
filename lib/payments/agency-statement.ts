@@ -197,34 +197,58 @@ export function formatStatementRate(ratePct: number | null): string {
 
 /**
  * ファイル名に使える形へ整える。
- * 日本語は残し、パス区切りなど問題になる文字だけを置き換える。
+ *
+ * 代理店名はそのまま読めることを優先する。日本語・スペース・「!」など
+ * ファイル名に使える文字は残し、使えない文字だけを置き換える。
+ * 以前はスペースを "-" にしていたが、「BUZZ L!VE」が「BUZZ-L!VE」になり
+ * 代理店側から見て自分の名前と一致しなくなるため、スペースは保つ。
  */
-export function sanitizeStatementFileName(value: string): string {
+export function sanitizeStatementFileName(
+  value: string,
+  fallback = "支払明細",
+): string {
   const cleaned = String(value ?? "")
+    // ファイル名に使えない文字
     .replace(/[\\/:*?"<>|]/g, "-")
     // 制御文字は取り除く
     .replace(/[\u0000-\u001f\u007f]/g, "")
-    .replace(/\s+/g, "-")
+    // 連続する空白は1つにまとめる（改行やタブもここで空白になる）
+    .replace(/\s+/g, " ")
     .replace(/-+/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "")
-    .trim();
-  return cleaned.length > 0 ? cleaned.slice(0, 80) : "支払明細";
+    // 先頭・末尾の "-" と "." は落とす（隠しファイル扱いを避ける）
+    .replace(/^[-.\s]+|[-.\s]+$/g, "");
+  return cleaned.length > 0 ? cleaned.slice(0, 80).trim() : fallback;
 }
 
+/*
+  送付ファイルの名前。
+
+  代理店は自社分だけを受け取るので、開いたときに
+  「どこの」「いつの」「何か」がこの順で読めるようにする。
+  対象月は payment_batch.cutoff_month を正とし、月の先頭ゼロは付けない。
+*/
+
 /**
- * 送付ファイルの名前。拡張子は付けない。
- * 例: 2026-07 + LUMN → 2026-07_LUMN_支払明細
+ * 個別PDFの名前。拡張子は付けない。
+ * 例: 2026-07 + LUMN → LUMN_2026年7月_代理店報酬支払明細
  */
 export function statementFileBaseName(
   cutoffMonth: string,
   agencyName: string,
 ): string {
-  return `${sanitizeStatementFileName(cutoffMonth)}_${sanitizeStatementFileName(
-    agencyName,
-  )}_支払明細`;
+  const agency = sanitizeStatementFileName(agencyName, "代理店");
+  const month = sanitizeStatementFileName(
+    formatStatementMonthLabel(cutoffMonth),
+    cutoffMonth,
+  );
+  return `${agency}_${month}_代理店報酬支払明細`;
 }
 
-/** ZIPの名前。例: 2026-07 → 2026-07_代理店支払明細.zip */
+/** ZIPの名前。例: 2026-07 → 2026年7月_代理店報酬支払明細.zip */
 export function statementZipFileName(cutoffMonth: string): string {
-  return `${sanitizeStatementFileName(cutoffMonth)}_代理店支払明細.zip`;
+  const month = sanitizeStatementFileName(
+    formatStatementMonthLabel(cutoffMonth),
+    cutoffMonth,
+  );
+  return `${month}_代理店報酬支払明細.zip`;
 }

@@ -287,24 +287,45 @@ test("ファイル名の危険な文字をsanitizeする", () => {
     const name = stmt.statementFileBaseName("2026-07", `A${ch}B`);
     assert.ok(!name.includes(ch), `${ch} が残っている: ${name}`);
   }
+  // 代理店名のスペースと「!」はそのまま残す
   assert.equal(
     stmt.statementFileBaseName("2026-07", "BUZZ L!VE"),
-    "2026-07_BUZZ-L!VE_支払明細",
+    "BUZZ L!VE_2026年7月_代理店報酬支払明細",
   );
-  assert.equal(stmt.statementFileBaseName("2026-07", "LUMN"), "2026-07_LUMN_支払明細");
-  assert.equal(stmt.statementZipFileName("2026-07"), "2026-07_代理店支払明細.zip");
+  assert.equal(
+    stmt.statementFileBaseName("2026-07", "LUMN"),
+    "LUMN_2026年7月_代理店報酬支払明細",
+  );
+  assert.equal(
+    stmt.statementFileBaseName("2026-07", "ピクノア"),
+    "ピクノア_2026年7月_代理店報酬支払明細",
+  );
+  assert.equal(stmt.statementZipFileName("2026-07"), "2026年7月_代理店報酬支払明細.zip");
+  // 月の先頭ゼロは付けない
+  assert.equal(stmt.statementZipFileName("2026-08"), "2026年8月_代理店報酬支払明細.zip");
+  assert.equal(stmt.statementZipFileName("2026-12"), "2026年12月_代理店報酬支払明細.zip");
+  assert.equal(
+    stmt.statementFileBaseName("2026-01", "LUMN"),
+    "LUMN_2026年1月_代理店報酬支払明細",
+  );
+  // 代理店名が空でも意味のある名前にする
+  assert.equal(
+    stmt.statementFileBaseName("2026-07", "   "),
+    "代理店_2026年7月_代理店報酬支払明細",
+  );
   // パス上位へ抜けない
   assert.ok(!stmt.sanitizeStatementFileName("../../etc/passwd").startsWith("."));
 });
 
 test("同名の代理店があってもZIP内で上書きしない", () => {
   const used = new Set();
-  const a = zipMod.uniqueZipName(used, "2026-07_同名_支払明細", ".pdf");
-  const b = zipMod.uniqueZipName(used, "2026-07_同名_支払明細", ".pdf");
-  const c = zipMod.uniqueZipName(used, "2026-07_同名_支払明細", ".pdf");
-  assert.equal(a, "2026-07_同名_支払明細.pdf");
-  assert.equal(b, "2026-07_同名_支払明細_2.pdf");
-  assert.equal(c, "2026-07_同名_支払明細_3.pdf");
+  const base = stmt.statementFileBaseName("2026-07", "同名代理店");
+  const a = zipMod.uniqueZipName(used, base, ".pdf");
+  const b = zipMod.uniqueZipName(used, base, ".pdf");
+  const c = zipMod.uniqueZipName(used, base, ".pdf");
+  assert.equal(a, "同名代理店_2026年7月_代理店報酬支払明細.pdf");
+  assert.equal(b, "同名代理店_2026年7月_代理店報酬支払明細_2.pdf");
+  assert.equal(c, "同名代理店_2026年7月_代理店報酬支払明細_3.pdf");
   assert.equal(new Set([a, b, c]).size, 3);
 });
 
@@ -620,9 +641,9 @@ test("経路は GET のみ（書き込みメソッドを持たない）", () => 
 test("Content-Disposition が日本語ファイル名を壊さない", async () => {
   const dl = await jiti.import(path.join(root, "lib/payments/agency-statement.ts"));
   const name = dl.statementZipFileName("2026-07");
+  assert.equal(name, "2026年7月_代理店報酬支払明細.zip");
   // RFC 5987 形式を含み、ASCII用のフォールバックも持つ
   const source = fs.readFileSync("lib/payments/statement-download.ts", "utf8");
   assert.match(source, /filename\*=UTF-8''\$\{encodeURIComponent\(/);
   assert.match(source, /asciiFallback/);
-  assert.equal(name, "2026-07_代理店支払明細.zip");
 });
