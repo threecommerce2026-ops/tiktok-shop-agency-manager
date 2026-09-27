@@ -758,3 +758,114 @@ test("ロック接続のmigrationは報酬の金額・支払状態を書き換�
   assert.equal(/update public\.referral_month_settlements/.test(LOCK_MIGRATION), false);
   assert.equal(/insert into public\.referral_month_settlements/.test(LOCK_MIGRATION), false);
 });
+
+// -----------------------------------------------------------------------------
+// RPC の呼び出し役（permission denied の再発防止）
+// -----------------------------------------------------------------------------
+test("チャンク完了の記録はログイン中のユーザーとして呼ぶ", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  /*
+    service role で呼ぶと EXECUTE が無く permission denied になり、
+    仮に権限を広げても関数内の is_app_admin() が auth.uid() を見るため
+    必ず false になる。既存の支払い系RPCと同じ呼び方に揃える。
+  */
+  assert.match(
+    code,
+    /await auth\.supabase\.rpc\(\s*\n?\s*"mark_tap_import_chunk_done"/,
+    "RPC を利用者のクライアントから呼んでいない",
+  );
+  assert.equal(
+    /admin\.rpc\(/.test(code),
+    false,
+    "service role のクライアントで RPC を呼んでいる",
+  );
+});
+
+test("RPC の権限は authenticated だけに与える", () => {
+  const sql = BATCH_MIGRATION.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*--.*$/gm, "");
+  assert.match(sql, /revoke all on function public\.mark_tap_import_chunk_done\(uuid, integer\) from public, anon;/);
+  assert.match(sql, /grant execute on function public\.mark_tap_import_chunk_done\(uuid, integer\) to authenticated;/);
+  // service_role へ広げて権限問題を隠さない
+  assert.equal(
+    /grant execute on function public\.mark_tap_import_chunk_done[\s\S]{0,80}service_role/.test(sql),
+    false,
+    "service_role へ EXECUTE を与えている",
+  );
+});
+
+test("RPC の中の admin 判定を外していない", () => {
+  const sql = BATCH_MIGRATION.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*--.*$/gm, "");
+  assert.match(sql, /if not public\.is_app_admin\(\) then/);
+  assert.match(sql, /親管理者のみ実行できます/);
+});
+
+test("アプリ側の admin 判定も残っている（二重の守り）", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  const start = code.indexOf("export async function importTapAffiliateOrderChunkAction");
+  const body = code.slice(start, start + 400);
+  assert.match(body, /await requireAdminAction\(\)/);
+});
+
+// -----------------------------------------------------------------------------
+// 途中失敗からの再開（upsert 成功 → RPC 失敗 の状態から）
+// -----------------------------------------------------------------------------
+test("取込件数は画面の集計ではなく DB を数えて決める", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  /*
+    再開時、画面は成功済みのチャンクを送り直さないので手元の集計が足りない。
+    その値をそのまま記録すると実際より少なくなる。
+  */
+  assert.match(code, /\.from\("tap_affiliate_order_lines"\)\s*\n\s*\.select\("id", \{ count: "exact", head: true \}\)\s*\n\s*\.eq\("import_batch_id", batchId\)/);
+  assert.match(code, /inserted_count: insertedCount \?\? 0/);
+
+  // finish はもう画面から件数を受け取らない
+  const start = code.indexOf("export async function finishTapAffiliateOrderImportAction");
+  const sig = code.slice(start, code.indexOf(")", start));
+  assert.equal(sig.includes("insertedCount"), false, "finish がまだ件数を受け取っている");
+});
+
+test("画面も finish へ件数を送らない", () => {
+  const code = codeOnly(IMPORT_CLIENT);
+  assert.match(code, /finishTapAffiliateOrderImportAction\(\{\s*\n\s*batchId,\s*\n\s*skippedCount:/);
+  assert.equal(
+    /finishTapAffiliateOrderImportAction\([\s\S]{0,120}insertedCount:/.test(code),
+    false,
+    "画面がまだ件数を送っている",
+  );
+});
+
+test("同じチャンクを送り直しても行が増えない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  // 一意キーで upsert しているので、同じ行は更新になる
+  assert.match(code, /onConflict: "source_row_key"/);
+  // キーはサーバーで作り直すので、送り直しても同じキーになる
+  assert.match(code, /const sourceRowKey = buildTapAffiliateOrderSourceRowKey\(/);
+});
+
+test("チャンク完了の記録は何度呼んでも重複しない", () => {
+  const sql = BATCH_MIGRATION.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*--.*$/gm, "");
+  assert.match(sql, /when p_chunk_index = any\(completed_chunk_indexes\)\s*\n\s*then completed_chunk_indexes/);
+});
+
+test("失敗したファイルは同じセッションで再開できる", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /existing\?\.status === "completed"/);
+  assert.match(code, /resumedChunkIndexes/);
+  // failed でも start が通る（completed だけ弾く）
+  const start = code.indexOf("export async function startTapAffiliateOrderImportAction");
+  const body = code.slice(start, code.indexOf("\nexport ", start + 10));
+  assert.equal(/status === "failed"[\s\S]{0,80}return fail/.test(body), false);
+});
+
+test("完了済みファイルの再取込は引き続き拒否する", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.match(code, /このファイルはすでに取り込み済みです/);
+  const sql = BATCH_MIGRATION.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*--.*$/gm, "");
+  assert.match(sql, /create unique index if not exists tap_import_batches_completed_hash_idx[\s\S]{0,120}where status = 'completed'/);
+});
+
+test("取込の完了で紹介報酬の再集計を走らせない", () => {
+  const code = codeOnly(IMPORT_SOURCE);
+  assert.equal(code.includes("syncReferralRewards"), false);
+  assert.equal(code.includes("referral_reward_items"), false);
+});

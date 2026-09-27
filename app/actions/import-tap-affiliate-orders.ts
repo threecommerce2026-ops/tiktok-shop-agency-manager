@@ -463,7 +463,21 @@ export async function importTapAffiliateOrderChunkAction(input: {
     }
   }
 
-  const { data: completed, error: markError } = await admin.rpc(
+  /*
+    RPC はログイン中のユーザーとして呼ぶ。
+
+    service role のクライアントで呼ぶと2つ壊れる。
+      ・EXECUTE を持っていないので permission denied になる
+      ・関数の中の is_app_admin() は auth.uid() を見るが、
+        service role には利用者のトークンが無いので必ず false になる
+    権限を service role へ広げても後者が残るため、
+    「アプリで admin を確かめ、関数の中でも確かめる」二重の守りが壊れる。
+
+    既存の支払い系 RPC（claim_payment_batch_items など）と同じく
+    利用者のクライアントから呼ぶ。テーブルの更新は関数が
+    security definer なので、利用者の権限に左右されない。
+  */
+  const { data: completed, error: markError } = await auth.supabase.rpc(
     "mark_tap_import_chunk_done",
     { p_batch_id: batchId, p_chunk_index: chunkIndex },
   );
@@ -492,7 +506,6 @@ export type FinishTapImportResult =
  */
 export async function finishTapAffiliateOrderImportAction(input: {
   batchId: string;
-  insertedCount: number;
   skippedCount: number;
 }): Promise<FinishTapImportResult> {
   const auth = await requireAdminAction();
@@ -501,9 +514,7 @@ export async function finishTapAffiliateOrderImportAction(input: {
   const batchId = String(input?.batchId ?? "").trim();
   if (!batchId) return fail("取込セッションが不明です");
 
-  const insertedCount = Number(input?.insertedCount ?? 0);
   const skippedCount = Number(input?.skippedCount ?? 0);
-  if (!Number.isInteger(insertedCount) || insertedCount < 0) return fail("取込件数が不正です");
   if (!Number.isInteger(skippedCount) || skippedCount < 0) return fail("スキップ件数が不正です");
 
   const admin = getSupabaseAdmin();
@@ -531,11 +542,26 @@ export async function finishTapAffiliateOrderImportAction(input: {
     );
   }
 
+  /*
+    取込件数は画面からの申告ではなく、DB を数えて決める。
+
+    途中から再開したときは、画面は前回成功したぶんを送り直さないので
+    手元の集計には入らない。その値をそのまま記録すると実際より少なくなる。
+    この取込セッションで触れた行を数えれば、何回に分けて送っても、
+    途中で失敗して再開しても、同じ結果になる。
+  */
+  const { count: insertedCount, error: countError } = await admin
+    .from("tap_affiliate_order_lines")
+    .select("id", { count: "exact", head: true })
+    .eq("import_batch_id", batchId);
+
+  if (countError) return fail(countError.message);
+
   const { error } = await admin
     .from("tap_affiliate_order_import_batches")
     .update({
       status: "completed",
-      inserted_count: insertedCount,
+      inserted_count: insertedCount ?? 0,
       skipped_count: skippedCount,
       completed_at: new Date().toISOString(),
       error_message: null,
@@ -552,8 +578,8 @@ export async function finishTapAffiliateOrderImportAction(input: {
 
   return {
     ok: true,
-    insertedCount,
-    message: `${insertedCount.toLocaleString("ja-JP")}件のTAP注文明細を取り込みました。`,
+    insertedCount: insertedCount ?? 0,
+    message: `${(insertedCount ?? 0).toLocaleString("ja-JP")}件のTAP注文明細を取り込みました。`,
   };
 }
 

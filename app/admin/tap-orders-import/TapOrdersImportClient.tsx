@@ -253,7 +253,6 @@ export function TapOrdersImportClient() {
         送り直しても upsert なので結果は壊れないが、無駄な往復を避ける。
       */
       const done = new Set(started.resumedChunkIndexes);
-      let inserted = 0;
 
       for (let index = 0; index < chunks.length; index += 1) {
         if (done.has(index)) continue;
@@ -273,13 +272,15 @@ export function TapOrdersImportClient() {
           });
           return;
         }
-        inserted += result.upsertedCount;
       }
 
       setProgress("仕上げています…");
+      /*
+        取込件数はサーバーが DB を数えて決める。
+        再開したときに手元の集計が足りなくなるため、ここからは送らない。
+      */
       const finished = await finishTapAffiliateOrderImportAction({
         batchId,
-        insertedCount: inserted,
         skippedCount: preview.skippedRowCount,
       });
 
@@ -289,7 +290,7 @@ export function TapOrdersImportClient() {
       }
 
       setSummary({
-        insertedCount: inserted,
+        insertedCount: finished.insertedCount,
         skippedCount: preview.skippedRowCount,
         chunkCount: chunks.length,
         aliasedRowCount: preview.aliasedRowCount,
