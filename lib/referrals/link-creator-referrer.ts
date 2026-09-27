@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
+import { previousMonthOf } from "@/lib/payments/cutoff-month";
 import { DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN } from "@/lib/referrals/cap";
 import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
 import type { AssignmentState } from "@/lib/creators/assignment-state";
@@ -51,10 +52,34 @@ export async function linkCreatorToReferrer(
     return { ok: false, error: creatorError.message };
   }
 
-  // 旧紐付けは削除せず無効化する（過去の報酬明細との対応を残すため）
+  const referralRate = params.referralRate ?? REFERRAL_REWARD_RATE;
+  const startMonth = params.startMonth ?? currentMonthKey();
+  const endMonth = params.endMonth ?? null;
+
+  /*
+    旧紐付けは削除せず無効化する（過去の報酬明細との対応を残すため）。
+
+    このとき end_month に「新しい関係の開始月の前月」を記録する。
+    記録しないと「いつまで有効だったか」がどこにも残らず、
+    過去月の紹介報酬を出すために後続関係から毎回導出することになる
+    （lib/referrals/referral-period.ts の復元処理）。
+
+    新しい紹介者が決まっていない場合（referrerId が null）は境界が無いので
+    end_month を書かない。ここで無効化した日から推測すると、
+    DB に無い事実を作ってしまう。
+  */
+  const deactivation: Record<string, unknown> = {
+    is_active: false,
+    updated_at: nowIso,
+  };
+
+  if (referrerId) {
+    deactivation.end_month = previousMonthOf(startMonth);
+  }
+
   const deactivate = supabase
     .from("creator_referrals")
-    .update({ is_active: false, updated_at: nowIso })
+    .update(deactivation)
     .eq("creator_id", creatorId)
     .eq("is_active", true);
 
@@ -69,10 +94,6 @@ export async function linkCreatorToReferrer(
   if (!referrerId) {
     return { ok: true };
   }
-
-  const referralRate = params.referralRate ?? REFERRAL_REWARD_RATE;
-  const startMonth = params.startMonth ?? currentMonthKey();
-  const endMonth = params.endMonth ?? null;
 
   const { data: existing, error: existingError } = await supabase
     .from("creator_referrals")
