@@ -16,6 +16,7 @@ import {
 } from "pdf-lib";
 
 import { INVOICE_ISSUER } from "@/lib/billing/issuer";
+import { pruneFontToCodePoints } from "@/lib/pdf/font-prune";
 import {
   formatStatementCutoffLabel,
   formatStatementMonthLabel,
@@ -46,6 +47,14 @@ import {
   金額は縮小して必ず全桁を出す。名前は入る幅で切って省略記号を付ける。
   フォントに無い文字（TikTok名の絵文字など）は事前に落とす。
   pdf-lib は未収録文字で例外を投げるため、この処理は必須。
+
+  ■ フォントの埋め込み
+  pdf-lib の subset: true は、この日本語フォントで壊れた結果を作る
+  （テキストは正しいのに字の輪郭だけが別物になる）。
+  そのため lib/pdf/font-prune.ts で必要な字だけを残したフォントを作り、
+  pdf-lib へは subset: false で渡す。グリフ番号を振り直さないので
+  対応がずれない。最後に「描いた字がすべて入っているか」を確かめ、
+  1文字でも欠けていれば PDF を返さずエラーにする。
 */
 
 // A4縦（pt）
@@ -103,6 +112,78 @@ function loadFontBytes(): Uint8Array {
   return fontBytesCache;
 }
 
+/*
+  帳票が描く固定文言。フォントを間引くときに残す対象を決めるために使う。
+  ここに載せ漏れがあっても、字が消えたまま出ることはない。
+  描いた字がフォントに無ければ、最後の確認で必ずエラーになる。
+*/
+const TEMPLATE_TEXT = [
+  "代理店報酬 支払明細書",
+  "締め ／ 対象期間 年月末〜",
+  "代理店名",
+  " 御中",
+  "下記のとおり、代理店分配報酬をお支払いいたします。",
+  "発行日",
+  "TEL ",
+  "登録番号 ",
+  "お支払金額",
+  "内訳（クリエイター別 ／ 対象  明細）",
+  "クリエイター",
+  "対象期間",
+  "GMV（参考）",
+  "分配計算基準額",
+  "分配率",
+  "代理店分配報酬",
+  "複数",
+  "合計（代理店分配報酬）",
+  "お振込先",
+  "ご登録いただいている口座へお振り込みいたします。",
+  "お振込先が未登録です。口座情報をご連絡ください。",
+  "ご確認事項",
+  "※GMVは参考値です。代理店分配報酬は、TikTok Shop側で確定した実績に基づく金額を記載しています。",
+  "※明細単位の端数処理により、「分配計算基準額 × 分配率」と代理店分配報酬が一致しない場合があります。",
+  "※最低支払額は円です。未払報酬の累計が円未満の場合は、翌月以降へ繰り越されます。",
+  "支払明細番号 ",
+  " ページ",
+  "　/ ",
+  "—…¥%",
+  INVOICE_ISSUER.companyName,
+  INVOICE_ISSUER.postalCode,
+  INVOICE_ISSUER.address,
+  INVOICE_ISSUER.tel,
+  INVOICE_ISSUER.registrationNumber,
+].join("");
+
+/**
+ * この明細書で必要になる文字を集める。
+ * 固定文言、明細のデータ、そして ASCII 全体（ID や数字のため）。
+ */
+function collectCodePoints(statement: AgencyStatement): Set<number> {
+  const codePoints = new Set<number>();
+  const add = (text: string) => {
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (cp !== undefined) codePoints.add(cp);
+    }
+  };
+
+  // ASCII は ID・数字・記号で必ず使う
+  for (let cp = 0x20; cp <= 0x7e; cp += 1) codePoints.add(cp);
+
+  add(TEMPLATE_TEXT);
+  add(statement.agencyName);
+  add(statement.batchId);
+  add(statement.cutoffMonth);
+  for (const creator of statement.creators) {
+    add(creator.creatorName);
+    add(creator.tiktokId);
+    add(creator.periodStartMonth);
+    add(creator.periodEndMonth);
+    for (const month of creator.months) add(month.targetMonth);
+  }
+  return codePoints;
+}
+
 const yen = (value: number) => `¥${Math.round(value).toLocaleString("ja-JP")}`;
 
 /** 基準額・GMVは実額のまま2桁で出す（丸めて根拠を変えない） */
@@ -131,6 +212,10 @@ export type PdfRenderReport = {
   /** 幅に入らず省略した箇所 */
   truncatedTexts: string[];
   pageCount: number;
+  /** 埋め込んだフォントの大きさ */
+  fontBytes: number;
+  /** 輪郭を残したグリフ数 */
+  keptGlyphs: number;
 };
 
 /**
@@ -143,13 +228,28 @@ export async function renderAgencyStatementPdf(
 ): Promise<{ bytes: Uint8Array; report: PdfRenderReport }> {
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
-  const font = await doc.embedFont(loadFontBytes(), { subset: true });
+
+  /*
+    必要な字だけを残したフォントを作って埋め込む。
+    pdf-lib のサブセット処理は通さない（この日本語フォントで壊れるため）。
+  */
+  const codePoints = collectCodePoints(statement);
+  const pruned = pruneFontToCodePoints(loadFontBytes(), codePoints);
+  const font = await doc.embedFont(pruned.bytes, { subset: false });
 
   const report: PdfRenderReport = {
     droppedCharacters: [],
     truncatedTexts: [],
     pageCount: 0,
+    fontBytes: pruned.bytes.length,
+    keptGlyphs: pruned.keptGlyphs,
   };
+
+  /*
+    実際に描いた字のうち、間引きで輪郭を落としてしまったもの。
+    1つでもあれば字が空白で出るので、PDFを返さずエラーにする。
+  */
+  const missingGlyphs = new Set<string>();
 
   /*
     フォントに無い文字を落とす。
@@ -164,12 +264,14 @@ export async function renderAgencyStatementPdf(
     for (const ch of input) {
       const cp = ch.codePointAt(0);
       if (cp === undefined) continue;
-      if (supported.has(cp)) {
-        out += ch;
+      if (!supported.has(cp)) {
+        // フォントに無い字（TikTok名の絵文字など）は載せられない
+        if (!report.droppedCharacters.includes(ch)) report.droppedCharacters.push(ch);
         continue;
       }
-      // 空白は詰めずに残す。半角スペースは大抵収録されている
-      if (!report.droppedCharacters.includes(ch)) report.droppedCharacters.push(ch);
+      // 輪郭を残していない字は空白で出てしまうので、印ではなく異常として扱う
+      if (!codePoints.has(cp)) missingGlyphs.add(ch);
+      out += ch;
     }
     return out;
   };
@@ -698,6 +800,16 @@ export async function renderAgencyStatementPdf(
   doc.setCreator(INVOICE_ISSUER.companyName);
   doc.setProducer(INVOICE_ISSUER.companyName);
   doc.setSubject(`${statement.cutoffMonth} 締め 代理店分配報酬`);
+
+  /*
+    描いた字がすべてフォントに入っているかの最終確認。
+    ここを通さないと、字が空白のPDFをそのまま代理店へ渡してしまう。
+  */
+  if (missingGlyphs.size > 0) {
+    throw new Error(
+      `支払明細書のPDFに含められない文字があります: ${[...missingGlyphs].join("")}`,
+    );
+  }
 
   return { bytes: await doc.save(), report };
 }

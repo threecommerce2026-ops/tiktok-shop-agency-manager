@@ -168,6 +168,51 @@ async function loadPages(bytes) {
   return doc.getPages().map((page) => page.getSize());
 }
 
+/*
+  PDFを実際に描いて、字が紙に乗っているかを確かめる。
+
+  テキスト抽出だけでは足りない。埋め込みフォントの字の対応が崩れると、
+  文字情報は正しいのに輪郭だけが空白になり、抽出では気付けない。
+  実際にこの壊れ方をしたので、描画まで見るテストを置く。
+
+  ImageMagick 等は使わず、Chrome と同じ PDFium（pypdfium2）で描く。
+*/
+function renderInk(bytes, label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stmt-render-"));
+  const pdfPath = path.join(dir, `${label}.pdf`);
+  fs.writeFileSync(pdfPath, Buffer.from(bytes));
+  try {
+    const out = execFileSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import sys, pypdfium2 as pdfium",
+          "doc = pdfium.PdfDocument(sys.argv[1])",
+          "for page in doc:",
+          "    img = page.render(scale=2).to_pil().convert('L')",
+          "    print(sum(1 for v in img.getdata() if v < 128))",
+        ].join("\n"),
+        pdfPath,
+      ],
+      { encoding: "utf8" },
+    );
+    return out.trim().split("\n").map(Number);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** pypdfium2 が無い環境ではスキップできるようにする */
+function canRender() {
+  try {
+    execFileSync("python3", ["-c", "import pypdfium2, PIL"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // 1〜3: 出力できる状態
 // -----------------------------------------------------------------------------
@@ -646,4 +691,140 @@ test("Content-Disposition が日本語ファイル名を壊さない", async () 
   const source = fs.readFileSync("lib/payments/statement-download.ts", "utf8");
   assert.match(source, /filename\*=UTF-8''\$\{encodeURIComponent\(/);
   assert.match(source, /asciiFallback/);
+});
+
+// -----------------------------------------------------------------------------
+// 描画（文字が実際に紙へ乗っているか）
+// -----------------------------------------------------------------------------
+test("字が実際に描かれている（空白のPDFにならない）", async (t) => {
+  if (!canRender()) {
+    t.skip("pypdfium2 / Pillow が無い環境のためスキップ");
+    return;
+  }
+  const { bytes } = await renderPdf(statementOf());
+  const [ink] = renderInk(bytes, "ink-basic");
+  /*
+    壊れていたときは 14,000 程度しか乗らなかった。
+    正しく描けていれば同じ明細で 3 倍以上になる。
+  */
+  assert.ok(ink > 25000, `字がほとんど描かれていない: 暗ピクセル ${ink}`);
+});
+
+test("日本語の代理店名とクリエイター名が描かれている", async (t) => {
+  if (!canRender()) {
+    t.skip("pypdfium2 / Pillow が無い環境のためスキップ");
+    return;
+  }
+  const jp = [
+    creator("c9", "夜更かしの引き出し", [month("2026-07", 10000, 1000, 10, 100)], {
+      tiktokId: "yofukashi",
+    }),
+  ];
+  const { bytes } = await renderPdf(
+    statementOf({ payeeName: "ピクノア", creators: jp }),
+  );
+  const [ink] = renderInk(bytes, "ink-jp");
+  assert.ok(ink > 15000, `日本語が描かれていない: 暗ピクセル ${ink}`);
+});
+
+test("間引いたフォントでも全ページに字が乗る", async (t) => {
+  if (!canRender()) {
+    t.skip("pypdfium2 / Pillow が無い環境のためスキップ");
+    return;
+  }
+  const many = Array.from({ length: 40 }, (_, i) =>
+    creator(`m${i}`, `creator_${i}`, [
+      month("2026-06", 10000, 1000, 10, 50, { itemCount: 5 }),
+      month("2026-07", 20000, 2000, 10, 50, { itemCount: 5 }),
+    ]),
+  );
+  const { bytes, report } = await renderPdf(statementOf({ creators: many }));
+  const inks = renderInk(bytes, "ink-multi");
+  assert.equal(inks.length, report.pageCount);
+  for (const [index, ink] of inks.entries()) {
+    assert.ok(ink > 5000, `${index + 1}ページ目が空白に近い: ${ink}`);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// フォントの間引き
+// -----------------------------------------------------------------------------
+test("埋め込むフォントは元より十分小さい", async () => {
+  const { report } = await renderPdf(statementOf());
+  const original = fs.statSync("lib/pdf/fonts/NotoSansJP-Regular.ttf").size;
+  assert.ok(report.fontBytes < original / 10, `間引けていない: ${report.fontBytes}`);
+  assert.ok(report.keptGlyphs > 50, `残したglyphが少なすぎる: ${report.keptGlyphs}`);
+});
+
+test("pdf-lib のサブセット処理を使わない", () => {
+  const source = fs.readFileSync("lib/pdf/agency-statement-pdf.ts", "utf8");
+  assert.match(source, /embedFont\(pruned\.bytes, \{ subset: false \}\)/);
+  // コメントには経緯として書いてあるので、実際のコードだけを見る
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.equal(
+    code.includes("subset: true"),
+    false,
+    "コードに subset: true が残っている",
+  );
+});
+
+test("間引きはグリフ番号を振り直さない（cmapと字幅をそのまま残す）", async () => {
+  const prune = await jiti.import(path.join(root, "lib/pdf/font-prune.ts"));
+  const original = fs.readFileSync("lib/pdf/fonts/NotoSansJP-Regular.ttf");
+  const codePoints = new Set(
+    [..."代理店報酬 支払明細書 ¥8,392 ピクノア 髙"].map((c) => c.codePointAt(0)),
+  );
+  const { bytes, keptGlyphs, totalGlyphs } = prune.pruneFontToCodePoints(
+    original,
+    codePoints,
+  );
+  assert.ok(bytes.length < original.length / 10);
+  assert.ok(keptGlyphs >= codePoints.size);
+  assert.ok(totalGlyphs > 10000);
+
+  // グリフ数・cmap・hmtx が変わっていないこと
+  const { PDFDocument } = require("pdf-lib");
+  const fontkitMod = require("@pdf-lib/fontkit");
+  const before = fontkitMod.create(original);
+  const after = fontkitMod.create(Buffer.from(bytes));
+  assert.equal(after.numGlyphs, before.numGlyphs, "グリフ数が変わった");
+  for (const ch of "代理店報酬支払明細書¥8392ピクノア髙A0") {
+    const cp = ch.codePointAt(0);
+    assert.equal(
+      after.glyphForCodePoint(cp).id,
+      before.glyphForCodePoint(cp).id,
+      `${ch} のグリフ番号が変わった`,
+    );
+  }
+  assert.ok(PDFDocument, "pdf-lib が読めている");
+});
+
+test("描こうとした字がフォントに無ければPDFを返さない", async () => {
+  /*
+    間引きの対象を決める処理に漏れがあると、字が空白のまま出てしまう。
+    その場合は黙って出さず、必ずエラーにする。
+  */
+  const source = fs.readFileSync("lib/pdf/agency-statement-pdf.ts", "utf8");
+  assert.match(source, /missingGlyphs/);
+  assert.match(source, /支払明細書のPDFに含められない文字があります/);
+  // 実データで漏れが無いこと
+  const { report } = await renderPdf(statementOf({ payeeName: "ピクノア" }));
+  assert.deepEqual(report.droppedCharacters, []);
+});
+
+test("数字と記号がすべて描ける", async () => {
+  const symbols = creator(
+    "sym",
+    "0123456789",
+    [month("2026-07", 1234567.89, 98765.43, 12.5, 1000.55, { itemCount: 9876 })],
+    { tiktokId: "a_b-c.d@e" },
+  );
+  const { report, bytes } = await renderPdf(
+    statementOf({ payeeName: "0123456789 ¥,.%-@", creators: [symbols] }),
+  );
+  assert.deepEqual(report.droppedCharacters, [], "落ちた文字がある");
+  assert.deepEqual(report.truncatedTexts, [], "省略された文字列がある");
+  assert.ok(bytes.length > 5000);
 });
