@@ -210,9 +210,21 @@ test("期間を持たない紐付けだけでは報酬を作らない", () => {
   /*
     creators.referred_by_referrer_id は期間を持たない。
     それだけを根拠にすると、現在の紐付けで過去の全月へ報酬が付く。
+
+    紹介者は必ず「対象月で解決した creator_referrals」から取る。
+    期間の選び方そのものは scripts/test-referral-period.mjs が見ている。
   */
   const code = codeOnly(SYNC_SOURCE);
-  assert.match(code, /const referral = referralByCreator\.get\(creatorId\);\s*\n\s*if \(!referral\) continue;/);
+  assert.match(
+    code,
+    /const referral = resolution\.period;\s*\n\s*if \(!referral\) continue;/,
+    "紹介関係を対象月で解決していない",
+  );
+  assert.match(
+    code,
+    /const referrerId = referral\.referrerId;/,
+    "紹介者を紹介関係から取っていない",
+  );
   assert.equal(
     /config\.referrerId \?\? referral\?\.referrerId/.test(code),
     false,

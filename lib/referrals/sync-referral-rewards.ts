@@ -2,22 +2,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { fetchAllFrom } from "@/lib/db/paged-select";
 import { collectInHouseReferrerIds } from "@/lib/referrals/in-house-referrer";
-import {
-  applyReferralRewardCap,
-  DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN,
-  pairReferralKey,
-} from "@/lib/referrals/cap";
+import { applyReferralRewardCap, pairReferralKey } from "@/lib/referrals/cap";
 import {
   computeReferralReward,
-  isReferralMonthActive,
   REFERRAL_PAYOUT_THRESHOLD_YEN,
   resolveAnnualPayoutState,
-  resolveReferralRate,
   resolveRewardItemAmount,
   rewardYearOf,
   sumReferralAmounts,
   type ReferralOrderLine,
 } from "@/lib/referrals/referral-reward-engine";
+import {
+  buildReferralPeriods,
+  REFERRAL_RELATION_COLUMNS,
+  resolveReferralForMonth,
+  UNRESOLVED_REFERRAL_LABEL,
+  type ReferralRelationRow,
+} from "@/lib/referrals/referral-period";
 
 /*
   紹介者報酬明細の生成。
@@ -52,15 +53,6 @@ const UPSERT_CHUNK_SIZE = 500;
 */
 const DELETE_CHUNK_SIZE = 200;
 
-type ReferralLink = {
-  referrerId: string;
-  referralRate: number;
-  startMonth: string | null;
-  endMonth: string | null;
-  lifetimePayoutCap: number;
-  lifetimePaidAmount: number;
-};
-
 type RewardItemRow = {
   source_row_key: string | null;
   creator_id: string;
@@ -87,8 +79,30 @@ export type SyncReferralRewardsResult = {
   monthRewardAmount: number;
   /** 作成・更新した支払レコード件数 */
   payoutCount: number;
+  /**
+   * end_month が未記録で、後続関係の開始月から実効終了月を導出した
+   * 紹介関係のうち、この月の明細を生成したもの。
+   * 「復元によって生まれた報酬」を運用側が確認できるようにする。
+   */
+  restoredRelationItemCount: number;
+  restoredRelationRewardAmount: number;
+  /** 期間を決められず対象外にした紹介関係（理由つき） */
+  unresolvedRelations: string[];
   error: string | null;
 };
+
+/*
+  期間を決められなかった紹介関係を人が読める形にする。
+  黙って落とすと「なぜこの creator に報酬が無いのか」が追えなくなる。
+*/
+function describeUnresolvedRelations(
+  unresolved: ReturnType<typeof buildReferralPeriods>["unresolved"],
+): string[] {
+  return unresolved.map(
+    (item) =>
+      `creator=${item.creatorId} referrer=${item.referrerId} start=${item.startMonth ?? "(なし)"}: ${UNRESOLVED_REFERRAL_LABEL[item.reason]}`,
+  );
+}
 
 /**
  * 対象月の紹介者報酬明細を TAP（tap_affiliate_order_lines）から再生成する。
@@ -108,6 +122,9 @@ export async function syncReferralRewardsForMonth(
     skippedPaidCount: 0,
     monthRewardAmount: 0,
     payoutCount: 0,
+    restoredRelationItemCount: 0,
+    restoredRelationRewardAmount: 0,
+    unresolvedRelations: [],
     error: null,
   };
 
@@ -116,12 +133,14 @@ export async function syncReferralRewardsForMonth(
       supabase
         .from("creators")
         .select("id, referred_by_referrer_id, account_management_type"),
+      /*
+        紹介関係は全世代を読む。is_active で絞ってはいけない。
+        対象月当時に有効だった関係は、いま無効でも報酬の発生根拠になる。
+      */
       supabase
         .from("creator_referrals")
-        .select(
-          "creator_id, referrer_id, referral_rate, start_month, end_month, is_active, lifetime_payout_cap, lifetime_paid_amount",
-        )
-        .order("created_at", { ascending: false }),
+        .select(REFERRAL_RELATION_COLUMNS)
+        .order("created_at", { ascending: true }),
       /*
         紹介者報酬の元データは TAP だけ。affiliate_order_lines は読まない。
         両者は同じ注文を別のキーで持っており、合算すると二重計上になる。
@@ -181,24 +200,16 @@ export async function syncReferralRewardsForMonth(
     });
   }
 
-  // --- 紹介契約（料率・生涯上限は creator_referrals を参照）--------------------
-  const referralByCreator = new Map<string, ReferralLink>();
+  /*
+    --- 紹介契約（期間つき）----------------------------------------------------
 
-  for (const referral of referralsResult.data ?? []) {
-    const creatorId = referral.creator_id as string;
-    if (!referral.is_active || referralByCreator.has(creatorId)) continue;
-
-    referralByCreator.set(creatorId, {
-      referrerId: referral.referrer_id as string,
-      referralRate: resolveReferralRate(referral.referral_rate),
-      startMonth: (referral.start_month as string | null) ?? null,
-      endMonth: (referral.end_month as string | null) ?? null,
-      lifetimePayoutCap: Number(
-        referral.lifetime_payout_cap ?? DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN,
-      ),
-      lifetimePaidAmount: Number(referral.lifetime_paid_amount ?? 0),
-    });
-  }
+    creator ごとに全世代を持ち、対象月で引く。
+    実効期間の決め方は lib/referrals/referral-period.ts が単一ソース。
+    ここで期間の判定を書き直さないこと（dry-run と食い違う）。
+  */
+  const referralIndex = buildReferralPeriods(
+    (referralsResult.data ?? []) as unknown as ReferralRelationRow[],
+  );
 
   /*
     --- 支払い済み / 支払予定中の明細は触らない ---------------------------------
@@ -231,6 +242,9 @@ export async function syncReferralRewardsForMonth(
   const nowIso = new Date().toISOString();
   const upserts: Array<Record<string, unknown>> = [];
   const monthAmounts: number[] = [];
+  /* end_month を復元した関係から生まれた分（運用確認用に別集計する） */
+  let restoredRelationItemCount = 0;
+  const restoredAmounts: number[] = [];
 
   for (const line of ordersResult.data) {
     const creatorId = line.creator_id;
@@ -254,15 +268,29 @@ export async function syncReferralRewardsForMonth(
       期間情報を持たない creators.referred_by_referrer_id だけの
       クリエイターは、報酬を作らず未紐付けとして残す。
     */
-    const referral = referralByCreator.get(creatorId);
+    const resolution = resolveReferralForMonth(
+      referralIndex.byCreator.get(creatorId),
+      targetMonth,
+    );
+
+    /*
+      対象月に2件以上の紹介関係が該当した＝期間が重なっている異常データ。
+      黙ってどちらかを選ぶと支払額が静かにずれるので、月ごと中断する。
+    */
+    if (resolution.conflicts.length > 0) {
+      const names = resolution.conflicts
+        .map((c) => `${c.referrerId}(${c.startMonth}〜${c.endMonth ?? ""})`)
+        .join(" / ");
+      return {
+        ...empty,
+        error: `${targetMonth} のクリエイター ${creatorId} に有効期間が重なる紹介関係が ${resolution.conflicts.length} 件あります: ${names}`,
+      };
+    }
+
+    const referral = resolution.period;
     if (!referral) continue;
     const referrerId = referral.referrerId;
     if (!referrerId) continue;
-
-    // 紹介契約の有効期間外は対象外
-    if (!isReferralMonthActive(targetMonth, referral.startMonth, referral.endMonth)) {
-      continue;
-    }
 
     const computed = computeReferralReward(
       line,
@@ -297,6 +325,11 @@ export async function syncReferralRewardsForMonth(
 
     allocatedUnpaidByPair.set(pairKey, allocated + rewardAmount);
     monthAmounts.push(rewardAmount);
+
+    if (referral.endMonthRestored) {
+      restoredRelationItemCount += 1;
+      restoredAmounts.push(rewardAmount);
+    }
 
     upserts.push({
       source_row_key: computed.sourceRowKey,
@@ -366,6 +399,9 @@ export async function syncReferralRewardsForMonth(
     skippedPaidCount: paidSourceKeys.size,
     monthRewardAmount: sumReferralAmounts(monthAmounts),
     payoutCount: payoutResult.payoutCount,
+    restoredRelationItemCount,
+    restoredRelationRewardAmount: sumReferralAmounts(restoredAmounts),
+    unresolvedRelations: describeUnresolvedRelations(referralIndex.unresolved),
     error: payoutResult.error,
   };
 }

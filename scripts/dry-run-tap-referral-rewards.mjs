@@ -7,9 +7,17 @@
 
   ■ アプリと同じ判定を使う
   対象行の条件は lib/referrals/tap-referral-source.ts、
-  金額は lib/referrals/referral-reward-engine.ts をそのまま呼ぶ。
+  金額は lib/referrals/referral-reward-engine.ts、
+  「対象月に有効だった紹介関係」は lib/referrals/referral-period.ts を
+  そのまま呼ぶ。
   （上限の適用は同期処理側が行うため、ここでは生成前の額を出す）
   dry-run のために別の計算式を書かない（書くと本番と食い違う）。
+
+  ■ 紹介関係は対象月で引く（is_active では絞らない）
+  新しい紹介関係が始まったら旧関係は「次の start_month の前月」までとする
+  （2026-09-27 EMI承認）。現在 is_active=false でも、対象月当時に有効
+  だった関係なら報酬は発生する。この判定は本番の同期処理と同じ
+  buildReferralPeriods / resolveReferralForMonth を使う。
 
   ■ 確定額ではない
   Production の TAP は 2026-01〜04 が0行で、全量が入っていない。
@@ -34,6 +42,7 @@ const jiti = createJiti(root, {
 const paged = await jiti.import(path.join(root, "lib/db/paged-select.ts"));
 const tapSrc = await jiti.import(path.join(root, "lib/referrals/tap-referral-source.ts"));
 const engine = await jiti.import(path.join(root, "lib/referrals/referral-reward-engine.ts"));
+const period = await jiti.import(path.join(root, "lib/referrals/referral-period.ts"));
 
 const CUTOFF = process.argv[2] ?? "2026-07";
 
@@ -79,12 +88,13 @@ if (refResult.error) {
 const { data: creators } = await supabase
   .from("creators")
   .select("id, creator_name, tiktok_id, account_management_type, referred_by_referrer_id");
+/*
+  紹介関係は全世代を読む。is_active で絞ると過去月の報酬が消える。
+*/
 const { data: links } = await supabase
   .from("creator_referrals")
-  .select(
-    "creator_id, referrer_id, referral_rate, start_month, end_month, is_active, lifetime_payout_cap, lifetime_paid_amount",
-  )
-  .order("created_at", { ascending: false });
+  .select(period.REFERRAL_RELATION_COLUMNS)
+  .order("created_at", { ascending: true });
 const { data: referrers } = await supabase
   .from("referrers")
   .select("id, name, referrer_name, is_in_house");
@@ -94,12 +104,20 @@ const referrerById = new Map(referrers.map((r) => [r.id, r]));
 
 /*
   紹介関係は creator_referrals（期間つき）だけを採用する。
-  同期処理と同じく is_active の先頭1件を使う。
+  実効期間の決め方は本番と同じ共通helperに任せる。
 */
-const linkByCreator = new Map();
-for (const link of links) {
-  if (!link.is_active || linkByCreator.has(link.creator_id)) continue;
-  linkByCreator.set(link.creator_id, link);
+const referralIndex = period.buildReferralPeriods(links);
+
+if (referralIndex.unresolved.length > 0) {
+  console.log("【0】期間を決められず対象外にした紹介関係（推測しない）");
+  for (const item of referralIndex.unresolved) {
+    const c = creatorById.get(item.creatorId);
+    const r = referrerById.get(item.referrerId);
+    console.log(
+      `  ${(c?.tiktok_id ?? item.creatorId).padEnd(24)} 紹介者=${(r?.referrer_name || r?.name || item.referrerId).padEnd(14)} start=${item.startMonth ?? "(なし)"}  ${period.UNRESOLVED_REFERRAL_LABEL[item.reason]}`,
+    );
+  }
+  console.log("");
 }
 
 // -----------------------------------------------------------------------------
@@ -113,6 +131,7 @@ console.log("月        総行数   有効行   対象外   紹介関係あり  
 const monthTotals = [];
 const candidates = [];
 const unknownCreators = new Map();
+const conflicts = [];
 
 for (const month of months) {
   const rows = tapResult.data.filter((r) => r.target_month === month);
@@ -137,27 +156,50 @@ for (const month of months) {
       continue;
     }
 
-    const link = linkByCreator.get(row.creator_id);
-    if (!link) continue;
-    if (!engine.isReferralMonthActive(month, link.start_month, link.end_month)) continue;
+    const resolution = period.resolveReferralForMonth(
+      referralIndex.byCreator.get(row.creator_id),
+      month,
+    );
 
-    const rate = engine.resolveReferralRate(link.referral_rate);
+    /*
+      対象月に2件以上該当＝期間が重なっている異常データ。
+      黙って1件選ぶと本番と結果がずれるため、集計せず記録して中断材料にする。
+    */
+    if (resolution.conflicts.length > 0) {
+      conflicts.push({
+        creatorId: row.creator_id,
+        month,
+        periods: resolution.conflicts,
+      });
+      continue;
+    }
+
+    const link = resolution.period;
+    if (!link) continue;
+
     const computed = engine.computeReferralReward(
       row,
       {
         creatorId: row.creator_id,
-        referrerId: link.referrer_id,
+        referrerId: link.referrerId,
         accountManagementType: creator.account_management_type,
       },
-      rate,
+      link.referralRate,
     );
     if (!computed) continue;
 
     linked += 1;
     base += computed.baseAmount;
     reward += computed.rewardAmount;
-    referrerSet.add(link.referrer_id);
-    candidates.push({ ...computed, month, creatorId: row.creator_id, referrerId: link.referrer_id });
+    referrerSet.add(link.referrerId);
+    candidates.push({
+      ...computed,
+      month,
+      creatorId: row.creator_id,
+      referrerId: link.referrerId,
+      /* end_month を後続関係から復元した関係から生まれた分か */
+      restored: link.endMonthRestored,
+    });
   }
 
   monthTotals.push({ month, rows: rows.length, eligible, excluded, linked, base, reward });
@@ -177,6 +219,72 @@ console.log(
   `${CUTOFF}まで  ${String(tapRows.length).padStart(7)}  ${"".padStart(7)}  ${"".padStart(7)}  ${String(candidates.filter((c) => c.month <= CUTOFF).length).padStart(12)}  ${"".padStart(8)}  ${yen(totalBase).padStart(17)}  ${yen(totalReward).padStart(14)}`,
 );
 console.log("");
+
+// -----------------------------------------------------------------------------
+// 復元された紹介関係の分
+// -----------------------------------------------------------------------------
+/*
+  end_month が未記録で、後続関係の開始月から実効終了月を導出した関係から
+  生まれた報酬。旧方式（is_active の最新1件のみ）では消えていた分にあたる。
+  隠さず必ず出す。
+*/
+const inRange = candidates.filter((c) => c.month <= CUTOFF);
+const restored = inRange.filter((c) => c.restored);
+
+console.log("【1-b】復元された紹介関係から生成された分（旧方式では消えていた分）");
+console.log(
+  `  件数: ${int(restored.length)} / ${int(inRange.length)} 件   報酬: ${yen(restored.reduce((a, c) => a + c.rewardAmount, 0))}`,
+);
+console.log(`  復元した紹介関係: ${int(referralIndex.restoredCount)} 件`);
+
+if (restored.length > 0) {
+  const byPair = new Map();
+  for (const c of restored) {
+    const key = `${c.creatorId}|${c.month}|${c.referrerId}`;
+    const cur = byPair.get(key) ?? {
+      creatorId: c.creatorId,
+      month: c.month,
+      referrerId: c.referrerId,
+      items: 0,
+      base: 0,
+      reward: 0,
+    };
+    cur.items += 1;
+    cur.base += c.baseAmount;
+    cur.reward += c.rewardAmount;
+    byPair.set(key, cur);
+  }
+  console.log("");
+  console.log("  creator                  月       当時の紹介者    行数   base            報酬");
+  for (const row of [...byPair.values()].sort((a, b) => b.reward - a.reward)) {
+    const c = creatorById.get(row.creatorId);
+    const r = referrerById.get(row.referrerId);
+    console.log(
+      `  ${(c?.tiktok_id ?? row.creatorId).slice(0, 23).padEnd(24)} ${row.month}  ${(r?.referrer_name || r?.name || "(不明)").slice(0, 13).padEnd(14)} ${String(row.items).padStart(5)}  ${yen(row.base).padStart(14)}  ${yen(row.reward).padStart(12)}`,
+    );
+  }
+}
+console.log("");
+
+if (conflicts.length > 0) {
+  console.log("【1-c】★ 有効期間が重なる紹介関係（本番はここで中断する）");
+  for (const item of conflicts) {
+    const c = creatorById.get(item.creatorId);
+    console.log(
+      `  ${(c?.tiktok_id ?? item.creatorId).padEnd(24)} ${item.month}  該当 ${item.periods.length} 件`,
+    );
+    for (const p of item.periods) {
+      const r = referrerById.get(p.referrerId);
+      console.log(
+        `      紹介者=${(r?.referrer_name || r?.name || p.referrerId).padEnd(14)} ${p.startMonth}〜${p.endMonth ?? "(継続)"}`,
+      );
+    }
+  }
+  console.log("");
+} else {
+  console.log("【1-c】有効期間が重なる紹介関係: なし");
+  console.log("");
+}
 
 // -----------------------------------------------------------------------------
 // 紹介者別
