@@ -151,6 +151,19 @@ export async function syncReferralRewardsForMonth(
         ORDER_LINE_COLUMNS,
         (query) => query.eq("target_month", targetMonth),
       ),
+      /*
+        既存明細の掃除は「自分が作る種類」だけを対象にする。
+
+        source_table で絞らないと、旧 affiliate_order_lines 由来の明細が
+        「TAP のキー集合に無い」と判定されて再集計のついでに消える。
+        実測で 2026-01〜07 の 681 件すべてが TAP とキー重複0 だった
+        （affiliate キーは factorType を含む8項目 / TAP は7項目）。
+
+        旧データの置き換えは purge_affiliate_sourced_referral_rewards で
+        明示的に行う。生成 → 検証 → 置換 の順序を保つため、
+        生成の副作用で旧データが消えてはいけない
+        （消えると検証前に戻せなくなる）。
+      */
       fetchAllFrom<
         Pick<
           RewardItemRow,
@@ -160,7 +173,10 @@ export async function syncReferralRewardsForMonth(
         supabase,
         "referral_reward_items",
         "id, source_row_key, is_paid, payout_id, payment_batch_id",
-        (query) => query.eq("target_month", targetMonth),
+        (query) =>
+          query
+            .eq("target_month", targetMonth)
+            .eq("source_table", REFERRAL_SOURCE_TABLE),
       ),
       fetchAllFrom<RewardItemRow>(
         supabase,
@@ -452,6 +468,11 @@ async function deleteObsoleteReferralItems(
       .from("referral_reward_items")
       .delete()
       .eq("target_month", targetMonth)
+      /*
+        自分が作った種類以外は消さない。呼び出し側で id を絞っていても、
+        ここを二重の歯止めにしておく（旧 affiliate 由来を巻き込まない）。
+      */
+      .eq("source_table", REFERRAL_SOURCE_TABLE)
       .eq("is_paid", false)
       .is("payout_id", null)
       .is("payment_batch_id", null)

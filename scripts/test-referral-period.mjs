@@ -442,3 +442,33 @@ test("dry-run は復元分と重なりを必ず表示する", () => {
     "期間を決められなかった関係を出していない",
   );
 });
+
+// =============================================================================
+// 生成の副作用で旧データが消えないこと
+// =============================================================================
+/*
+  紹介報酬の置き換えは「TAP生成 → 検証 → 旧affiliate purge」の順で行う。
+  生成のついでに旧データが消えると、検証前に戻せなくなる。
+
+  affiliate 由来の source_row_key は TAP と重複しない
+  （affiliate は factorType を含む8項目 / TAP は7項目。実測で重複0）。
+  そのため source_table で絞らないと、旧明細が「TAPのキー集合に無い」
+  と判定されて掃除の対象になってしまう。
+*/
+test("再集計の掃除は source_table を TAP に絞って読む", () => {
+  const code = codeOnly(syncSource);
+  assert.match(
+    code,
+    /\.eq\("target_month",\s*targetMonth\)\s*\n\s*\.eq\("source_table",\s*REFERRAL_SOURCE_TABLE\)/,
+    "既存明細の読み込みが source_table で絞られていない（旧affiliateを巻き込む）",
+  );
+});
+
+test("削除クエリ自体も source_table で守られている", () => {
+  const code = codeOnly(syncSource);
+  const deleteBlock = code.slice(code.indexOf('.from("referral_reward_items")\n      .delete()'));
+  assert.ok(
+    deleteBlock.includes('.eq("source_table", REFERRAL_SOURCE_TABLE)'),
+    "DELETE に source_table の歯止めが無い",
+  );
+});
