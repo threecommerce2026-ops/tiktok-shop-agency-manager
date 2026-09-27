@@ -27,7 +27,11 @@ import {
   PAYMENT_HOLD_REASON_LABEL,
   type PayeeKind,
 } from "@/lib/payments/payable";
-import { isStatementIssuableStatus } from "@/lib/payments/agency-statement";
+import {
+  isStatementIssuableStatus,
+  statementZipFileName,
+} from "@/lib/payments/agency-statement";
+import { StatementDownloadButton } from "@/components/payments/StatementDownloadButton";
 import {
   PAYMENT_BATCH_STATUS_LABEL,
   isOpenPaymentBatchStatus,
@@ -522,14 +526,26 @@ export function PaymentsClient({
                 </h2>
                 <div className="flex flex-wrap items-center gap-2">
                 {statementBatches.length > 0 ? (
-                  <Link
-                    href={`/statements/agency?cutoff=${cutoffMonth}`}
-                    target="_blank"
-                    rel="noopener"
-                    className="inline-flex min-h-[36px] items-center rounded-lg border border-white/[0.1] px-3 text-xs font-medium text-zinc-200 hover:bg-white/[0.06]"
-                  >
-                    支払明細書をまとめて表示（{statementBatches.length}件）
-                  </Link>
+                  <>
+                    {/*
+                      代理店ごとに独立したPDFを作り、1つのZIPで渡す。
+                      各代理店へ自社分だけを送るため、まとめた1つのPDFにはしない。
+                    */}
+                    <StatementDownloadButton
+                      href={`/api/statements/agency?cutoff=${cutoffMonth}`}
+                      label={`代理店別PDFを一括ダウンロード（${statementBatches.length}件）`}
+                      pendingLabel="PDFを作成中…"
+                      fallbackFileName={statementZipFileName(cutoffMonth)}
+                    />
+                    <Link
+                      href={`/statements/agency?cutoff=${cutoffMonth}`}
+                      target="_blank"
+                      rel="noopener"
+                      className="inline-flex min-h-[36px] items-center rounded-lg border border-white/[0.1] px-3 text-xs font-medium text-zinc-200 hover:bg-white/[0.06]"
+                    >
+                      支払明細書をまとめて表示（{statementBatches.length}件）
+                    </Link>
+                  </>
                 ) : null}
                 {exportableIds.length > 0 ? (
                   <form action={csvAction}>

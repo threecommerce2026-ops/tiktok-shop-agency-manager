@@ -17,7 +17,11 @@ import type {
   PaymentBatchDetail,
   PaymentRewardBreakdown,
 } from "@/lib/db/payment-queries";
-import { isStatementIssuableStatus } from "@/lib/payments/agency-statement";
+import {
+  isStatementIssuableStatus,
+  statementFileBaseName,
+} from "@/lib/payments/agency-statement";
+import { StatementDownloadButton } from "@/components/payments/StatementDownloadButton";
 import { formatCutoffLabel } from "@/lib/payments/cutoff-month";
 import { BankStateBadge } from "@/components/payments/PayeeBankForm";
 import { PAYEE_KIND_LABEL } from "@/lib/payments/payable";
@@ -325,14 +329,29 @@ export function PaymentBatchClient({
           ) : null}
 
           {canIssueStatement ? (
-            <Link
-              href={`/statements/agency/${batch.id}`}
-              target="_blank"
-              rel="noopener"
-              className="inline-flex min-h-[40px] items-center rounded-lg border border-white/[0.12] px-4 text-sm font-medium text-zinc-100 hover:bg-white/[0.06]"
-            >
-              支払明細書を表示（PDF）
-            </Link>
+            <>
+              {/* 確認したいとき */}
+              <Link
+                href={`/statements/agency/${batch.id}`}
+                target="_blank"
+                rel="noopener"
+                className="inline-flex min-h-[40px] items-center rounded-lg border border-white/[0.12] px-4 text-sm font-medium text-zinc-100 hover:bg-white/[0.06]"
+              >
+                支払明細書を表示
+              </Link>
+              {/* 代理店へ送るとき */}
+              <StatementDownloadButton
+                href={`/api/statements/agency/${batch.id}`}
+                label="PDFをダウンロード"
+                pendingLabel="PDFを作成中…"
+                fallbackFileName={`${statementFileBaseName(
+                  batch.cutoffMonth,
+                  batch.payeeName,
+                )}.pdf`}
+                successLabel="支払明細書のPDFを作成しました。"
+                className="inline-flex min-h-[40px] items-center rounded-lg border border-white/[0.12] px-4 text-sm font-medium text-zinc-100 hover:bg-white/[0.06] disabled:opacity-50"
+              />
+            </>
           ) : null}
 
           {canExportCsv ? (

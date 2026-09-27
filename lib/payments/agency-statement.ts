@@ -211,12 +211,20 @@ export function sanitizeStatementFileName(value: string): string {
   return cleaned.length > 0 ? cleaned.slice(0, 80) : "支払明細";
 }
 
-/** 2026-07 + LUMN → 2026-07_LUMN_代理店報酬支払明細書 */
+/**
+ * 送付ファイルの名前。拡張子は付けない。
+ * 例: 2026-07 + LUMN → 2026-07_LUMN_支払明細
+ */
 export function statementFileBaseName(
   cutoffMonth: string,
   agencyName: string,
 ): string {
   return `${sanitizeStatementFileName(cutoffMonth)}_${sanitizeStatementFileName(
     agencyName,
-  )}_代理店報酬支払明細書`;
+  )}_支払明細`;
+}
+
+/** ZIPの名前。例: 2026-07 → 2026-07_代理店支払明細.zip */
+export function statementZipFileName(cutoffMonth: string): string {
+  return `${sanitizeStatementFileName(cutoffMonth)}_代理店支払明細.zip`;
 }

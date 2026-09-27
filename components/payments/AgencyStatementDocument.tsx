@@ -352,7 +352,8 @@ export function AgencyStatementDocument({
             <tr>
               <td>
                 <span style={{ fontWeight: 600 }}>{creator.creatorName}</span>
-                {creator.tiktokId ? (
+                {/* 表示名がそのまま TikTok ID のことが多い。同じなら重ねない */}
+                {creator.tiktokId && creator.tiktokId !== creator.creatorName ? (
                   <span style={{ color: "#71717a" }}> @{creator.tiktokId}</span>
                 ) : null}
               </td>
@@ -414,6 +415,7 @@ export function AgencyStatementDocument({
       {/*
         ご確認事項。
         代理店が判断に使う3点だけに絞る。支払対象でない社内制度の説明は載せない。
+        振込先は上のセクションで述べているので、ここで重複して書かない。
         金額は帳票側に書かず、サーバーから渡された最低支払額をそのまま出す。
       */}
       <div className="stmt-notes">
@@ -422,10 +424,12 @@ export function AgencyStatementDocument({
           ※GMVは参考値です。代理店分配報酬は、TikTok Shop側で確定した実績に基づく金額を記載しています。
         </p>
         <p className="stmt-note">
+          ※明細単位の端数処理により、「分配計算基準額 × 分配率」と代理店分配報酬が一致しない場合があります。
+        </p>
+        <p className="stmt-note">
           ※最低支払額は{minimumPayoutYen.toLocaleString("ja-JP")}円です。
           未払報酬の累計が{minimumPayoutYen.toLocaleString("ja-JP")}円未満の場合は、翌月以降へ繰り越されます。
         </p>
-        <p className="stmt-note">※振込先はご登録済みの口座です。</p>
       </div>
 
       <div className="stmt-footer">
