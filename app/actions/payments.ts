@@ -8,6 +8,7 @@ import {
   formatCutoffLabel,
   isCutoffMonth,
   currentMonthJst,
+  referralPaymentCutoffError,
 } from "@/lib/payments/cutoff-month";
 import { requireAdminAction } from "@/lib/db/admin-access";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
@@ -16,7 +17,9 @@ import { REFERRAL_PAYOUT_THRESHOLD_YEN } from "@/lib/referrals/referral-reward-e
 import {
   fetchPaymentBatchCsvSources,
   fetchPaymentOverview,
+  fetchReferrerRewardDetail,
   type PaymentUnpaidRow,
+  type ReferrerRewardDetail,
 } from "@/lib/db/payment-queries";
 import {
   buildPaymentCsv,
@@ -117,6 +120,7 @@ function describeRpcError(message: string, code?: string | null): string {
 function validateCutoff(
   cutoffMonth: string,
   startMonth: string,
+  payeeKind?: PayeeKind,
 ): string | null {
   if (!isCutoffMonth(cutoffMonth)) {
     return `締め対象月を YYYY-MM 形式で指定してください: ${cutoffMonth || "(未指定)"}`;
@@ -134,6 +138,14 @@ function validateCutoff(
   if (startMonth > cutoffMonth) {
     return "開始月が締め対象月より後になっています";
   }
+  /*
+    紹介者報酬は 2026-08 以降を締められない（TAP の全量取込が未了）。
+    RPC 側にも同じ上限があるので、ここを迂回しても弾かれる。
+  */
+  if (payeeKind === "referrer") {
+    const referralError = referralPaymentCutoffError(cutoffMonth);
+    if (referralError) return referralError;
+  }
   return null;
 }
 
@@ -150,6 +162,132 @@ function thresholdFor(payeeKind: PayeeKind): number {
   return payeeKind === "referrer"
     ? REFERRAL_PAYOUT_THRESHOLD_YEN
     : AGENCY_PAYOUT_THRESHOLD_YEN;
+}
+
+// =============================================================================
+// 紹介報酬の手動保留（今回は支払わない）
+// =============================================================================
+/*
+  紹介報酬の「発生」と「支払」を分けるための操作。
+
+  発生データ（referral_reward_items）は消さない。reward_amount も変えない。
+  payment_hold_reason = 'manual_hold' を立てて支払対象から外すだけで、
+  解除すれば支払候補へ戻る。
+
+  対象・安全条件の判定は RPC が持つ（支払済み・payout 紐付き・
+  支払明細に占有中の明細には付けない）。ここで条件を書き直さない。
+*/
+
+export type ReferralHoldActionResult =
+  | { ok: true; message: string; affectedCount: number }
+  | { ok: false; error: string };
+
+async function updateReferralHold(
+  formData: FormData,
+  mode: "set" | "clear",
+): Promise<ReferralHoldActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const referrerId = readText(formData, "referrerId");
+  const cutoffMonth = readText(formData, "cutoffMonth");
+  const startMonth = readText(formData, "startMonth") || EARLIEST_CUTOFF_MONTH;
+
+  if (!referrerId) return { ok: false, error: "紹介者を指定してください" };
+
+  const cutoffError = validateCutoff(cutoffMonth, startMonth, "referrer");
+  if (cutoffError) return { ok: false, error: cutoffError };
+
+  const { data, error } = await auth.supabase.rpc(
+    mode === "set" ? "set_referral_payment_hold" : "clear_referral_payment_hold",
+    {
+      p_referrer_id: referrerId,
+      p_start_month: startMonth,
+      p_cutoff_month: cutoffMonth,
+    },
+  );
+
+  if (error) {
+    return { ok: false, error: describeRpcError(error.message, error.code) };
+  }
+
+  const affectedCount = Number(data ?? 0);
+
+  revalidatePaymentViews();
+
+  if (affectedCount === 0) {
+    return {
+      ok: true,
+      affectedCount: 0,
+      message:
+        mode === "set"
+          ? "対象になる未払い明細がありませんでした（支払済み・支払明細に組み入れ済みの明細は変更できません）。"
+          : "解除する明細がありませんでした。",
+    };
+  }
+
+  return {
+    ok: true,
+    affectedCount,
+    message:
+      mode === "set"
+        ? `${affectedCount} 件を「今回は支払わない」にしました（${formatCutoffLabel(cutoffMonth)}締め）。報酬の発生記録は残っています。`
+        : `${affectedCount} 件の保留を解除しました（${formatCutoffLabel(cutoffMonth)}締め）。`,
+  };
+}
+
+/** 紹介報酬を「今回は支払わない」にする */
+export async function setReferralPaymentHoldAction(
+  _prev: ReferralHoldActionResult | null,
+  formData: FormData,
+): Promise<ReferralHoldActionResult> {
+  return updateReferralHold(formData, "set");
+}
+
+/** 紹介報酬の手動保留を解除する */
+export async function clearReferralPaymentHoldAction(
+  _prev: ReferralHoldActionResult | null,
+  formData: FormData,
+): Promise<ReferralHoldActionResult> {
+  return updateReferralHold(formData, "clear");
+}
+
+/*
+  紹介報酬の内訳を、支払明細を作る前に読む。
+
+  表示の形は支払明細の詳細と同じ（creator → 月 → base → 率 → 報酬）。
+  新しい画面は作らず、一覧の行を開いたときにここから取り寄せる。
+  6,722 件を一覧に常時載せると重いので、開いた紹介者だけ読む。
+*/
+export type ReferrerDetailActionResult =
+  | { ok: true; detail: ReferrerRewardDetail }
+  | { ok: false; error: string };
+
+export async function fetchReferrerRewardDetailAction(input: {
+  referrerId: string;
+  cutoffMonth: string;
+  startMonth?: string;
+}): Promise<ReferrerDetailActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  if (!input.referrerId) return { ok: false, error: "紹介者を指定してください" };
+
+  const startMonth = input.startMonth || EARLIEST_CUTOFF_MONTH;
+  const cutoffError = validateCutoff(input.cutoffMonth, startMonth, "referrer");
+  if (cutoffError) return { ok: false, error: cutoffError };
+
+  const detail = await fetchReferrerRewardDetail(auth.supabase, {
+    referrerId: input.referrerId,
+    cutoffMonth: input.cutoffMonth,
+    startMonth,
+  });
+
+  if (detail.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(detail.error) };
+  }
+
+  return { ok: true, detail };
 }
 
 // =============================================================================
@@ -187,7 +325,7 @@ export async function createPaymentBatchAction(
     return { ok: false, error: "支払先を指定してください" };
   }
 
-  const cutoffError = validateCutoff(cutoffMonth, startMonth);
+  const cutoffError = validateCutoff(cutoffMonth, startMonth, payeeKind);
   if (cutoffError) return { ok: false, error: cutoffError };
 
   const { data, error } = await auth.supabase.rpc("claim_payment_batch_items", {

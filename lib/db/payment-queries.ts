@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchAllFrom } from "@/lib/db/paged-select";
 import { sumAgencyAmounts } from "@/lib/agency/agency-reward-engine";
 import {
+  REFERRAL_PAYOUT_THRESHOLD_YEN,
   resolveRewardItemAmount,
   sumReferralAmounts,
 } from "@/lib/referrals/referral-reward-engine";
@@ -20,6 +21,10 @@ import {
   type PayeeKind,
   type PaymentHoldReason,
 } from "@/lib/payments/payable";
+import {
+  EARLIEST_CUTOFF_MONTH,
+  MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
+} from "@/lib/payments/cutoff-month";
 import {
   isOpenPaymentBatchStatus,
   type PaymentBatchAction,
@@ -59,7 +64,7 @@ const AGENCY_ITEM_COLUMNS =
   "id, target_month, agency_id, creator_id, agency_source, reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id";
 
 const REFERRAL_ITEM_COLUMNS =
-  "id, target_month, referrer_id, creator_id, base_amount, reward_amount, adjusted_reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id";
+  "id, target_month, referrer_id, creator_id, base_amount, reward_amount, adjusted_reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id, payment_hold_reason";
 
 const BATCH_COLUMNS =
   "id, payee_kind, agency_id, referrer_id, cutoff_month, period_start_month, period_end_month, item_count, gross_amount, payment_amount, status, memo, failure_reason, created_at, approved_at, paid_at, paid_on, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_holder";
@@ -89,6 +94,8 @@ type ReferralItemRow = {
   is_paid: boolean;
   payout_id: string | null;
   payment_batch_id: string | null;
+  /** 'manual_hold' なら管理者が「今回は支払わない」と判断した明細 */
+  payment_hold_reason: string | null;
 };
 
 export type PaymentBatchSummary = {
@@ -132,8 +139,15 @@ export type PaymentUnpaidRow = {
   unpaidAmount: number;
   /** 内訳: 代理店報酬ぶんの未払残高 */
   agencyRewardAmount: number;
-  /** 内訳: この支払先へ合算した紹介者報酬ぶんの未払残高 */
+  /** 内訳: 紹介者報酬ぶんの未払残高（紹介者行は自分の支払可能額） */
   referralRewardAmount: number;
+  /**
+   * 「今回は支払わない」にした額（紹介者行のみ）。
+   * payment_hold_reason = 'manual_hold'。unpaidAmount には含まれない。
+   * 発生記録は残っており、保留解除すれば支払候補へ戻る。
+   */
+  manualHoldAmount: number;
+  manualHoldItemCount: number;
   /** 合算した紹介者の数（代理店行のみ） */
   referrerCount: number;
   itemCount: number;
@@ -176,6 +190,8 @@ export type PaymentOverview = {
      * 支払予定額・支払可能額・振込保留額には含まれない。
      */
     referrerUnpaidAmount: number;
+    /** 「今回は支払わない」にした紹介報酬の合計 */
+    referrerManualHoldAmount: number;
     holdAmount: number;
     holdCount: number;
     payeeCount: number;
@@ -191,6 +207,7 @@ const EMPTY_TOTALS: PaymentOverview["totals"] = {
   scheduledBatchCount: 0,
   agencyUnpaidAmount: 0,
   referrerUnpaidAmount: 0,
+  referrerManualHoldAmount: 0,
   holdAmount: 0,
   holdCount: 0,
   payeeCount: 0,
@@ -217,6 +234,9 @@ type PayeeAccumulator = {
   hasUnconfirmedReward: boolean;
   /** 紹介者の所属代理店が未設定（紹介者行のみ） */
   hasUnassignedReferrerAgency: boolean;
+  /** 「今回は支払わない」にした明細（紹介者行のみ）。claimable には入れない */
+  manualHeld: number[];
+  manualHeldItemCount: number;
 };
 
 function createAccumulator(): PayeeAccumulator {
@@ -235,6 +255,8 @@ function createAccumulator(): PayeeAccumulator {
     hasUnconfirmedAssignment: false,
     hasUnconfirmedReward: false,
     hasUnassignedReferrerAgency: false,
+    manualHeld: [],
+    manualHeldItemCount: 0,
   };
 }
 
@@ -243,18 +265,42 @@ function trackMonth(acc: PayeeAccumulator, month: string) {
   if (!acc.maxMonth || month > acc.maxMonth) acc.maxMonth = month;
 }
 
-/** 未払いかつ未占有か（支払明細に組み入れできる明細） */
+/*
+  未払いかつ未占有か（支払明細に組み入れできる明細）。
+
+  手動保留（payment_hold_reason）も除く。claim RPC の WHERE と同じ条件に
+  しておかないと、画面の「支払可能額」と実際に claim できる額がずれる。
+*/
 function isClaimable(item: {
   is_reward_target: boolean;
   is_paid: boolean;
   payout_id: string | null;
   payment_batch_id: string | null;
+  payment_hold_reason?: string | null;
 }): boolean {
   return (
     item.is_reward_target &&
     !item.is_paid &&
     item.payout_id == null &&
-    item.payment_batch_id == null
+    item.payment_batch_id == null &&
+    item.payment_hold_reason == null
+  );
+}
+
+/** 手動保留された明細か（未払い・未占有のものだけ数える） */
+function isManualHeld(item: {
+  is_reward_target: boolean;
+  is_paid: boolean;
+  payout_id: string | null;
+  payment_batch_id: string | null;
+  payment_hold_reason: string | null;
+}): boolean {
+  return (
+    item.is_reward_target &&
+    !item.is_paid &&
+    item.payout_id == null &&
+    item.payment_batch_id == null &&
+    item.payment_hold_reason != null
   );
 }
 
@@ -328,6 +374,16 @@ export async function fetchPaymentOverview(
     if (claimEnd && targetMonth > claimEnd) return false;
     return true;
   };
+
+  /*
+    紹介報酬は 2026-08 以降を支払対象に混ぜない。
+    その月は TAP 由来が 0 件で旧 affiliate 由来が残っているため、
+    締め月に含めると根拠の無い額が支払候補に出る。
+    claim RPC 側にも同じ上限があり、画面だけの制限にはしていない。
+  */
+  const inReferralClaimRange = (targetMonth: string): boolean =>
+    inClaimRange(targetMonth) &&
+    targetMonth <= MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
 
   const empty: PaymentOverview = {
     rows: [],
@@ -444,16 +500,48 @@ export async function fetchPaymentOverview(
   /*
     紹介制度報酬は代理店の支払予定額へ合算しない。
     代理店へ支払うのは代理店分配報酬だけなので、代理店行の accumulator へは
-    一切足さない。紹介者の行としても支払候補には出さない（当面支払わないため）。
+    一切足さない。
 
-    金額は「代理店へは支払わない紹介制度報酬」の参考値としてだけ集計する。
+    紹介者は独立した支払先として行を作る（2026-09-27 確定）。
+    発生した紹介報酬はすべて画面に出し、支払うかどうかは管理者が決める。
+    代理店所属（外部・自社いずれも）を理由に一覧から消さない。
   */
+  const referrerAcc = new Map<string, PayeeAccumulator>();
   let referralReferenceAmount = 0;
 
   for (const item of referralItems.data) {
-    if (!item.is_reward_target) continue;
-    if (!isClaimable(item) || !inClaimRange(item.target_month)) continue;
-    referralReferenceAmount += resolveRewardItemAmount(item);
+    const acc = referrerAcc.get(item.referrer_id) ?? createAccumulator();
+    const value = resolveRewardItemAmount(item);
+
+    if (item.is_reward_target) {
+      acc.gross.push(value);
+      if (item.is_paid) acc.paid.push(value);
+      else if (item.payment_batch_id != null) acc.claimed.push(value);
+    }
+
+    if (inReferralClaimRange(item.target_month)) {
+      if (isClaimable(item)) {
+        acc.claimable.push(value);
+        acc.referralClaimable.push(value);
+        acc.itemCount += 1;
+        acc.creators.add(item.creator_id);
+        trackMonth(acc, item.target_month);
+        // 金額が確定していない明細（本来ありえない）は支払対象にしない
+        if (!(value > 0)) acc.hasUnconfirmedReward = true;
+        referralReferenceAmount += value;
+      } else if (isManualHeld(item)) {
+        /*
+          「今回は支払わない」分。支払可能額には入れないが、
+          発生額・期間・creator数には数える（一覧から消さないため）。
+        */
+        acc.manualHeld.push(value);
+        acc.manualHeldItemCount += 1;
+        acc.creators.add(item.creator_id);
+        trackMonth(acc, item.target_month);
+      }
+    }
+
+    referrerAcc.set(item.referrer_id, acc);
   }
 
   referralReferenceAmount = sumReferralAmounts([referralReferenceAmount]);
@@ -492,15 +580,25 @@ export async function fetchPaymentOverview(
   ): PaymentUnpaidRow => {
     const bankView = toBankAccountView(meta?.bank);
     const unpaidAmount = sum(acc.claimable);
+    const manualHoldAmount = sum(acc.manualHeld);
 
     const payableInput = {
-      isInHouse: meta?.isInHouse === true,
+      /*
+        自社を理由に支払対象から外すのは代理店だけ。
+        紹介者は（株）3 も一覧に出し、支払うかどうかは管理者が決める。
+      */
+      isInHouse: payeeKind === "agency" && meta?.isInHouse === true,
       bankState: bankView.state,
       unpaidAmount,
       thresholdAmount,
       hasUnconfirmedAssignment: acc.hasUnconfirmedAssignment,
       hasUnconfirmedReward: acc.hasUnconfirmedReward,
       hasUnassignedReferrerAgency: acc.hasUnassignedReferrerAgency,
+      /*
+        支払える残りが無く全額が手動保留のときだけ保留理由を立てる。
+        一部の月だけ保留した場合は残りを普通に支払える。
+      */
+      isFullyManualHeld: unpaidAmount <= 0 && manualHoldAmount > 0,
     };
 
     return {
@@ -518,10 +616,12 @@ export async function fetchPaymentOverview(
       unpaidAmount,
       agencyRewardAmount: sum(acc.agencyClaimable),
       /*
-        代理店へは紹介制度報酬を支払わないため常に 0。
-        履歴として紹介報酬を含む旧明細を見るときは支払明細の詳細を使う。
+        代理店行では常に 0（代理店へ紹介制度報酬は支払わない）。
+        紹介者行では自分の支払可能額をそのまま入れる。
       */
-      referralRewardAmount: 0,
+      referralRewardAmount: sum(acc.referralClaimable),
+      manualHoldAmount,
+      manualHoldItemCount: acc.manualHeldItemCount,
       referrerCount: 0,
       itemCount: acc.itemCount,
       creatorCount: acc.creators.size,
@@ -552,9 +652,34 @@ export async function fetchPaymentOverview(
   }
 
   /*
-    紹介者の行は作らない。紹介制度報酬は当面支払わないため、支払候補にも
-    振込保留にも出さない。金額は referralReferenceAmount で参考表示する。
+    紹介者行。発生した紹介報酬はすべて出す。
+
+    代理店に帰属している紹介者（referrers.agency_id）も自社（（株）3）も
+    一覧から外さない。referrers.agency_id は所属情報であって、
+    支払先を代理店へ付け替える根拠にはしない（2026-09-27 確定）。
+    支払うかどうかは管理者が選ぶ。
   */
+  for (const [referrerId, acc] of referrerAcc) {
+    if (
+      acc.gross.length === 0 &&
+      acc.claimable.length === 0 &&
+      acc.manualHeld.length === 0
+    ) {
+      continue;
+    }
+
+    rows.push(
+      buildRow(
+        "referrer",
+        referrerId,
+        acc,
+        referrerById.get(referrerId),
+        sumReferralAmounts,
+        REFERRAL_PAYOUT_THRESHOLD_YEN,
+      ),
+    );
+  }
+
 
   rows.sort(
     (a, b) =>
@@ -615,6 +740,10 @@ export async function fetchPaymentOverview(
         rows.map((row) => row.agencyRewardAmount),
       ),
       referrerUnpaidAmount: referralReferenceAmount,
+      /** 「今回は支払わない」にした紹介報酬の合計（支払予定額には入らない） */
+      referrerManualHoldAmount: sumReferralAmounts(
+        rows.map((row) => row.manualHoldAmount),
+      ),
       holdAmount: sumAgencyAmounts(holdRows.map((row) => row.unpaidAmount)),
       holdCount: holdRows.length,
       payeeCount: rows.filter((row) => row.isPayable).length,
@@ -1375,6 +1504,161 @@ export async function fetchPayeeBankAccounts(
         bank: toBankAccountView(bankAccountFromRow(record)),
       };
     }),
+    error: null,
+  };
+}
+
+// =============================================================================
+// 紹介報酬の内訳（支払明細を作る前に見る）
+// =============================================================================
+/*
+  支払明細（batch）を作る前に、その紹介者の内訳を確認できるようにする。
+
+  表示の形は支払明細の詳細と同じものを使う
+  （PaymentRewardBreakdown → creator → target_month → base → 率 → 報酬）。
+  claim 前後で見え方が変わると突き合わせができないため、
+  専用の型や画面を作らない。
+
+  ■ 発生額と支払対象額を分けて返す
+  発生額は締め月までの全明細。支払対象額は claim できるものだけ。
+  手動保留・支払済み・占有中を混ぜると、画面の額と実際に振り込む額がずれる。
+*/
+export type ReferrerRewardDetail = {
+  referrerId: string;
+  referrerName: string;
+  cutoffMonth: string;
+  startMonth: string;
+  /** 締め月までに発生した全額（保留・占有・支払済みを含む） */
+  grossAmount: number;
+  /** いま claim できる額 */
+  claimableAmount: number;
+  /** 「今回は支払わない」にした額 */
+  manualHoldAmount: number;
+  /** すでに支払明細に占有されている額 */
+  claimedAmount: number;
+  /** 支払済みの額 */
+  paidAmount: number;
+  /** 内訳（発生した全明細） */
+  breakdown: PaymentRewardBreakdown;
+  error: string | null;
+};
+
+export async function fetchReferrerRewardDetail(
+  supabase: SupabaseClient,
+  params: { referrerId: string; cutoffMonth: string; startMonth?: string },
+): Promise<ReferrerRewardDetail> {
+  const startMonth = params.startMonth ?? EARLIEST_CUTOFF_MONTH;
+  /*
+    紹介報酬は 2026-08 以降を支払対象に混ぜない。
+    内訳の表示範囲も同じ上限に合わせる（画面と claim の範囲を一致させる）。
+  */
+  const cutoffMonth =
+    params.cutoffMonth > MAX_REFERRAL_PAYMENT_CUTOFF_MONTH
+      ? MAX_REFERRAL_PAYMENT_CUTOFF_MONTH
+      : params.cutoffMonth;
+
+  const empty: ReferrerRewardDetail = {
+    referrerId: params.referrerId,
+    referrerName: "（不明な紹介者）",
+    cutoffMonth,
+    startMonth,
+    grossAmount: 0,
+    claimableAmount: 0,
+    manualHoldAmount: 0,
+    claimedAmount: 0,
+    paidAmount: 0,
+    breakdown: { rewardKind: "referral", creators: [], totalAmount: 0, itemCount: 0 },
+    error: null,
+  };
+
+  const [referrerResult, itemsResult] = await Promise.all([
+    supabase
+      .from("referrers")
+      .select("id, name, referrer_name")
+      .eq("id", params.referrerId)
+      .maybeSingle(),
+    fetchAllFrom<
+      ReferralItemRow & { reward_rate: number | string | null; source_row_key: string | null }
+    >(
+      supabase,
+      "referral_reward_items",
+      `${REFERRAL_ITEM_COLUMNS}, reward_rate, source_row_key`,
+      (query) =>
+        query
+          .eq("referrer_id", params.referrerId)
+          .gte("target_month", startMonth)
+          .lte("target_month", cutoffMonth),
+    ),
+  ]);
+
+  const error = referrerResult.error?.message ?? itemsResult.error ?? null;
+  if (error) return { ...empty, error };
+
+  const items = itemsResult.data;
+
+  const creatorIds = [...new Set(items.map((row) => String(row.creator_id)))];
+  const creatorsResult =
+    creatorIds.length === 0
+      ? { data: [], error: null }
+      : await supabase
+          .from("creators")
+          .select("id, creator_name, tiktok_id")
+          .in("id", creatorIds);
+
+  if (creatorsResult.error) {
+    return { ...empty, error: creatorsResult.error.message };
+  }
+
+  const creatorById = new Map<string, { creatorName: string; tiktokId: string }>();
+  for (const row of creatorsResult.data ?? []) {
+    creatorById.set(String(row.id), {
+      creatorName: String(row.creator_name ?? "—"),
+      tiktokId: String(row.tiktok_id ?? ""),
+    });
+  }
+
+  const referrerRow = referrerResult.data as
+    | { name?: string | null; referrer_name?: string | null }
+    | null;
+
+  const breakdown = buildRewardBreakdown(
+    "referral",
+    items.map((row) => {
+      const creator = creatorById.get(String(row.creator_id));
+      return {
+        creatorId: String(row.creator_id ?? ""),
+        creatorName: creator?.creatorName ?? "—",
+        tiktokId: creator?.tiktokId ?? "",
+        referrerName: null,
+        targetMonth: String(row.target_month ?? ""),
+        /* GMV は支払明細の詳細だけが持つ参考値。ここでは出さない */
+        gmv: 0,
+        baseAmount: toAmount(row.base_amount),
+        ratePct: toAmount(row.reward_rate) * 100,
+        rewardAmount: resolveRewardItemAmount(row),
+      };
+    }),
+    sumReferralAmounts,
+  );
+
+  const amountsOf = (predicate: (row: (typeof items)[number]) => boolean) =>
+    sumReferralAmounts(items.filter(predicate).map(resolveRewardItemAmount));
+
+  return {
+    referrerId: params.referrerId,
+    referrerName: String(
+      referrerRow?.referrer_name ?? referrerRow?.name ?? "（不明な紹介者）",
+    ),
+    cutoffMonth,
+    startMonth,
+    grossAmount: amountsOf((row) => row.is_reward_target),
+    claimableAmount: amountsOf((row) => isClaimable(row)),
+    manualHoldAmount: amountsOf((row) => isManualHeld(row)),
+    claimedAmount: amountsOf(
+      (row) => row.is_reward_target && !row.is_paid && row.payment_batch_id != null,
+    ),
+    paidAmount: amountsOf((row) => row.is_reward_target && row.is_paid),
+    breakdown,
     error: null,
   };
 }

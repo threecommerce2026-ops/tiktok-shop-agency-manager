@@ -20,6 +20,36 @@ export const CUTOFF_MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 /** 支払対象データが始まる月。これより前は選ばせない */
 export const EARLIEST_CUTOFF_MONTH = "2026-01";
 
+/*
+  紹介者報酬を支払対象にできる最後の締め月。
+
+  2026-08 以降は紹介報酬の発生データがまだ揃っていない。
+    ・TAP 由来 0 件（TAP の 2026-08 は未払い 871 行を含み全量未確定）
+    ・旧 affiliate 由来 32 件 / 5,698.85 円 が残ったまま
+    ・referral_payouts の 2026-08 / 09 は削除済みの旧 affiliate 分を含み陳腐化
+  この状態で締めると、根拠の無い額を支払うか、正しい額を未払い確定させる。
+
+  2026-08 の TAP を全量取り込んで置き換えたら、この定数を進める。
+  代理店側の締め月には影響させない（代理店報酬は TAP と無関係）。
+*/
+export const MAX_REFERRAL_PAYMENT_CUTOFF_MONTH = "2026-07";
+
+/** 紹介者報酬を支払対象にできる締め月か */
+export function isReferralPaymentCutoffMonth(value: unknown): value is string {
+  return isCutoffMonth(value) && value <= MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
+}
+
+/** 紹介者報酬の締め月として選べない理由。選べるなら null */
+export function referralPaymentCutoffError(month: string): string | null {
+  if (!isCutoffMonth(month)) {
+    return `締め対象月の形式が不正です（YYYY-MM）: ${month}`;
+  }
+  if (month > MAX_REFERRAL_PAYMENT_CUTOFF_MONTH) {
+    return `紹介者報酬は ${MAX_REFERRAL_PAYMENT_CUTOFF_MONTH} 末締めまでが対象です（指定 ${month}）。${MAX_REFERRAL_PAYMENT_CUTOFF_MONTH} より後の月は TAP の全量取込が済んでいません。`;
+  }
+  return null;
+}
+
 export function isCutoffMonth(value: unknown): value is string {
   return typeof value === "string" && CUTOFF_MONTH_PATTERN.test(value);
 }

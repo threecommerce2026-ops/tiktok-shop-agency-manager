@@ -3,18 +3,24 @@
 import Link from "next/link";
 import {
   EARLIEST_CUTOFF_MONTH,
+  MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
   formatCutoffLabel,
 } from "@/lib/payments/cutoff-month";
 import { useActionState, useMemo, useState } from "react";
 
 import {
   approvePaymentBatchesBulkAction,
+  clearReferralPaymentHoldAction,
   createPaymentBatchAction,
   exportPaymentCsvAction,
+  fetchReferrerRewardDetailAction,
+  setReferralPaymentHoldAction,
   type BulkApproveResult,
   type PaymentActionResult,
   type PaymentCsvActionResult,
+  type ReferralHoldActionResult,
 } from "@/app/actions/payments";
+import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
 import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
 import type {
   PaymentBatchSummary,
@@ -70,7 +76,7 @@ function isBulkApprovable(batch: PaymentBatchSummary): boolean {
 const TABS = [
   { key: "all", label: "すべて" },
   { key: "agency", label: "代理店" },
-  { key: "referrer", label: "代理店未設定の紹介者" },
+  { key: "referrer", label: "紹介者" },
   { key: "hold", label: "振込保留" },
   { key: "history", label: "支払履歴" },
   { key: "seller", label: "セラー請求" },
@@ -151,6 +157,226 @@ function Banner({
     >
       {state.ok ? state.message : state.error}
     </p>
+  );
+}
+
+/*
+  紹介報酬の「今回は支払わない」を切り替える。
+
+  発生データ（referral_reward_items）は消さない。reward_amount も変えない。
+  対象・安全条件（支払済み・占有中には付けない）は RPC が持つので、
+  ここでは押せるかどうかの見た目だけを決める。
+
+  支払対象として選ぶ操作は既存の「支払明細を作成」がそのまま兼ねる。
+  3つ目の状態カラムを増やさないため、保存するのは保留だけにしている。
+*/
+/*
+  紹介報酬の内訳（支払明細を作る前）。
+
+  紹介者 → creator → 対象月 → 成果報酬ベース → 率 → 報酬 まで追える。
+  支払明細の詳細と同じ型（PaymentRewardBreakdown）を使うので、
+  claim の前後で見え方が変わらない。
+  全件を一覧へ常時載せると重いので、開いた紹介者だけ取り寄せる。
+*/
+function ReferralBreakdown({
+  referrerId,
+  cutoffMonth,
+  startMonth,
+}: {
+  referrerId: string;
+  cutoffMonth: string;
+  startMonth: string;
+}) {
+  const [detail, setDetail] = useState<ReferrerRewardDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    const result = await fetchReferrerRewardDetailAction({
+      referrerId,
+      cutoffMonth,
+      startMonth,
+    });
+    setLoading(false);
+    if (result.ok) setDetail(result.detail);
+    else setError(result.error);
+  };
+
+  if (!detail) {
+    return (
+      <div className="mt-2">
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="text-[11px] font-medium text-[var(--accent-cyan)] hover:underline disabled:opacity-50"
+        >
+          {loading ? "読み込み中…" : "内訳を見る"}
+        </button>
+        {error ? (
+          <p className="mt-1 text-[11px] leading-relaxed text-red-300">{error}</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-white/[0.08] bg-black/20 p-2">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-zinc-400">
+        <span>
+          発生額{" "}
+          <span className="font-mono text-zinc-200">{yen(detail.grossAmount)}</span>
+        </span>
+        <span>
+          支払可能{" "}
+          <span className="font-mono text-emerald-300">
+            {yen(detail.claimableAmount)}
+          </span>
+        </span>
+        {detail.manualHoldAmount > 0 ? (
+          <span>
+            今回は支払わない{" "}
+            <span className="font-mono text-amber-200">
+              {yen(detail.manualHoldAmount)}
+            </span>
+          </span>
+        ) : null}
+        {detail.claimedAmount > 0 ? (
+          <span>
+            支払予定中{" "}
+            <span className="font-mono text-indigo-200">
+              {yen(detail.claimedAmount)}
+            </span>
+          </span>
+        ) : null}
+        {detail.paidAmount > 0 ? (
+          <span>
+            支払済{" "}
+            <span className="font-mono text-zinc-300">{yen(detail.paidAmount)}</span>
+          </span>
+        ) : null}
+      </div>
+
+      <div className="max-h-72 overflow-y-auto">
+        <table className="w-full border-collapse text-[11px]">
+          <thead>
+            <tr className="text-left text-zinc-500">
+              <th className="px-1.5 py-1 font-medium">クリエイター</th>
+              <th className="px-1.5 py-1 font-medium">対象月</th>
+              <th className="px-1.5 py-1 text-right font-medium">成果報酬ベース</th>
+              <th className="px-1.5 py-1 text-right font-medium">率</th>
+              <th className="px-1.5 py-1 text-right font-medium">報酬額</th>
+              <th className="px-1.5 py-1 text-right font-medium">明細</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.breakdown.creators.map((creator) =>
+              creator.months.map((month, index) => (
+                <tr
+                  key={`${creator.creatorId}:${month.targetMonth}`}
+                  className="border-t border-white/[0.05]"
+                >
+                  <td className="px-1.5 py-1 text-zinc-300">
+                    {index === 0 ? creator.tiktokId || creator.creatorName : ""}
+                  </td>
+                  <td className="px-1.5 py-1 font-mono text-zinc-400">
+                    {month.targetMonth}
+                  </td>
+                  <td className="px-1.5 py-1 text-right font-mono text-zinc-400">
+                    {yen(month.baseAmount)}
+                  </td>
+                  <td className="px-1.5 py-1 text-right font-mono text-zinc-400">
+                    {month.hasMixedRate ? "複数" : `${month.ratePct}%`}
+                  </td>
+                  <td className="px-1.5 py-1 text-right font-mono text-zinc-200">
+                    {yen(month.rewardAmount)}
+                  </td>
+                  <td className="px-1.5 py-1 text-right font-mono text-zinc-500">
+                    {month.itemCount}
+                  </td>
+                </tr>
+              )),
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setDetail(null)}
+        className="text-[11px] text-zinc-400 hover:underline"
+      >
+        閉じる
+      </button>
+    </div>
+  );
+}
+
+function ReferralHoldControls({
+  row,
+  cutoffMonth,
+}: {
+  row: PaymentUnpaidRow;
+  cutoffMonth: string;
+}) {
+  const [setState, setHold, setPending] = useActionState<
+    ReferralHoldActionResult | null,
+    FormData
+  >(setReferralPaymentHoldAction, null);
+  const [clearState, clearHold, clearPending] = useActionState<
+    ReferralHoldActionResult | null,
+    FormData
+  >(clearReferralPaymentHoldAction, null);
+
+  const result = setState ?? clearState;
+  const startMonth = row.periodStartMonth ?? EARLIEST_CUTOFF_MONTH;
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        {row.unpaidAmount > 0 ? (
+          <form action={setHold}>
+            <input type="hidden" name="referrerId" value={row.payeeId} />
+            <input type="hidden" name="cutoffMonth" value={cutoffMonth} />
+            <input type="hidden" name="startMonth" value={startMonth} />
+            <button
+              type="submit"
+              disabled={setPending}
+              className="min-h-[28px] rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 text-[11px] font-medium text-amber-200 hover:bg-amber-400/20 disabled:opacity-50"
+            >
+              {setPending ? "設定中…" : "今回は支払わない"}
+            </button>
+          </form>
+        ) : null}
+
+        {row.manualHoldAmount > 0 ? (
+          <form action={clearHold}>
+            <input type="hidden" name="referrerId" value={row.payeeId} />
+            <input type="hidden" name="cutoffMonth" value={cutoffMonth} />
+            <input type="hidden" name="startMonth" value={startMonth} />
+            <button
+              type="submit"
+              disabled={clearPending}
+              className="min-h-[28px] rounded-lg border border-white/[0.12] px-2.5 text-[11px] font-medium text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+            >
+              {clearPending ? "解除中…" : "保留を解除"}
+            </button>
+          </form>
+        ) : null}
+      </div>
+
+      {result ? (
+        <p
+          className={`text-[11px] leading-relaxed ${
+            result.ok ? "text-emerald-300" : "text-red-300"
+          }`}
+        >
+          {result.ok ? result.message : result.error}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -402,9 +628,14 @@ export function PaymentsClient({
           hint="代理店へ支払うのはこの金額だけです"
         />
         <Kpi
-          label="紹介制度報酬（支払対象外）"
+          label="紹介報酬 支払可能"
           value={yen(overview.totals.referrerUnpaidAmount)}
-          hint="代理店へは支払いません。支払予定額・支払可能額には含まれません"
+          hint="紹介者本人へ支払います。代理店の支払額には含まれません"
+        />
+        <Kpi
+          label="紹介報酬 今回は支払わない"
+          value={yen(overview.totals.referrerManualHoldAmount)}
+          hint="管理者が保留にした分。発生記録は残っています"
           tone="muted"
         />
         <Kpi
@@ -772,6 +1003,7 @@ export function PaymentsClient({
                     <th className={`${th} text-right`}>過去支払済</th>
                     <th className={`${th} text-right`}>支払予定中</th>
                     <th className={`${th} text-right`}>代理店分配報酬</th>
+                    <th className={`${th} text-right`}>今回は支払わない</th>
                     <th className={`${th} text-right`}>未払残高</th>
                     <th className={`${th} text-right`}>今回支払額</th>
                     <th className={th}>振込先状態</th>
@@ -782,7 +1014,7 @@ export function PaymentsClient({
                 <tbody>
                   {unpaidRows.length === 0 ? (
                     <tr>
-                      <td colSpan={13} className="px-4 py-10 text-center text-sm text-zinc-500">
+                      <td colSpan={14} className="px-4 py-10 text-center text-sm text-zinc-500">
                         該当する支払先がありません。
                       </td>
                     </tr>
@@ -806,24 +1038,33 @@ export function PaymentsClient({
                           <td className={`${td} whitespace-normal`}>
                             <div className="font-medium text-zinc-100">{row.payeeName}</div>
                             {/*
-                              振込先は代理店側だけで管理する。紹介者報酬は所属代理店へ
-                              合算して支払うため、紹介者に口座は登録しない。
+                              紹介者も独立した支払先。振込先は本人名義で登録する。
+                              代理店に所属していても紹介報酬は本人へ支払うため、
+                              所属を理由に一覧から外さない（参考情報として出すだけ）。
                             */}
-                            {row.payeeKind === "agency" ? (
-                              <div className="mt-2 max-w-md">
-                                <PayeeBankForm
-                                  payeeKind={row.payeeKind}
-                                  payeeId={row.payeeId}
-                                  payeeName={row.payeeName}
-                                  bank={row.bank}
+                            <div className="mt-2 max-w-md">
+                              <PayeeBankForm
+                                payeeKind={row.payeeKind}
+                                payeeId={row.payeeId}
+                                payeeName={row.payeeName}
+                                bank={row.bank}
+                              />
+                            </div>
+                            {row.payeeKind === "referrer" ? (
+                              <>
+                                <ReferralHoldControls
+                                  row={row}
+                                  cutoffMonth={cutoffMonth}
                                 />
-                              </div>
-                            ) : (
-                              <p className="mt-2 max-w-md text-[11px] leading-relaxed text-amber-200">
-                                所属代理店が未設定です。紹介者報酬は所属代理店へ合算して
-                                支払うため、「紹介者管理」で所属代理店を設定してください。
-                              </p>
-                            )}
+                                <ReferralBreakdown
+                                  referrerId={row.payeeId}
+                                  cutoffMonth={cutoffMonth}
+                                  startMonth={
+                                    row.periodStartMonth ?? EARLIEST_CUTOFF_MONTH
+                                  }
+                                />
+                              </>
+                            ) : null}
                           </td>
                           <td className={`${td} font-mono text-zinc-300`}>
                             {row.periodStartMonth
@@ -844,6 +1085,19 @@ export function PaymentsClient({
                           {/* 代理店へ支払うのは代理店分配報酬だけ */}
                           <td className={`${td} text-right font-mono text-zinc-300`}>
                             {row.agencyRewardAmount > 0 ? yen(row.agencyRewardAmount) : "—"}
+                          </td>
+                          {/*
+                            「今回は支払わない」分。発生額には含まれるが
+                            未払残高（支払対象）からは外れている。
+                          */}
+                          <td className={`${td} text-right font-mono text-amber-200`}>
+                            {row.manualHoldAmount > 0 ? (
+                              <span title={`${row.manualHoldItemCount} 件`}>
+                                {yen(row.manualHoldAmount)}
+                              </span>
+                            ) : (
+                              "—"
+                            )}
                           </td>
                           <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
                             {yen(row.unpaidAmount)}
@@ -929,8 +1183,14 @@ export function PaymentsClient({
               支払明細を作成すると、その分は「支払予定中」へ移り、未払残高から外れます。
               代理店へ支払うのは
               <span className="font-semibold text-zinc-300">代理店分配報酬だけ</span>
-              です。紹介制度報酬は代理店へは支払わず、会計・計算履歴として保持しています。
+              で、紹介報酬は
+              <span className="font-semibold text-zinc-300">紹介者本人</span>
+              へ支払います。両者を合算しません。
+              「今回は支払わない」にした分は発生記録を残したまま支払対象から外れます
+              （解除すれば戻ります）。
               対象は締め対象月（{formatCutoffLabel(cutoffMonth)}）までの未払いだけです。
+              紹介報酬は {MAX_REFERRAL_PAYMENT_CUTOFF_MONTH} 末締めまでが上限です
+              （それ以降は TAP の全量取込が未了）。
               二重に支払対象へ現れることはありません。
             </p>
           </section>

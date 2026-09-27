@@ -141,14 +141,24 @@ test("紹介者の行を支払候補として作らない", () => {
   assert.doesNotMatch(QUERIES, /referralAcc/);
 });
 
-test("KPI の紹介制度報酬は参考値で、支払予定額に入らない", () => {
+test("KPI の紹介報酬は代理店の支払予定額に入らない", () => {
+  /*
+    2026-09-27 改定: 紹介報酬は紹介者本人へ支払うようになった。
+    ここで守るのは「代理店の支払額に合算しない」ことだけで、
+    「紹介報酬を支払わない」ことではない。
+  */
   assert.match(QUERIES, /referrerUnpaidAmount: referralReferenceAmount,/);
-  assert.match(PAYMENTS_UI, /紹介制度報酬（支払対象外）/);
-  assert.match(PAYMENTS_UI, /支払予定額・支払可能額には含まれません/);
+  assert.match(PAYMENTS_UI, /紹介報酬 支払可能/);
+  assert.match(PAYMENTS_UI, /代理店の支払額には含まれません/);
   // 締め対象KPIは代理店分配報酬のみ
   assert.doesNotMatch(
     PAYMENTS_UI,
     /agencyUnpaidAmount \+ overview\.totals\.referrerUnpaidAmount/,
+  );
+  // 代理店行の紹介報酬は常に 0（合算しない）
+  assert.match(
+    QUERIES,
+    /agencyUnpaidAmount: sumAgencyAmounts\(\s*rows\.map\(\(row\) => row\.agencyRewardAmount\),/,
   );
 });
 

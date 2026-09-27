@@ -39,6 +39,7 @@ export function isPayeeKind(value: unknown): value is PayeeKind {
 }
 
 export const PAYMENT_HOLD_REASONS = [
+  "manual_hold",
   "in_house",
   "assignment_unconfirmed",
   "reward_unconfirmed",
@@ -51,6 +52,7 @@ export const PAYMENT_HOLD_REASONS = [
 export type PaymentHoldReason = (typeof PAYMENT_HOLD_REASONS)[number];
 
 export const PAYMENT_HOLD_REASON_LABEL: Record<PaymentHoldReason, string> = {
+  manual_hold: "今回は支払わない（管理者判断）",
   in_house: "自社（支払対象外）",
   assignment_unconfirmed: "所属未確定",
   reward_unconfirmed: "報酬計算未確定",
@@ -61,6 +63,8 @@ export const PAYMENT_HOLD_REASON_LABEL: Record<PaymentHoldReason, string> = {
 };
 
 export const PAYMENT_HOLD_REASON_HINT: Record<PaymentHoldReason, string> = {
+  manual_hold:
+    "管理者が「今回は支払わない」と判断しました。報酬の発生記録は残っており、保留を解除すれば支払候補に戻ります。",
   in_house:
     "自社の代理店 / 紹介者です。実績としては集計しますが外部への振込対象ではありません。",
   assignment_unconfirmed:
@@ -94,6 +98,16 @@ export type PayableInput = {
   hasUnconfirmedReward: boolean;
   /** 紹介者の所属代理店が未設定か（紹介者のみ） */
   hasUnassignedReferrerAgency?: boolean;
+  /**
+   * 支払える残りが無く、未払いの全額が手動保留になっているか（紹介者のみ）。
+   * referral_reward_items.payment_hold_reason = 'manual_hold' が根拠。
+   *
+   * 手動保留された明細は unpaidAmount に入れない（claim できないため）。
+   * 一部の月だけ保留した場合は残りを普通に支払えるので、ここは false。
+   * 全額が保留のときだけ true にして、保留タブに理由付きで残す
+   * （黙って一覧から消えると「なぜ居ないのか」が追えなくなる）。
+   */
+  isFullyManualHeld?: boolean;
 };
 
 /**
@@ -105,6 +119,7 @@ export function resolvePaymentHoldReasons(
 ): PaymentHoldReason[] {
   const reasons: PaymentHoldReason[] = [];
 
+  if (input.isFullyManualHeld) reasons.push("manual_hold");
   if (input.isInHouse) reasons.push("in_house");
   if (input.hasUnconfirmedAssignment) reasons.push("assignment_unconfirmed");
   if (input.hasUnconfirmedReward) reasons.push("reward_unconfirmed");
