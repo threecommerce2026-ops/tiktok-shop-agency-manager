@@ -121,6 +121,14 @@ export type PaymentBatchSummary = {
   bank: BankAccountView | null;
 };
 
+export type PayeeCreatorBreakdown = {
+  creatorId: string;
+  tiktokId: string;
+  creatorName: string | null;
+  rewardAmount: number;
+  itemCount: number;
+};
+
 export type PaymentUnpaidRow = {
   payeeKind: PayeeKind;
   payeeId: string;
@@ -148,6 +156,11 @@ export type PaymentUnpaidRow = {
    */
   manualHoldAmount: number;
   manualHoldItemCount: number;
+  /**
+   * 紹介元のクリエイター内訳（紹介者行のみ。代理店行は空配列）。
+   * 合計は grossAmount と一致する（どちらも支払対象期間で集計する）。
+   */
+  creators: PayeeCreatorBreakdown[];
   /** 合算した紹介者の数（代理店行のみ） */
   referrerCount: number;
   itemCount: number;
@@ -237,6 +250,14 @@ type PayeeAccumulator = {
   /** 「今回は支払わない」にした明細（紹介者行のみ）。claimable には入れない */
   manualHeld: number[];
   manualHeldItemCount: number;
+  /*
+    creator ごとの発生額（紹介者行のみ）。
+
+    「どのクリエイターから発生した紹介報酬か」を一覧で判断できるようにする。
+    集計は支払対象期間（inReferralClaimRange）の明細だけで行い、
+    合計が行の発生額と必ず一致するようにする。
+  */
+  creatorAmounts: Map<string, { amount: number[]; itemCount: number }>;
 };
 
 function createAccumulator(): PayeeAccumulator {
@@ -257,7 +278,20 @@ function createAccumulator(): PayeeAccumulator {
     hasUnassignedReferrerAgency: false,
     manualHeld: [],
     manualHeldItemCount: 0,
+    creatorAmounts: new Map(),
   };
+}
+
+/** creator 別の発生額を積む（同じ creator は1行にまとめる） */
+function trackCreatorAmount(
+  acc: PayeeAccumulator,
+  creatorId: string,
+  amount: number,
+) {
+  const current = acc.creatorAmounts.get(creatorId) ?? { amount: [], itemCount: 0 };
+  current.amount.push(amount);
+  current.itemCount += 1;
+  acc.creatorAmounts.set(creatorId, current);
 }
 
 function trackMonth(acc: PayeeAccumulator, month: string) {
@@ -396,6 +430,7 @@ export async function fetchPaymentOverview(
   const [
     agencyItems,
     referralItems,
+    creatorsResult,
     agenciesResult,
     referrersResult,
     batchesResult,
@@ -406,6 +441,18 @@ export async function fetchPaymentOverview(
       supabase,
       "referral_reward_items",
       REFERRAL_ITEM_COLUMNS,
+    ),
+    /*
+      紹介元クリエイターの表示名。
+
+      .in("id", [...]) で ID を並べない。UUID でも件数が増えると URL が
+      長くなり、以前 source_row_key で 414 になった経路と同じ形になる。
+      列を3つに絞り、fetchAllFrom のページングに任せる。
+    */
+    fetchAllFrom<{ id: string; tiktok_id: string | null; creator_name: string | null }>(
+      supabase,
+      "creators",
+      "id, tiktok_id, creator_name",
     ),
     supabase
       .from("agencies")
@@ -432,6 +479,7 @@ export async function fetchPaymentOverview(
   const error =
     agencyItems.error ??
     referralItems.error ??
+    creatorsResult.error ??
     agenciesResult.error?.message ??
     referrersResult.error?.message ??
     batchesResult.error?.message ??
@@ -456,6 +504,17 @@ export async function fetchPaymentOverview(
       isInHouse: row.is_in_house === true,
       bank: bankAccountFromRow(row as Record<string, unknown>),
       agencyId: null,
+    });
+  }
+
+  const creatorMetaById = new Map<
+    string,
+    { tiktokId: string; creatorName: string | null }
+  >();
+  for (const row of creatorsResult.data) {
+    creatorMetaById.set(String(row.id), {
+      tiktokId: String(row.tiktok_id ?? ""),
+      creatorName: row.creator_name == null ? null : String(row.creator_name),
     });
   }
 
@@ -513,8 +572,24 @@ export async function fetchPaymentOverview(
     const acc = referrerAcc.get(item.referrer_id) ?? createAccumulator();
     const value = resolveRewardItemAmount(item);
 
-    if (item.is_reward_target) {
+    /*
+      紹介者の発生額は支払対象期間だけで数える。
+
+      代理店行と違い、ここは範囲外（2026-08 以降）を足さない。
+      その月は TAP 由来が 0 件で旧 affiliate 由来だけが残っており、
+      発生額に混ぜると「支払可能 + 保留 + 支払予定 + 支払済」の合計と
+      行の発生額が合わなくなる。creator 別の内訳とも食い違う。
+      DB のデータは消さない。集計範囲を揃えるだけ。
+    */
+    if (item.is_reward_target && inReferralClaimRange(item.target_month)) {
       acc.gross.push(value);
+      trackCreatorAmount(acc, item.creator_id, value);
+      /*
+        対象期間・対象creator数も発生額と同じ集合から作る。
+        支払済み・占有中の明細しか無い紹介者でも期間と人数が出るようにする。
+      */
+      acc.creators.add(item.creator_id);
+      trackMonth(acc, item.target_month);
       if (item.is_paid) acc.paid.push(value);
       else if (item.payment_batch_id != null) acc.claimed.push(value);
     }
@@ -582,6 +657,27 @@ export async function fetchPaymentOverview(
     const unpaidAmount = sum(acc.claimable);
     const manualHoldAmount = sum(acc.manualHeld);
 
+    /*
+      紹介元クリエイターの内訳。金額の大きい順に並べる。
+      合計は grossAmount と一致する（同じ明細集合から作っている）。
+    */
+    const creators: PayeeCreatorBreakdown[] = [...acc.creatorAmounts.entries()]
+      .map(([creatorId, entry]) => {
+        const creatorMeta = creatorMetaById.get(creatorId);
+        return {
+          creatorId,
+          tiktokId: creatorMeta?.tiktokId ?? "",
+          creatorName: creatorMeta?.creatorName ?? null,
+          rewardAmount: sum(entry.amount),
+          itemCount: entry.itemCount,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.rewardAmount - a.rewardAmount ||
+          a.tiktokId.localeCompare(b.tiktokId, "ja"),
+      );
+
     const payableInput = {
       /*
         自社を理由に支払対象から外すのは代理店だけ。
@@ -622,6 +718,7 @@ export async function fetchPaymentOverview(
       referralRewardAmount: sum(acc.referralClaimable),
       manualHoldAmount,
       manualHoldItemCount: acc.manualHeldItemCount,
+      creators,
       referrerCount: 0,
       itemCount: acc.itemCount,
       creatorCount: acc.creators.size,

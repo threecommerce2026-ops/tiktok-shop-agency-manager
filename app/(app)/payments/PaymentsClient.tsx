@@ -23,6 +23,7 @@ import {
 import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
 import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
 import type {
+  PayeeCreatorBreakdown,
   PaymentBatchSummary,
   PaymentOverview,
   PaymentUnpaidRow,
@@ -310,6 +311,67 @@ function ReferralBreakdown({
       >
         閉じる
       </button>
+    </div>
+  );
+}
+
+/*
+  紹介元アカウント（どのクリエイターから発生した紹介報酬か）。
+
+  EMI が「支払う / 今回は支払わない」を判断するには、紹介者名だけでは
+  足りず、元になったクリエイターと金額が要る。
+
+  金額は行の発生額と同じ集合から作っているので、ここの合計は必ず
+  発生額と一致する。1紹介者あたり最大5件なので原則すべて出し、
+  多い場合だけ折りたたむ（上位3件 + 残りは開いて見る）。
+
+  注文や月別まで追うときは「内訳を見る」を使う。
+*/
+const VISIBLE_CREATOR_COUNT = 3;
+
+function ReferralCreators({ creators }: { creators: PayeeCreatorBreakdown[] }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (creators.length === 0) {
+    return (
+      <p className="mt-2 text-[11px] text-zinc-500">
+        紹介元アカウントがありません。
+      </p>
+    );
+  }
+
+  const hidden = creators.length - VISIBLE_CREATOR_COUNT;
+  const shown = expanded ? creators : creators.slice(0, VISIBLE_CREATOR_COUNT);
+
+  return (
+    <div className="mt-2 max-w-md">
+      <p className="text-[11px] font-medium text-zinc-500">紹介元アカウント</p>
+      <ul className="mt-1 space-y-0.5">
+        {shown.map((creator) => (
+          <li
+            key={creator.creatorId}
+            className="flex items-baseline justify-between gap-3 text-[11px]"
+          >
+            {/* creator_name があっても TikTok ID を必ず出す（突き合わせに使う） */}
+            <span className="truncate font-mono text-zinc-300">
+              {creator.tiktokId || creator.creatorName || creator.creatorId.slice(0, 8)}
+            </span>
+            <span className="shrink-0 font-mono text-zinc-200">
+              {yen(creator.rewardAmount)}
+              <span className="ml-1 text-zinc-600">({creator.itemCount})</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-1 text-[11px] text-[var(--accent-cyan)] hover:underline"
+        >
+          {expanded ? "折りたたむ" : `他 ${hidden} 件を表示`}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1052,6 +1114,7 @@ export function PaymentsClient({
                             </div>
                             {row.payeeKind === "referrer" ? (
                               <>
+                                <ReferralCreators creators={row.creators} />
                                 <ReferralHoldControls
                                   row={row}
                                   cutoffMonth={cutoffMonth}
