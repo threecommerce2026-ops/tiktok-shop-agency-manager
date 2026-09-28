@@ -14,6 +14,7 @@ import {
   createPaymentBatchAction,
   exportPaymentCsvAction,
   fetchReferrerRewardDetailAction,
+  fetchTapCreatorOverviewAction,
   setReferralPaymentHoldAction,
   type BulkApproveResult,
   type PaymentActionResult,
@@ -21,6 +22,10 @@ import {
   type ReferralHoldActionResult,
 } from "@/app/actions/payments";
 import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
+import type {
+  TapCreatorOverview,
+  TapCreatorRow,
+} from "@/lib/db/tap-creator-queries";
 import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
 import type {
   PayeeCreatorBreakdown,
@@ -74,12 +79,16 @@ function isBulkApprovable(batch: PaymentBatchSummary): boolean {
   return batch.status === "draft" && batch.payeeKind === "agency";
 }
 
+/** 件数などの整数表示（金額と混ぜないため別関数にする） */
+const int = (value: number) => Number(value).toLocaleString("ja-JP");
+
 const TABS = [
   { key: "all", label: "すべて" },
   { key: "agency", label: "代理店" },
   { key: "referrer", label: "紹介者" },
   { key: "hold", label: "振込保留" },
   { key: "history", label: "支払履歴" },
+  { key: "tap", label: "TAP実績" },
   { key: "seller", label: "セラー請求" },
 ] as const;
 
@@ -328,6 +337,327 @@ function ReferralBreakdown({
   注文や月別まで追うときは「内訳を見る」を使う。
 */
 const VISIBLE_CREATOR_COUNT = 3;
+
+/*
+  TAP実績タブ。
+
+  ■ 支払画面ではない
+  TAP のクリエイター成果報酬は TikTok 側でクリエイター本人へ発生するもので、
+  THREE から振り込む仕組みは現在無い。支払・保留・claim の操作は置かない。
+  代理店支払・紹介者支払とは意味が違うので、同じ表に混ぜない。
+
+  ■ 4つの金額は別物。合算列を作らない
+  基礎額・THREE の取り分・クリエイターの取り分・紹介者への報酬は
+  それぞれ計算根拠が違う。足した数字は意味を持たないので出さない。
+
+  ■ 開いたときだけ取り寄せる
+  TAP は 22,000 行あり、/payments の初期表示に載せると
+  代理店・紹介者タブまで遅くなる。畳んだ 143 行だけを受け取る。
+*/
+const TAP_AGENCY_FILTERS = [
+  { key: "all", label: "所属: すべて" },
+  { key: "in_house", label: "所属: 自社運営" },
+  { key: "external", label: "所属: 外部代理店" },
+  { key: "unconfirmed", label: "所属: 未確認" },
+] as const;
+
+const TAP_REFERRER_FILTERS = [
+  { key: "all", label: "紹介者: すべて" },
+  { key: "assigned", label: "紹介者: あり" },
+  { key: "none", label: "紹介者: なし" },
+  { key: "out_of_period", label: "紹介者: 期間外" },
+] as const;
+
+const TAP_SORTS = [
+  { key: "commissionBase", label: "成果報酬ベース順" },
+  { key: "tapRevenue", label: "THREE報酬順" },
+  { key: "creatorEstimatedCommission", label: "クリエイター報酬順" },
+  { key: "referralRewardAmount", label: "紹介報酬順" },
+] as const;
+
+type TapSortKey = (typeof TAP_SORTS)[number]["key"];
+
+function tapAgencyBadge(row: TapCreatorRow): string {
+  if (row.agencyState === "in_house") {
+    return "border-emerald-400/25 bg-emerald-400/10 text-emerald-300";
+  }
+  if (row.agencyState === "external") {
+    return "border-cyan-400/25 bg-cyan-400/10 text-cyan-200";
+  }
+  return "border-white/[0.1] bg-white/[0.04] text-zinc-400";
+}
+
+function TapPerformanceTab() {
+  const [overview, setOverview] = useState<TapCreatorOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [agencyFilter, setAgencyFilter] =
+    useState<(typeof TAP_AGENCY_FILTERS)[number]["key"]>("all");
+  const [referrerFilter, setReferrerFilter] =
+    useState<(typeof TAP_REFERRER_FILTERS)[number]["key"]>("all");
+  const [sortKey, setSortKey] = useState<TapSortKey>("commissionBase");
+
+  /*
+    取り寄せは操作を起点にする。effect の中で state を書くと
+    描画のたびに走る余地が残るため、既存の「内訳を見る」と同じ形にする。
+  */
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    const result = await fetchTapCreatorOverviewAction();
+    setLoading(false);
+    if (result.ok) setOverview(result.overview);
+    else setError(result.error);
+  };
+
+  const rows = useMemo(() => {
+    if (!overview) return [];
+    const keyword = search.trim().toLowerCase();
+
+    return overview.rows
+      .filter((row) => {
+        if (keyword && !row.tiktokId.toLowerCase().includes(keyword)) return false;
+        if (agencyFilter === "in_house" && row.agencyState !== "in_house") return false;
+        if (agencyFilter === "external" && row.agencyState !== "external") return false;
+        if (
+          agencyFilter === "unconfirmed" &&
+          row.agencyState !== "unconfirmed" &&
+          row.agencyState !== "partially_unconfirmed"
+        ) {
+          return false;
+        }
+        if (referrerFilter !== "all" && row.referrerState !== referrerFilter) return false;
+        return true;
+      })
+      .sort((a, b) => b[sortKey] - a[sortKey] || a.tiktokId.localeCompare(b.tiktokId, "ja"));
+  }, [overview, search, agencyFilter, referrerFilter, sortKey]);
+
+  if (!overview) {
+    return (
+      <section className="space-y-3 rounded-xl border border-white/[0.08] bg-surface-1 p-4">
+        <h2 className="text-sm font-semibold text-zinc-100">TAP実績</h2>
+        <p className="text-[11px] leading-relaxed text-zinc-400">
+          TAPで成果が発生したクリエイターを、紹介者の有無に関係なくすべて表示します。
+          確認用の画面で、支払操作はありません。
+          明細が2万件を超えるため、必要なときだけ集計します。
+        </p>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="min-h-[36px] rounded-lg bg-[var(--accent-cyan)] px-4 text-xs font-semibold text-black disabled:opacity-50"
+        >
+          {loading ? "集計中…" : "TAP実績を表示"}
+        </button>
+        {error ? (
+          <p className="text-[11px] leading-relaxed text-red-300">{error}</p>
+        ) : null}
+      </section>
+    );
+  }
+
+  const { totals } = overview;
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-xl border border-white/[0.08] bg-surface-1 p-4">
+        <h2 className="text-sm font-semibold text-zinc-100">
+          TAP実績（{overview.startMonth}〜{overview.endMonth}）
+        </h2>
+        <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+          TAPで成果が発生したクリエイターを、紹介者の有無に関係なくすべて表示します。
+          <span className="font-semibold text-zinc-300">
+            この画面は確認用で、支払操作はありません。
+          </span>
+        </p>
+        <dl className="mt-3 grid gap-2 text-[11px] leading-relaxed text-zinc-400 sm:grid-cols-2">
+          <div>
+            <dt className="font-semibold text-zinc-300">成果報酬ベース</dt>
+            <dd>各報酬率を計算する基礎金額。誰かへの支払額ではありません。</dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-zinc-300">THREE報酬</dt>
+            <dd>TAPからTHREE COMMERCEへ発生する推定成果報酬です。</dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-zinc-300">クリエイター報酬</dt>
+            <dd>TikTok側でクリエイター本人へ発生する推定成果報酬です。</dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-zinc-300">紹介報酬</dt>
+            <dd>
+              THREEの紹介制度により紹介者へ発生した報酬です。成果報酬ベースに対する
+              社内ルール（5%）で計算しており、TAPの料率とは別のものです。
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-2 text-[11px] leading-relaxed text-amber-200/80">
+          4つの金額はそれぞれ計算根拠が違うため、合算した数字は出していません。
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <Kpi label="対象クリエイター" value={`${int(totals.creatorCount)} 名`} />
+        <Kpi label="対象明細" value={`${int(totals.eligibleItemCount)} 件`} />
+        <Kpi label="成果報酬ベース" value={yen(totals.commissionBase)} hint="計算の基礎額" />
+        <Kpi label="THREE報酬" value={yen(totals.tapRevenue)} hint="THREE COMMERCE の取り分" />
+        <Kpi
+          label="クリエイター報酬"
+          value={yen(totals.creatorEstimatedCommission)}
+          hint="クリエイター本人の取り分"
+        />
+        <Kpi
+          label="紹介報酬"
+          value={yen(totals.referralRewardAmount)}
+          hint="紹介者への報酬（社内ルール）"
+        />
+      </div>
+
+      {totals.creatorCommissionMissingCount > 0 ? (
+        <p className="text-[11px] leading-relaxed text-zinc-500">
+          クリエイター報酬がTAPデータに記録されていない明細が{" "}
+          {int(totals.creatorCommissionMissingCount)} 件あります（料率が未設定の明細）。
+          その分は 0 円として集計しています。
+        </p>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="TikTok ID を検索"
+          className="min-h-[36px] w-56 rounded-lg border border-white/[0.1] bg-surface-1 px-3 text-xs text-zinc-100 outline-none focus:border-[var(--accent-cyan)]"
+        />
+        <select
+          value={agencyFilter}
+          onChange={(event) =>
+            setAgencyFilter(event.target.value as typeof agencyFilter)
+          }
+          className="min-h-[36px] rounded-lg border border-white/[0.1] bg-surface-1 px-3 text-xs text-zinc-100"
+        >
+          {TAP_AGENCY_FILTERS.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={referrerFilter}
+          onChange={(event) =>
+            setReferrerFilter(event.target.value as typeof referrerFilter)
+          }
+          className="min-h-[36px] rounded-lg border border-white/[0.1] bg-surface-1 px-3 text-xs text-zinc-100"
+        >
+          {TAP_REFERRER_FILTERS.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={sortKey}
+          onChange={(event) => setSortKey(event.target.value as TapSortKey)}
+          className="min-h-[36px] rounded-lg border border-white/[0.1] bg-surface-1 px-3 text-xs text-zinc-100"
+        >
+          {TAP_SORTS.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+        <span className="text-[11px] text-zinc-500">
+          {int(rows.length)} / {int(overview.rows.length)} 名
+        </span>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950/60">
+        <table className="min-w-[1180px] w-full border-collapse">
+          <thead>
+            <tr>
+              <th className={th}>TikTok ID</th>
+              <th className={th}>所属</th>
+              <th className={th}>紹介者</th>
+              <th className={th}>対象期間</th>
+              <th className={`${th} text-right`}>対象件数</th>
+              <th className={`${th} text-right`}>成果報酬ベース</th>
+              <th className={`${th} text-right`}>THREE報酬</th>
+              <th className={`${th} text-right`}>クリエイター報酬</th>
+              <th className={`${th} text-right`}>紹介報酬</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="px-4 py-10 text-center text-sm text-zinc-500">
+                  該当するクリエイターがいません。
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.creatorId} className="border-b border-zinc-800/70 align-top">
+                  <td className={`${td} whitespace-normal`}>
+                    <span className="font-mono text-zinc-100">
+                      {row.tiktokId || row.creatorName || row.creatorId.slice(0, 8)}
+                    </span>
+                  </td>
+                  <td className={`${td} whitespace-normal`}>
+                    <span
+                      className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] ${tapAgencyBadge(row)}`}
+                    >
+                      {row.agencyLabel}
+                    </span>
+                  </td>
+                  <td className={`${td} whitespace-normal`}>
+                    {row.referrerState === "none" ? (
+                      <span className="text-zinc-500">なし</span>
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-zinc-200">{row.referrerName}</span>
+                        {row.referrerState === "out_of_period" ? (
+                          <span className="text-[10px] text-amber-200">
+                            期間外（{row.referralPeriodLabel}）
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
+                  </td>
+                  <td className={`${td} font-mono text-zinc-300`}>
+                    {row.firstTargetMonth === row.lastTargetMonth
+                      ? row.firstTargetMonth
+                      : `${row.firstTargetMonth}〜${row.lastTargetMonth}`}
+                  </td>
+                  <td className={`${td} text-right font-mono text-zinc-400`}>
+                    {int(row.eligibleItemCount)}
+                  </td>
+                  <td className={`${td} text-right font-mono font-semibold text-zinc-100`}>
+                    {yen(row.commissionBase)}
+                  </td>
+                  <td className={`${td} text-right font-mono text-cyan-200`}>
+                    {yen(row.tapRevenue)}
+                  </td>
+                  <td className={`${td} text-right font-mono text-zinc-300`}>
+                    {yen(row.creatorEstimatedCommission)}
+                  </td>
+                  <td className={`${td} text-right font-mono text-emerald-300`}>
+                    {row.referralRewardAmount > 0 ? yen(row.referralRewardAmount) : "—"}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-zinc-500">
+        紹介者がいないクリエイターにも紹介報酬は発生しません（0円）。この画面から
+        紹介報酬を新しく作ることはありません。紹介者の支払は「紹介者」タブ、
+        代理店の支払は「代理店」タブで行います。
+      </p>
+    </section>
+  );
+}
 
 function ReferralCreators({ creators }: { creators: PayeeCreatorBreakdown[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -809,6 +1139,8 @@ export function PaymentsClient({
         />
       ) : tab === "seller" ? (
         <SellerInvoiceTable overview={overview} />
+      ) : tab === "tap" ? (
+        <TapPerformanceTab />
       ) : (
         <>
           {openBatches.length > 0 ? (

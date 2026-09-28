@@ -22,6 +22,10 @@ import {
   type ReferrerRewardDetail,
 } from "@/lib/db/payment-queries";
 import {
+  fetchTapCreatorOverview,
+  type TapCreatorOverview,
+} from "@/lib/db/tap-creator-queries";
+import {
   buildPaymentCsv,
   paymentCsvFileName,
   sumPaymentCsvAmount,
@@ -288,6 +292,38 @@ export async function fetchReferrerRewardDetailAction(input: {
   }
 
   return { ok: true, detail };
+}
+
+// =============================================================================
+// TAP実績（読み取り専用）
+// =============================================================================
+/*
+  TAP の成果と報酬構造をクリエイター単位で読む。支払操作は無い。
+
+  タブを開いたときだけ取り寄せる。TAP は 22,000 行あり、
+  /payments の初期表示に載せると代理店・紹介者タブまで遅くなる。
+  畳んだあとの 143 行（約 67KB）だけを画面へ渡す。
+*/
+export type TapCreatorOverviewActionResult =
+  | { ok: true; overview: TapCreatorOverview }
+  | { ok: false; error: string };
+
+export async function fetchTapCreatorOverviewAction(): Promise<TapCreatorOverviewActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  /*
+    payment_batches と同じくサービスロールで読む。
+    tap_affiliate_order_lines は RLS が管理者限定になっている。
+    管理者判定は requireAdminAction で先に済ませている。
+  */
+  const overview = await fetchTapCreatorOverview(getSupabaseAdmin());
+
+  if (overview.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(overview.error) };
+  }
+
+  return { ok: true, overview };
 }
 
 // =============================================================================
