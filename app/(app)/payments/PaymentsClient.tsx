@@ -183,7 +183,7 @@ function Banner({
 /*
   紹介報酬の内訳（支払明細を作る前）。
 
-  紹介者 → creator → 対象月 → 成果報酬ベース → 率 → 報酬 まで追える。
+  紹介者 → creator → 対象月 → THREE報酬（W+X）→ 率 → 報酬 まで追える。
   支払明細の詳細と同じ型（PaymentRewardBreakdown）を使うので、
   claim の前後で見え方が変わらない。
   全件を一覧へ常時載せると重いので、開いた紹介者だけ取り寄せる。
@@ -275,7 +275,8 @@ function ReferralBreakdown({
             <tr className="text-left text-zinc-500">
               <th className="px-1.5 py-1 font-medium">クリエイター</th>
               <th className="px-1.5 py-1 font-medium">対象月</th>
-              <th className="px-1.5 py-1 text-right font-medium">成果報酬ベース</th>
+              {/* 紹介報酬の基礎は THREE の取り分（W+X）。成果報酬ベースではない */}
+              <th className="px-1.5 py-1 text-right font-medium">THREE報酬</th>
               <th className="px-1.5 py-1 text-right font-medium">率</th>
               <th className="px-1.5 py-1 text-right font-medium">報酬額</th>
               <th className="px-1.5 py-1 text-right font-medium">明細</th>
@@ -487,8 +488,10 @@ function TapPerformanceTab() {
           <div>
             <dt className="font-semibold text-zinc-300">紹介報酬</dt>
             <dd>
-              THREEの紹介制度により紹介者へ発生した報酬です。成果報酬ベースに対する
-              社内ルール（5%）で計算しており、TAPの料率とは別のものです。
+              THREEの紹介制度により紹介者へ発生した報酬です。左の
+              <span className="font-semibold text-zinc-300">THREE報酬</span>
+              に対する5%で、成果報酬ベースからは計算しません
+              （ボーナスも含めません）。
             </dd>
           </div>
         </dl>

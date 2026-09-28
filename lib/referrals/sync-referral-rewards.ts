@@ -39,8 +39,12 @@ import {
 */
 export const REFERRAL_SOURCE_TABLE = "tap_affiliate_order_lines" as const;
 
+/*
+  紹介報酬の算定基礎は W + X（THREE の取り分）。
+  commission_base は対象明細の判定に使うので引き続き読む。
+*/
 const ORDER_LINE_COLUMNS =
-  "source_row_key, order_id, product_id, creator_id, target_month, commission_base, payment_status, order_status, refund_status";
+  "source_row_key, order_id, product_id, creator_id, target_month, commission_base, partner_estimated_commission, partner_shop_ads_estimated_commission, payment_status, order_status, refund_status";
 
 const UPSERT_CHUNK_SIZE = 500;
 

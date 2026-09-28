@@ -1,8 +1,21 @@
 /*
   紹介者報酬エンジン（Single Source of Truth）
 
-  ■ 計算元
-  affiliate_order_lines。base は commission_base。
+  ■ 計算元（2026-09-29 業務ルール確定）
+  tap_affiliate_order_lines。
+  算定基礎は「THREE COMMERCE に実際に発生する成果報酬」で、
+
+      base = partner_estimated_commission           （Excel W列）
+           + partner_shop_ads_estimated_commission  （Excel X列）
+
+  以前は commission_base（成果報酬GMVベース）に 5% を掛けていたが、
+  これは誤りだった。commission_base は各率を掛ける前の基礎額であって
+  THREE の取り分ではない。TAP の partner 率は行ごとに 1〜10% と幅があり、
+  1% の注文でも base の 5% を払っていたため逆ざやが出ていた
+  （実測 6,722 件中 4,925 件で紹介報酬が THREE の取り分を上回っていた）。
+
+  ボーナス（partner_bonus_estimated_commission）は含めない。
+  tap_revenue はボーナスを含む合計なので、そのまま基礎額に使わない。
 
   ■ 対象明細
   order_status   = 決済済み
@@ -25,9 +38,9 @@
   暦年（1月〜12月）単位の未払い累積が 1,000円以上で支払対象。
   1,000円未満は明細を残したまま翌月へ繰越。
 
-  ■ 検証値（2026-05〜2026-08）
-  eligible commission base = 2,309,135 円
-  referral reward          =   115,456.75 円
+  ■ 検証値（2026-01〜2026-07 / TAP）
+  W 合計 = 446,357 円 / X 合計 = 148,100 円 / W+X = 594,457 円
+  referral reward = 29,722.85 円（W+X ちょうど 5.0000%）
 */
 
 import { isReferralRewardEligibleType } from "@/lib/creators/account-management-type";
@@ -61,7 +74,16 @@ export type ReferralOrderLine = {
   product_id: string | null;
   creator_id: string | null;
   target_month: string | null;
+  /**
+   * 成果報酬ベース（Excel「成果報酬ベース」）。
+   * 各率を掛ける前の基礎額で、対象明細の判定にだけ使う。
+   * 紹介報酬の算定基礎ではない（referralBaseAmount を使うこと）。
+   */
   commission_base: number | string | null;
+  /** Excel W列「アフィリエイトパートナー推定成果報酬」 */
+  partner_estimated_commission?: number | string | null;
+  /** Excel X列「アフィリエイトパートナーショップ広告の推定成果報酬」 */
+  partner_shop_ads_estimated_commission?: number | string | null;
   payment_status: string | null;
   order_status: string | null;
   refund_status: string | null;
@@ -77,6 +99,34 @@ export type ReferralCreatorConfig = {
 export function isReferralTargetCreator(config: ReferralCreatorConfig): boolean {
   if (!config.referrerId) return false;
   return isReferralRewardEligibleType(config.accountManagementType);
+}
+
+/*
+  紹介報酬の算定基礎額。ここが唯一の入口。
+
+  W + X = THREE COMMERCE に実際に発生する成果報酬。
+  ボーナスは含めない。tap_revenue（W + X + ボーナス）も使わない。
+
+  今は W と X が同じ行で両方 0 より大きくなることは無い（Production の
+  22,169 行で実測 0 件）が、片方を選ぶ実装にすると将来両方出たときに
+  どちらを採るかの判断が要る。合計にしておけば「THREE の取り分の 5%」
+  という業務ルールがそのまま式になり、その場合も正しく動く。
+
+  この関数以外で W や X から基礎額を組み立てないこと
+  （dry-run と本番で食い違う元になる）。
+*/
+export function referralBaseAmount(line: {
+  partner_estimated_commission?: number | string | null;
+  partner_shop_ads_estimated_commission?: number | string | null;
+}): number {
+  const partner = Number(line.partner_estimated_commission ?? 0);
+  const shopAds = Number(line.partner_shop_ads_estimated_commission ?? 0);
+
+  const total =
+    (Number.isFinite(partner) ? partner : 0) +
+    (Number.isFinite(shopAds) ? shopAds : 0);
+
+  return Number.isFinite(total) ? total : 0;
 }
 
 /**
@@ -207,7 +257,13 @@ export function computeReferralReward(
   if (!isReferralTargetCreator(config)) return null;
   if (!isPayoutEligibleOrderLine(line)) return null;
 
-  const baseAmount = Number(line.commission_base ?? 0);
+  /*
+    算定基礎は THREE の取り分（W + X）。commission_base ではない。
+
+    commission_base は対象明細の判定（isTapReferralSourceLine）で
+    使い続けるが、金額の根拠にはしない。
+  */
+  const baseAmount = referralBaseAmount(line);
   if (!Number.isFinite(baseAmount) || baseAmount <= 0) return null;
 
   return {

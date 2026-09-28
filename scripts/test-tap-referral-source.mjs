@@ -99,6 +99,12 @@ function tapLine(overrides = {}) {
     creator_id: "creator-uuid",
     target_month: "2026-07",
     commission_base: 10000,
+    /*
+      紹介報酬の算定基礎は W + X。対象行の判定は commission_base のままなので、
+      既定では両方に値を入れて、どちらのテストも素直に書けるようにする。
+    */
+    partner_estimated_commission: 10000,
+    partner_shop_ads_estimated_commission: 0,
     payment_status: "支払い済み",
     order_status: "決済済み",
     refund_status: "いいえ",
@@ -147,9 +153,13 @@ test("Production に実在する状態値をすべて判定できる", () => {
 // -----------------------------------------------------------------------------
 // 計算
 // -----------------------------------------------------------------------------
-test("報酬は commission_base × 料率（既定 5%）", () => {
+test("報酬は THREE報酬（W+X）× 料率（既定 5%）", () => {
+  /*
+    2026-09-29 改定。以前は commission_base × 5% だったが、
+    commission_base は各率を掛ける前の基礎額で THREE の取り分ではない。
+  */
   const computed = engine.computeReferralReward(
-    tapLine({ commission_base: 12345 }),
+    tapLine({ commission_base: 12345, partner_estimated_commission: 12345 }),
     { creatorId: "c", referrerId: "r", accountManagementType: "standard" },
     engine.REFERRAL_REWARD_RATE,
   );
@@ -160,7 +170,7 @@ test("報酬は commission_base × 料率（既定 5%）", () => {
 
 test("個別料率が設定されていればそれを使う", () => {
   const computed = engine.computeReferralReward(
-    tapLine({ commission_base: 10000 }),
+    tapLine({ commission_base: 10000, partner_estimated_commission: 10000 }),
     { creatorId: "c", referrerId: "r", accountManagementType: "standard" },
     engine.resolveReferralRate(0.1),
   );
@@ -880,4 +890,194 @@ test("取込の完了で紹介報酬の再集計を走らせない", () => {
   const code = codeOnly(IMPORT_SOURCE);
   assert.equal(code.includes("syncReferralRewards"), false);
   assert.equal(code.includes("referral_reward_items"), false);
+});
+
+// =============================================================================
+// 紹介報酬の算定基礎（2026-09-29 業務ルール確定）
+// =============================================================================
+/*
+  紹介報酬は THREE COMMERCE に実際に発生する成果報酬の 5%。
+
+      base = partner_estimated_commission           （Excel W列）
+           + partner_shop_ads_estimated_commission  （Excel X列）
+
+  commission_base（成果報酬GMVベース）ではない。
+  TAP の partner 率は行ごとに 1〜10% と幅があり、以前は 1% の注文にも
+  base の 5% を払っていたため逆ざやが出ていた。
+  ボーナスは含めない（tap_revenue はボーナス込みなので使わない）。
+*/
+function rewardLine(over = {}) {
+  return {
+    source_row_key: "key-1",
+    order_id: "order-1",
+    product_id: "product-1",
+    creator_id: "creator-1",
+    target_month: "2026-06",
+    commission_base: 10000,
+    partner_estimated_commission: 0,
+    partner_shop_ads_estimated_commission: 0,
+    payment_status: "支払い済み",
+    order_status: "決済済み",
+    refund_status: "いいえ",
+    ...over,
+  };
+}
+
+const STANDARD_CREATOR = {
+  creatorId: "creator-1",
+  referrerId: "referrer-1",
+  accountManagementType: "standard",
+};
+
+test("算定基礎: W のみ（W=1680 / X=0 → base 1680 / reward 84）", () => {
+  const line = rewardLine({ partner_estimated_commission: 1680 });
+  assert.equal(engine.referralBaseAmount(line), 1680);
+
+  const computed = engine.computeReferralReward(line, STANDARD_CREATOR);
+  assert.equal(computed.baseAmount, 1680);
+  assert.equal(computed.rewardAmount, 84);
+});
+
+test("算定基礎: X のみ（W=0 / X=265 → base 265 / reward 13.25）", () => {
+  const line = rewardLine({ partner_shop_ads_estimated_commission: 265 });
+  assert.equal(engine.referralBaseAmount(line), 265);
+
+  const computed = engine.computeReferralReward(line, STANDARD_CREATOR);
+  assert.equal(computed.baseAmount, 265);
+  assert.equal(computed.rewardAmount, 13.25);
+});
+
+test("算定基礎: W と X の両方（将来の安全性。100+50 → base 150 / reward 7.5）", () => {
+  const line = rewardLine({
+    partner_estimated_commission: 100,
+    partner_shop_ads_estimated_commission: 50,
+  });
+  assert.equal(engine.referralBaseAmount(line), 150);
+
+  const computed = engine.computeReferralReward(line, STANDARD_CREATOR);
+  assert.equal(computed.baseAmount, 150);
+  assert.equal(computed.rewardAmount, 7.5);
+});
+
+test("ボーナスは算定基礎へ入れない", () => {
+  const line = rewardLine({
+    partner_estimated_commission: 100,
+    partner_shop_ads_estimated_commission: 50,
+    partner_bonus_estimated_commission: 500,
+    tap_revenue: 650,
+  });
+  assert.equal(engine.referralBaseAmount(line), 150, "ボーナスが混ざっている");
+
+  const computed = engine.computeReferralReward(line, STANDARD_CREATOR);
+  assert.equal(computed.baseAmount, 150);
+  assert.equal(computed.rewardAmount, 7.5, "ボーナス込みで計算している");
+});
+
+test("commission_base が大きくても W/X だけで計算する（退行防止）", () => {
+  /*
+    旧実装は commission_base × 5% だった。
+    10,000 × 5% = 500 になってしまう経路が残っていたらここで落ちる。
+  */
+  const line = rewardLine({
+    commission_base: 10000,
+    partner_estimated_commission: 100,
+  });
+  const computed = engine.computeReferralReward(line, STANDARD_CREATOR);
+
+  assert.equal(computed.baseAmount, 100);
+  assert.equal(computed.rewardAmount, 5);
+  assert.notEqual(computed.rewardAmount, 500, "commission_base から計算している");
+});
+
+test("W も X も 0 なら報酬を作らない", () => {
+  assert.equal(engine.referralBaseAmount(rewardLine()), 0);
+  assert.equal(engine.computeReferralReward(rewardLine(), STANDARD_CREATOR), null);
+});
+
+test("報酬は算定基礎を超えない（逆ざやが出ない）", () => {
+  for (const [w, x] of [[1680, 0], [0, 265], [100, 50], [1, 0]]) {
+    const computed = engine.computeReferralReward(
+      rewardLine({
+        partner_estimated_commission: w,
+        partner_shop_ads_estimated_commission: x,
+      }),
+      STANDARD_CREATOR,
+    );
+    if (!computed) continue;
+    assert.ok(
+      computed.rewardAmount <= computed.baseAmount,
+      `報酬が基礎額を超えた: W=${w} X=${x}`,
+    );
+  }
+});
+
+test("self_operated には報酬を作らない（既存ルール維持）", () => {
+  const line = rewardLine({ partner_estimated_commission: 1680 });
+  for (const type of ["self_operated", "account_lending"]) {
+    assert.equal(
+      engine.computeReferralReward(line, { ...STANDARD_CREATOR, accountManagementType: type }),
+      null,
+      `${type} に報酬が出ている`,
+    );
+  }
+});
+
+test("紹介者が無ければ報酬を作らない（既存ルール維持）", () => {
+  const line = rewardLine({ partner_estimated_commission: 1680 });
+  assert.equal(
+    engine.computeReferralReward(line, { ...STANDARD_CREATOR, referrerId: null }),
+    null,
+  );
+});
+
+test("5% を直接書かず REFERRAL_REWARD_RATE を使う", () => {
+  assert.equal(engine.REFERRAL_REWARD_RATE, 0.05);
+  const line = rewardLine({ partner_estimated_commission: 1000 });
+  assert.equal(
+    engine.computeReferralReward(line, STANDARD_CREATOR).rewardRate,
+    engine.REFERRAL_REWARD_RATE,
+  );
+});
+
+test("base_amount には W+X を保存する", () => {
+  const code = codeOnly(SYNC_SOURCE);
+  assert.match(
+    code,
+    /base_amount: computed\.baseAmount/,
+    "算定基礎を保存していない",
+  );
+  assert.equal(
+    /base_amount: .*commission_base/.test(code),
+    false,
+    "commission_base を base_amount へ保存している",
+  );
+});
+
+test("算定基礎の組み立ては1か所だけ（dry-run と本番で食い違わせない）", () => {
+  const sync = codeOnly(SYNC_SOURCE);
+  const dryRun = codeOnly(
+    fs.readFileSync(path.join(root, "scripts/dry-run-tap-referral-rewards.mjs"), "utf8"),
+  );
+
+  for (const [label, code] of [["sync", sync], ["dry-run", dryRun]]) {
+    assert.equal(
+      /partner_estimated_commission\s*[+]/.test(code),
+      false,
+      `${label} が算定基礎を自前で組み立てている`,
+    );
+    assert.equal(
+      /tap_revenue/.test(code),
+      false,
+      `${label} が tap_revenue を基礎額に使っている`,
+    );
+    assert.equal(
+      /partner_bonus/.test(code),
+      false,
+      `${label} がボーナスを参照している`,
+    );
+  }
+
+  // 読み出す列には W/X が含まれる
+  assert.match(sync, /partner_estimated_commission, partner_shop_ads_estimated_commission/);
+  assert.match(dryRun, /partner_estimated_commission, partner_shop_ads_estimated_commission/);
 });

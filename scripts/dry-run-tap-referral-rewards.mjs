@@ -5,6 +5,13 @@
   SELECT のみ。referral_reward_items の INSERT / UPDATE / DELETE は行わない。
   支払明細の作成・claim・承認も行わない。
 
+  ■ 紹介報酬の算定基礎（2026-09-29 確定）
+  THREE COMMERCE の取り分 = Excel W列「アフィリエイトパートナー推定成果報酬」
+  ＋ X列「アフィリエイトパートナーショップ広告の推定成果報酬」。
+  commission_base（成果報酬GMVベース）ではない。ボーナスも含めない。
+  式は referral-reward-engine.ts の referralBaseAmount が唯一の入口で、
+  ここで組み立て直さない（本番と食い違う）。
+
   ■ アプリと同じ判定を使う
   対象行の条件は lib/referrals/tap-referral-source.ts、
   金額は lib/referrals/referral-reward-engine.ts、
@@ -66,7 +73,7 @@ console.log("");
 const tapResult = await paged.fetchAllFrom(
   supabase,
   "tap_affiliate_order_lines",
-  "source_row_key, order_id, product_id, creator_id, creator_tiktok_id, target_month, commission_base, payment_status, order_status, refund_status",
+  "source_row_key, order_id, product_id, creator_id, creator_tiktok_id, target_month, commission_base, partner_estimated_commission, partner_shop_ads_estimated_commission, payment_status, order_status, refund_status",
   (q) => q,
 );
 if (tapResult.error) {
@@ -127,7 +134,7 @@ const tapRows = tapResult.data.filter((r) => r.target_month && r.target_month <=
 const months = [...new Set(tapResult.data.map((r) => r.target_month))].filter(Boolean).sort();
 
 console.log("【1】TAP の月別（現在 Production に入っている分）");
-console.log("月        総行数   有効行   対象外   紹介関係あり  紹介者数  base合計            報酬額");
+console.log("月        総行数   有効行   対象外   紹介関係あり  紹介者数  THREE報酬(W+X)      報酬額");
 const monthTotals = [];
 const candidates = [];
 const unknownCreators = new Map();
@@ -314,7 +321,7 @@ const referrerRows = [...byReferrer.entries()]
   })
   .sort((a, b) => b.reward - a.reward);
 
-console.log("紹介者              件数  creator  対象月                 率      base合計           報酬額");
+console.log("紹介者              件数  creator  対象月                 率      THREE報酬(W+X)     報酬額");
 for (const r of referrerRows) {
   console.log(
     `${r.name.slice(0, 17).padEnd(18)} ${String(r.items).padStart(5)} ${String(r.creators).padStart(8)}  ${r.months.map((m) => m.slice(5)).join(",").padEnd(20)} ${r.rates.join(",").padEnd(6)} ${yen(r.base).padStart(16)} ${yen(r.reward).padStart(14)}${r.inHouse ? " [自社]" : ""}`,

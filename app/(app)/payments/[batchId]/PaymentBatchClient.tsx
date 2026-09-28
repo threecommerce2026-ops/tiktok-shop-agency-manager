@@ -519,7 +519,7 @@ export function PaymentBatchClient({
             title="旧仕様：紹介制度報酬"
             totalAmount={detail.referralRewardAmount}
             baseLabel="紹介計算基準額"
-            baseHint="紹介制度報酬の計算対象となる成果報酬ベースです。"
+            baseHint="紹介制度報酬の算定基礎（THREE COMMERCE に発生する成果報酬）です。"
             rateLabel="紹介率"
             amountLabel="紹介制度報酬"
             amountHint="紹介計算基準額に紹介率を適用した報酬です。現在は代理店へ支払いません。"

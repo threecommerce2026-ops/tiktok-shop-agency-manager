@@ -28,7 +28,11 @@ export type TapReferralSourceLine = OrderLineStatusFields & {
   product_id: string | null;
   creator_id: string | null;
   target_month: string | null;
-  /** 紹介者報酬の計算基準額。TAP の「成果報酬ベース」 */
+  /**
+   * TAP の「成果報酬ベース」。
+   * 対象明細かどうかの判定にだけ使う。紹介報酬の算定基礎ではない
+   * （算定基礎は referral-reward-engine.ts の referralBaseAmount = W+X）。
+   */
   commission_base: number | string | null;
 };
 

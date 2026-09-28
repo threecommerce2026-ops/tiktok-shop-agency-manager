@@ -894,7 +894,7 @@ export type PaymentBatchItemRow = {
   creatorId: string;
   creatorName: string;
   tiktokId: string;
-  /** 報酬計算元（代理店=成果報酬ベース / 紹介者=紹介報酬のベース額） */
+  /** 報酬計算元（代理店=成果報酬ベース / 紹介者=THREE報酬 W+X） */
   baseAmount: number;
   /** 報酬率(%)。代理店は表示専用（掛け算には使わない） */
   ratePct: number;
@@ -922,7 +922,7 @@ export type PaymentRewardMonthRow = {
   targetMonth: string;
   /** 参考値。分配・紹介いずれの計算基準でもない */
   gmv: number;
-  /** 代理店=creator_revenue_before_split(AJ) / 紹介=base_amount(AD) */
+  /** 代理店=creator_revenue_before_split(AJ) / 紹介=base_amount（THREE報酬 W+X） */
   baseAmount: number;
   /** 代理店=agency_split_rate(%) / 紹介=reward_rate を % 化した値 */
   ratePct: number;
