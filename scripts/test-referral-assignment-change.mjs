@@ -225,7 +225,14 @@ test("保存時に履歴を書く", () => {
 // =============================================================================
 test("12. 確定済みの月に影響する変更をブロックする", () => {
   assert.match(PLAN, /"settlement_finalized"/);
-  assert.match(PLAN, /\.eq\("status", "finalized"\)/);
+  /*
+    確定状況は list_referral_month_settlements() から取り、
+    status が finalized の月だけを影響範囲と突き合わせる。
+    （以前はテーブルを直接 .eq("status","finalized") で引いていたが、
+     authenticated に SELECT が無く permission denied になった）
+  */
+  assert.match(PLAN, /supabase\.rpc\("list_referral_month_settlements"\)/);
+  assert.match(PLAN, /row\.status === "finalized"/);
   assert.match(PLAN, /blocks\.push\("settlement_finalized"\)/);
 });
 
@@ -322,9 +329,21 @@ test("18. 保存で紹介報酬を作り直さない", () => {
 });
 
 test("18-b. plan は読むだけ", () => {
-  for (const forbidden of [/\.update\(/, /\.insert\(/, /\.upsert\(/, /\.delete\(/, /\.rpc\(/]) {
+  for (const forbidden of [/\.update\(/, /\.insert\(/, /\.upsert\(/, /\.delete\(/]) {
     assert.equal(forbidden.test(PLAN), false, `plan が書き込んでいる: ${forbidden}`);
   }
+
+  /*
+    RPC は読み取り専用のものだけ許す。
+    list_referral_month_settlements は stable で、確定状況を返すだけ。
+    finalize / unfinalize のような状態を変える RPC を呼ばないこと。
+  */
+  const rpcs = [...PLAN.matchAll(/\.rpc\("([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(
+    rpcs,
+    ["list_referral_month_settlements"],
+    `読み取り専用でない RPC を呼んでいる: ${rpcs.join(", ")}`,
+  );
 });
 
 test("19. 無関係なテーブルへ触らない", () => {
@@ -460,4 +479,78 @@ test("UI: 一括編集は creator ごとに開始月を持つ", () => {
     false,
     "一括選択で開始月をまとめて設定している",
   );
+});
+
+// =============================================================================
+// 権限を持たないテーブルを直接読まない
+// =============================================================================
+/*
+  referral_month_settlements は authenticated / service_role に SELECT が
+  grant されていない（postgres のみ）。直接 .from() で引くと実行時に
+  permission denied になり、画面の「変更内容を確認」が壊れる。
+
+  実際にこの経路で発生したので、書き込みだけでなく「読み取り」も
+  検査する。権限を緩めて直すのではなく、既存の security definer RPC を
+  使う設計を固定する。
+*/
+test("settlement をテーブルから直接読まない（RPC を使う）", () => {
+  assert.equal(
+    /\.from\("referral_month_settlements"\)/.test(PLAN),
+    false,
+    "権限の無いテーブルを直接 SELECT している（permission denied になる）",
+  );
+  assert.match(
+    PLAN,
+    /supabase\.rpc\("list_referral_month_settlements"\)/,
+    "既存の安全な RPC を使っていない",
+  );
+});
+
+test("finalized の判定は RPC の status から行う", () => {
+  assert.match(
+    PLAN,
+    /\.filter\(\(row\) => row\.status === "finalized"\)/,
+    "RPC の結果から finalized を絞っていない",
+  );
+});
+
+test("プレビューと保存が同じ判定を通る", () => {
+  /*
+    プレビューだけ直して保存側が permission denied、という状態を防ぐ。
+    どちらも buildReferralChangePlan を呼び、その中の1か所だけが
+    settlement を読む。
+  */
+  const rpcCalls = PLAN.match(/list_referral_month_settlements/g) ?? [];
+  assert.equal(rpcCalls.length, 1, "settlement の読み取りが複数箇所にある");
+
+  assert.match(UPDATE, /previewReferralChangeAction/, "プレビューの入口が無い");
+  for (const [label, source] of [["プレビュー", UPDATE], ["一括編集", BULK]]) {
+    assert.match(
+      source,
+      /buildReferralChangePlan\(/,
+      `${label} が共通の判定を使っていない`,
+    );
+  }
+  // プレビューも保存も同じ関数を呼ぶ
+  const previewBlock = UPDATE.slice(
+    UPDATE.indexOf("export async function previewReferralChangeAction"),
+    UPDATE.indexOf("export async function updateCreatorMasterAction"),
+  );
+  assert.match(previewBlock, /buildReferralChangePlan\(auth\.supabase/);
+});
+
+test("settlement の権限を緩める変更を入れていない", () => {
+  const { readdirSync } = require("node:fs");
+  const dir = path.join(root, "supabase/migrations");
+  for (const file of readdirSync(dir)) {
+    const sql = readFileSync(path.join(dir, file), "utf8");
+    if (!/referral_month_settlements/.test(sql)) continue;
+    assert.equal(
+      /grant\s+select[^;]*on\s+(table\s+)?public\.referral_month_settlements[^;]*to\s+(authenticated|anon)/i.test(
+        sql,
+      ),
+      false,
+      `${file} が settlement に SELECT を grant している`,
+    );
+  }
 });

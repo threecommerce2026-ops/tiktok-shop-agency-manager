@@ -33,6 +33,11 @@ import { isTapReferralSourceLine } from "@/lib/referrals/tap-referral-source";
       referral_reward_items.payout_id is not null
       referral_reward_items.is_paid = true
 
+  ■ 月次確定は RPC 経由で読む
+  referral_month_settlements は authenticated に SELECT が grant されて
+  いない。権限を緩めるのではなく、既存の list_referral_month_settlements()
+  を使う（security definer / 管理者限定）。
+
   ■ ここでは報酬を作り直さない
   影響額は参考値として出すだけ。実際の再集計は別の操作
   （syncReferralRewardsForMonth）で行う。保存の副作用で金額が動くと、
@@ -307,13 +312,16 @@ export async function buildReferralChangePlan(
       (query) => query.eq("creator_id", creatorId),
     ),
     /*
-      settlement は行が無い月も未確定として扱われるので、
-      finalized の行だけを引けば十分。
+      月次確定は RPC 経由で読む。
+
+      referral_month_settlements は authenticated / service_role に
+      SELECT が grant されていない（postgres のみ）。直接 .from() で
+      引くと permission denied になる。読み書きとも security definer の
+      RPC が唯一の入口という設計なので、ここも既存のものを再利用する。
+
+      行が無い月は未確定として扱われるため、finalized の月だけ拾えばよい。
     */
-    supabase
-      .from("referral_month_settlements")
-      .select("target_month, status")
-      .eq("status", "finalized"),
+    supabase.rpc("list_referral_month_settlements"),
   ]);
 
   const aggregateError =
@@ -346,7 +354,10 @@ export async function buildReferralChangePlan(
   const tapThreeRevenue = sumReferralAmounts(threeRevenues);
 
   // ---- 現況（ブロック判定の材料）-------------------------------------------
-  const finalizedMonths = ((settlementsResult.data ?? []) as Array<{ target_month: string }>)
+  const finalizedMonths = (
+    (settlementsResult.data ?? []) as Array<{ target_month: string; status: string }>
+  )
+    .filter((row) => row.status === "finalized")
     .map((row) => String(row.target_month))
     .filter((month) => inAffected(month))
     .sort();
