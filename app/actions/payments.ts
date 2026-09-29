@@ -327,6 +327,143 @@ export async function fetchTapCreatorOverviewAction(): Promise<TapCreatorOvervie
 }
 
 // =============================================================================
+// 紹介者報酬の月次確定
+// =============================================================================
+/*
+  紹介者への支払は「その月が確定済みであること」を前提にしている
+  （claim_payment_batch_items が assert_referral_months_finalized を呼ぶ）。
+  その確定状態を切り替える唯一の入口。
+
+  referral_month_settlements は authenticated / service_role に
+  SELECT も UPDATE も grant されていない。読み書きとも security definer の
+  RPC だけを通す。ここからテーブルを直接触らない。
+
+  月を固定しない。どの月を確定するかは操作者が選ぶ。
+*/
+export type ReferralMonthSettlementRow = {
+  targetMonth: string;
+  status: string;
+  note: string | null;
+  finalizedAt: string | null;
+  finalizedBy: string | null;
+  finalizedByEmail: string | null;
+  rewardItemCount: number;
+  rewardAmount: number;
+  referrerCount: number;
+  /** 支払明細へ組み入れ済み / payout 紐付き */
+  claimedItemCount: number;
+  paidItemCount: number;
+};
+
+export type ReferralSettlementListResult =
+  | { ok: true; rows: ReferralMonthSettlementRow[] }
+  | { ok: false; error: string };
+
+export async function fetchReferralMonthSettlementsAction(): Promise<ReferralSettlementListResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const { data, error } = await auth.supabase.rpc(
+    "list_referral_month_settlements",
+  );
+
+  if (error) {
+    return { ok: false, error: describeRpcError(error.message, error.code) };
+  }
+
+  const rows: ReferralMonthSettlementRow[] = (
+    (data as Array<Record<string, unknown>> | null) ?? []
+  ).map((row) => ({
+    targetMonth: String(row.target_month ?? ""),
+    status: String(row.status ?? "unfinalized"),
+    note: (row.note as string | null) ?? null,
+    finalizedAt: (row.finalized_at as string | null) ?? null,
+    finalizedBy: (row.finalized_by as string | null) ?? null,
+    finalizedByEmail: (row.finalized_by_email as string | null) ?? null,
+    rewardItemCount: Number(row.reward_item_count ?? 0),
+    rewardAmount: Number(row.reward_amount ?? 0),
+    referrerCount: Number(row.referrer_count ?? 0),
+    claimedItemCount: Number(row.claimed_item_count ?? 0),
+    paidItemCount: Number(row.paid_item_count ?? 0),
+  }));
+
+  return { ok: true, rows };
+}
+
+export type ReferralSettlementActionResult =
+  | { ok: true; message: string; targetMonth: string; status: string }
+  | { ok: false; error: string };
+
+async function updateReferralSettlement(
+  formData: FormData,
+  mode: "finalize" | "unfinalize",
+): Promise<ReferralSettlementActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const targetMonth = readText(formData, "targetMonth");
+
+  if (!isMonthKey(targetMonth)) {
+    return {
+      ok: false,
+      error: `対象月を YYYY-MM 形式で指定してください: ${targetMonth || "(未指定)"}`,
+    };
+  }
+
+  const { data, error } = await auth.supabase.rpc(
+    mode === "finalize" ? "finalize_referral_month" : "unfinalize_referral_month",
+    { p_target_month: targetMonth },
+  );
+
+  if (error) {
+    return { ok: false, error: describeRpcError(error.message, error.code) };
+  }
+
+  const row = ((data as Array<Record<string, unknown>> | null) ?? [])[0] ?? {};
+  const status = String(row.status ?? "");
+
+  revalidatePaymentViews();
+
+  if (mode === "finalize") {
+    const already = row.already_finalized === true;
+    return {
+      ok: true,
+      targetMonth,
+      status,
+      message: already
+        ? `${formatCutoffLabel(targetMonth)}締めは既に確定済みです（確定情報は変更していません）。`
+        : `${formatCutoffLabel(targetMonth)}締めを確定しました。この月は支払処理の対象にできます。`,
+    };
+  }
+
+  const released = row.released === true;
+  return {
+    ok: true,
+    targetMonth,
+    status,
+    message: released
+      ? `${formatCutoffLabel(targetMonth)}締めの確定を解除しました。`
+      : `${formatCutoffLabel(targetMonth)}締めは確定されていません。`,
+  };
+}
+
+/** 紹介者報酬の対象月を確定する */
+export async function finalizeReferralMonthAction(
+  _prev: ReferralSettlementActionResult | null,
+  formData: FormData,
+): Promise<ReferralSettlementActionResult> {
+  return updateReferralSettlement(formData, "finalize");
+}
+
+/** 紹介者報酬の対象月の確定を解除する */
+export async function unfinalizeReferralMonthAction(
+  _prev: ReferralSettlementActionResult | null,
+  formData: FormData,
+): Promise<ReferralSettlementActionResult> {
+  return updateReferralSettlement(formData, "unfinalize");
+}
+
+// =============================================================================
 // 支払明細の作成
 // =============================================================================
 

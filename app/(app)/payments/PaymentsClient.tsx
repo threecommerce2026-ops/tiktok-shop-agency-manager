@@ -13,13 +13,18 @@ import {
   clearReferralPaymentHoldAction,
   createPaymentBatchAction,
   exportPaymentCsvAction,
+  fetchReferralMonthSettlementsAction,
   fetchReferrerRewardDetailAction,
   fetchTapCreatorOverviewAction,
+  finalizeReferralMonthAction,
+  unfinalizeReferralMonthAction,
   setReferralPaymentHoldAction,
   type BulkApproveResult,
   type PaymentActionResult,
   type PaymentCsvActionResult,
   type ReferralHoldActionResult,
+  type ReferralMonthSettlementRow,
+  type ReferralSettlementActionResult,
 } from "@/app/actions/payments";
 import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
 import type {
@@ -338,6 +343,228 @@ function ReferralBreakdown({
   注文や月別まで追うときは「内訳を見る」を使う。
 */
 const VISIBLE_CREATOR_COUNT = 3;
+
+/*
+  紹介者報酬の月次確定。
+
+  claim_payment_batch_items は「開始月から締め月までのすべての月が
+  finalized」を要求する。明細が 0 件の月も対象なので、
+  0件・0円の月もここから確定できるようにする（黙って飛ばさない）。
+
+  ■ 押す前に中身を見せる
+  月だけを見せて押させると、誤った月を確定しても気づけない。
+  件数と金額を確認ダイアログへ必ず出す。
+
+  ■ 解除はサーバー側でも守る
+  支払処理へ進んだ月は戻せない。ここでボタンを disabled にするのは
+  見た目の話で、実際の歯止めは unfinalize_referral_month が持つ。
+*/
+const SETTLEMENT_STATUS_LABEL: Record<string, string> = {
+  unfinalized: "未確定",
+  ready: "確定準備",
+  finalized: "確定済み",
+};
+
+function SettlementStatusBadge({ status }: { status: string }) {
+  const cls =
+    status === "finalized"
+      ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300"
+      : "border-white/[0.1] bg-white/[0.04] text-zinc-400";
+
+  return (
+    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] ${cls}`}>
+      {SETTLEMENT_STATUS_LABEL[status] ?? status}
+    </span>
+  );
+}
+
+function ReferralSettlementSection() {
+  const [rows, setRows] = useState<ReferralMonthSettlementRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const [result, setResult] = useState<ReferralSettlementActionResult | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    const listed = await fetchReferralMonthSettlementsAction();
+    setLoading(false);
+    if (listed.ok) setRows(listed.rows);
+    else setError(listed.error);
+  };
+
+  /*
+    操作したら必ず一覧を取り直す。確定済みの月に古い状態が残ると、
+    二重に押せてしまったように見える。
+  */
+  const run = async (
+    action: (
+      prev: ReferralSettlementActionResult | null,
+      formData: FormData,
+    ) => Promise<ReferralSettlementActionResult>,
+    targetMonth: string,
+  ) => {
+    setPending(targetMonth);
+    setResult(null);
+
+    const formData = new FormData();
+    formData.set("targetMonth", targetMonth);
+
+    const actionResult = await action(null, formData);
+    setResult(actionResult);
+    setConfirming(null);
+    setPending(null);
+
+    if (actionResult.ok) await load();
+  };
+
+  return (
+    <section className="space-y-3 rounded-xl border border-white/[0.08] bg-surface-1 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-100">紹介報酬の月次確定</h2>
+          <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+            紹介者へ支払うには、開始月から締め月までの
+            <span className="font-semibold text-zinc-300">すべての月</span>
+            が確定済みである必要があります。報酬が 0 件の月も確定が必要です。
+            確定しても報酬額は変わりません。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="min-h-[32px] shrink-0 rounded-lg border border-white/[0.12] px-3 text-xs text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+        >
+          {loading ? "読み込み中…" : rows ? "再読み込み" : "確定状況を表示"}
+        </button>
+      </div>
+
+      {error ? (
+        <p className="text-[11px] leading-relaxed text-red-300">{error}</p>
+      ) : null}
+      {result ? (
+        <p
+          className={`text-[11px] leading-relaxed ${
+            result.ok ? "text-emerald-300" : "text-red-300"
+          }`}
+        >
+          {result.ok ? result.message : result.error}
+        </p>
+      ) : null}
+
+      {rows ? (
+        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <table className="min-w-[860px] w-full border-collapse text-[11px]">
+            <thead>
+              <tr className="text-left text-zinc-500">
+                <th className="px-2 py-1.5 font-medium">対象月</th>
+                <th className="px-2 py-1.5 font-medium">状態</th>
+                <th className="px-2 py-1.5 text-right font-medium">紹介報酬件数</th>
+                <th className="px-2 py-1.5 text-right font-medium">紹介報酬額</th>
+                <th className="px-2 py-1.5 font-medium">確定日時</th>
+                <th className="px-2 py-1.5 font-medium">確定者</th>
+                <th className="px-2 py-1.5 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const locked = row.claimedItemCount > 0 || row.paidItemCount > 0;
+                return (
+                  <tr key={row.targetMonth} className="border-t border-zinc-800/70 align-top">
+                    <td className="px-2 py-1.5 font-mono text-zinc-200">{row.targetMonth}</td>
+                    <td className="px-2 py-1.5">
+                      <SettlementStatusBadge status={row.status} />
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono text-zinc-300">
+                      {int(row.rewardItemCount)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono text-zinc-200">
+                      {yen(row.rewardAmount)}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono text-zinc-400">
+                      {row.finalizedAt ? row.finalizedAt.slice(0, 19).replace("T", " ") : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-zinc-400">
+                      {row.finalizedByEmail ?? (row.finalizedBy ? "（不明）" : "—")}
+                    </td>
+                    <td className="px-2 py-1.5 whitespace-normal">
+                      {row.status === "finalized" ? (
+                        locked ? (
+                          <span
+                            className="text-zinc-600"
+                            title="支払明細に組み入れ済み / 支払済みの明細があるため解除できません"
+                          >
+                            解除不可（支払処理済み）
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={pending === row.targetMonth}
+                            onClick={() =>
+                              run(unfinalizeReferralMonthAction, row.targetMonth)
+                            }
+                            className="rounded-lg border border-white/[0.12] px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+                          >
+                            {pending === row.targetMonth ? "解除中…" : "確定を解除"}
+                          </button>
+                        )
+                      ) : confirming === row.targetMonth ? (
+                        <div className="space-y-1.5 rounded-lg border border-amber-400/25 bg-amber-400/5 p-2">
+                          <p className="leading-relaxed text-amber-100">
+                            {row.targetMonth} の紹介報酬を確定します。
+                            <br />
+                            確定後、この月は支払処理の対象にできます。
+                            <br />
+                            件数：<span className="font-mono">{int(row.rewardItemCount)}件</span>
+                            <br />
+                            紹介報酬：<span className="font-mono">{yen(row.rewardAmount)}</span>
+                            <br />
+                            よろしいですか？
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={pending === row.targetMonth}
+                              onClick={() =>
+                                run(finalizeReferralMonthAction, row.targetMonth)
+                              }
+                              className="rounded-lg bg-[var(--accent-cyan)] px-2.5 py-0.5 text-[11px] font-semibold text-black disabled:opacity-50"
+                            >
+                              {pending === row.targetMonth ? "確定中…" : "確定する"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirming(null)}
+                              className="rounded-lg border border-white/[0.12] px-2.5 py-0.5 text-[11px] text-zinc-300 hover:bg-white/[0.06]"
+                            >
+                              やめる
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirming(row.targetMonth)}
+                          className="rounded-lg border border-white/[0.12] px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/[0.06]"
+                        >
+                          確定する
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
+  );
+}
 
 /*
   TAP実績タブ。
@@ -1354,6 +1581,12 @@ export function PaymentsClient({
               />
             </section>
           ) : null}
+
+          {/*
+            紹介者タブでだけ月次確定を出す。代理店の支払はこの確定を
+            前提にしていないので、他タブに置くと関係が誤解される。
+          */}
+          {tab === "referrer" ? <ReferralSettlementSection /> : null}
 
           <section className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
