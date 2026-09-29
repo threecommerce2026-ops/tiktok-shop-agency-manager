@@ -1,9 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { previousMonthOf } from "@/lib/payments/cutoff-month";
 import { DEFAULT_REFERRER_LIFETIME_PAYOUT_CAP_YEN } from "@/lib/referrals/cap";
-import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
+import {
+  isValidTargetMonth,
+  REFERRAL_REWARD_RATE,
+} from "@/lib/referrals/referral-reward-engine";
+import type { ReferralChangePlan } from "@/lib/referrals/referral-assignment-change";
 import type { AssignmentState } from "@/lib/creators/assignment-state";
 
 /*
@@ -12,6 +15,17 @@ import type { AssignmentState } from "@/lib/creators/assignment-state";
   紹介者の「現在値」は creators.referred_by_referrer_id（Single Source of Truth）。
   creator_referrals は料率・期間・生涯上限・履歴を保持する。
   片方だけを更新すると報酬が発生しなくなるため、必ずこの関数を経由すること。
+
+  ■ 適用開始月は呼び出し側が必ず決める（2026-09-29 確定）
+  以前は startMonth 省略時に currentMonthKey() を使っていたため、
+  「登録した月」がそのまま「適用開始月」になっていた。
+  過去月から実績のあるクリエイターを後から登録すると、その過去分に
+  紹介報酬が付かない（__golden_shark__ が 2026-03 から実績があるのに
+  2026-09〜 で登録されていた）。
+
+  暗黙の既定を置くと画面ごとに挙動が変わるので、どの画面からでも
+  開始月を明示させる。紹介リンクからの新規登録のように
+  「登録月＝開始月」が正しい経路も、呼び出し側でその月を渡す。
 */
 
 export type LinkCreatorReferrerParams = {
@@ -19,7 +33,12 @@ export type LinkCreatorReferrerParams = {
   /** null を渡すと紹介者なしにする */
   referrerId: string | null;
   referralRate?: number;
-  startMonth?: string;
+  /**
+   * 適用開始月（YYYY-MM）。必須。
+   * 紹介者を外す場合（referrerId が null）も、旧関係の終了月を
+   * 決めるために「いつから紹介者なしにするか」を渡す。
+   */
+  startMonth: string;
   endMonth?: string | null;
   /**
    * 確認状態。省略時は referrerId から決める
@@ -27,6 +46,22 @@ export type LinkCreatorReferrerParams = {
    * 管理者が「紹介者なし」を選んだ場合だけ "none" を渡すこと。
    */
   assignmentState?: AssignmentState;
+  /**
+   * 変更履歴（creator_referral_logs）を残す場合に渡す。
+   *
+   * 紹介報酬は期間で帰属が決まるので、期間を動かすのは金額を
+   * 動かすのと同じ重みがある。所属側（creator_monthly_agency_assignment_logs）
+   * と同じ粒度で「誰が・いつ・何月分から・どう変えたか」を残す。
+   *
+   * 省略した場合は履歴を残さない（紹介リンクからの自動登録など、
+   * 操作者が居ない経路のため）。
+   */
+  log?: {
+    plan: ReferralChangePlan;
+    actorId: string;
+    actorEmail: string | null;
+    note?: string | null;
+  };
 };
 
 export async function linkCreatorToReferrer(
@@ -35,6 +70,13 @@ export async function linkCreatorToReferrer(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { creatorId, referrerId } = params;
   const nowIso = new Date().toISOString();
+
+  if (!isValidTargetMonth(params.startMonth)) {
+    return {
+      ok: false,
+      error: `適用開始月を YYYY-MM 形式で指定してください: ${params.startMonth || "(未指定)"}`,
+    };
+  }
 
   const assignmentState =
     params.assignmentState ?? (referrerId ? "assigned" : "unconfirmed");
@@ -53,7 +95,7 @@ export async function linkCreatorToReferrer(
   }
 
   const referralRate = params.referralRate ?? REFERRAL_REWARD_RATE;
-  const startMonth = params.startMonth ?? currentMonthKey();
+  const startMonth = params.startMonth;
   const endMonth = params.endMonth ?? null;
 
   /*
@@ -64,18 +106,15 @@ export async function linkCreatorToReferrer(
     過去月の紹介報酬を出すために後続関係から毎回導出することになる
     （lib/referrals/referral-period.ts の復元処理）。
 
-    新しい紹介者が決まっていない場合（referrerId が null）は境界が無いので
-    end_month を書かない。ここで無効化した日から推測すると、
-    DB に無い事実を作ってしまう。
+    紹介者を外す場合も、呼び出し側が「いつから紹介者なしにするか」を
+    渡すので、その前月を終了月にできる。以前はここを空にしていたため
+    「いつまで有効だったか」が残らず、後続関係から毎回導出していた。
   */
   const deactivation: Record<string, unknown> = {
     is_active: false,
+    end_month: previousMonthOf(startMonth),
     updated_at: nowIso,
   };
-
-  if (referrerId) {
-    deactivation.end_month = previousMonthOf(startMonth);
-  }
 
   const deactivate = supabase
     .from("creator_referrals")
@@ -92,7 +131,7 @@ export async function linkCreatorToReferrer(
   }
 
   if (!referrerId) {
-    return { ok: true };
+    return writeReferralLog(supabase, params);
   }
 
   const { data: existing, error: existingError } = await supabase
@@ -120,7 +159,9 @@ export async function linkCreatorToReferrer(
       })
       .eq("id", existing.id);
 
-    return error ? { ok: false, error: error.message } : { ok: true };
+    if (error) return { ok: false, error: error.message };
+
+    return writeReferralLog(supabase, params);
   }
 
   const { error } = await supabase.from("creator_referrals").insert({
@@ -134,5 +175,42 @@ export async function linkCreatorToReferrer(
     lifetime_paid_amount: 0,
   });
 
-  return error ? { ok: false, error: error.message } : { ok: true };
+  if (error) return { ok: false, error: error.message };
+
+  return writeReferralLog(supabase, params);
+}
+
+/*
+  履歴を残す。
+
+  履歴の書き込みに失敗しても関係の更新は成功しているので、
+  ここでエラーを返して呼び出し側に「失敗した」と思わせない。
+  監査の抜けとして扱い、関係の整合は壊さない。
+*/
+async function writeReferralLog(
+  supabase: SupabaseClient,
+  params: LinkCreatorReferrerParams,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const log = params.log;
+  if (!log) return { ok: true };
+
+  const { plan } = log;
+
+  await supabase.from("creator_referral_logs").insert({
+    creator_id: params.creatorId,
+    action: plan.action,
+    previous_referrer_id: plan.previousReferrerId,
+    previous_start_month: plan.previousStartMonth,
+    previous_end_month: plan.previousEndMonth,
+    referrer_id: params.referrerId,
+    start_month: params.referrerId ? params.startMonth : null,
+    end_month: params.endMonth ?? null,
+    affected_start_month: plan.affectedStartMonth,
+    affected_end_month: plan.affectedEndMonth,
+    note: log.note ?? null,
+    changed_by: log.actorId,
+    changed_by_email: log.actorEmail,
+  });
+
+  return { ok: true };
 }

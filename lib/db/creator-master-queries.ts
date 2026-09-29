@@ -37,6 +37,16 @@ export type CreatorMasterRow = {
   agencyName: string;
   referrerId: string | null;
   referrerName: string | null;
+  /**
+   * 紹介者の適用開始月。登録日ではなく「何月分から適用されているか」。
+   * 紹介関係が無ければ null。
+   */
+  referrerStartMonth: string | null;
+  /** 適用終了月。継続中は null */
+  referrerEndMonth: string | null;
+  /** 月別確定した所属の期間（確定が無ければ null） */
+  agencyAssignedStartMonth: string | null;
+  agencyAssignedEndMonth: string | null;
   accountManagementType: AccountManagementType;
   /** 代理店側分配率(%) */
   commissionRate: number;
@@ -149,6 +159,7 @@ export async function fetchCreatorMasterRows(
     referrersResult,
     referralsResult,
     ordersResult,
+    monthlyAssignmentsResult,
   ] = await Promise.all([
     creatorsQuery,
     supabase
@@ -161,9 +172,16 @@ export async function fetchCreatorMasterRows(
       .order("referrer_name"),
     supabase
       .from("creator_referrals")
-      .select("creator_id, referrer_id, referral_rate, is_active")
+      .select("creator_id, referrer_id, referral_rate, is_active, start_month, end_month")
       .eq("is_active", true),
     fetchOrderAggregates(supabase, month, agencyId),
+    /*
+      月別確定した所属の期間。「現在所属」とは別物なので、
+      画面で取り違えないよう期間つきで出す。
+    */
+    supabase
+      .from("creator_monthly_agency_assignments")
+      .select("creator_id, target_month"),
   ]);
 
   const error =
@@ -172,6 +190,7 @@ export async function fetchCreatorMasterRows(
     referrersResult.error?.message ??
     referralsResult.error?.message ??
     ordersResult.error ??
+    monthlyAssignmentsResult.error?.message ??
     null;
 
   if (error) {
@@ -198,10 +217,32 @@ export async function fetchCreatorMasterRows(
   });
 
   const rateByCreator = new Map<string, number>();
+  /* 紹介者の適用期間。登録日ではなく「何月分から」を画面に出すために持つ */
+  const referralPeriodByCreator = new Map<
+    string,
+    { startMonth: string | null; endMonth: string | null }
+  >();
+
   for (const referral of referralsResult.data ?? []) {
     const creatorId = referral.creator_id as string;
     if (rateByCreator.has(creatorId)) continue;
     rateByCreator.set(creatorId, resolveReferralRate(referral.referral_rate));
+    referralPeriodByCreator.set(creatorId, {
+      startMonth: (referral.start_month as string | null) ?? null,
+      endMonth: (referral.end_month as string | null) ?? null,
+    });
+  }
+
+  /*
+    月別確定した所属の期間。連続しているとは限らないので、
+    最小月と最大月だけを出して「確定されている範囲」を示す。
+  */
+  const assignedMonthsByCreator = new Map<string, string[]>();
+  for (const row of monthlyAssignmentsResult.data ?? []) {
+    const creatorId = String(row.creator_id);
+    const list = assignedMonthsByCreator.get(creatorId) ?? [];
+    list.push(String(row.target_month));
+    assignedMonthsByCreator.set(creatorId, list);
   }
 
   const rows: CreatorMasterRow[] = (creatorsResult.data ?? []).map((creator) => {
@@ -236,6 +277,12 @@ export async function fetchCreatorMasterRows(
         : "未振り分け",
       referrerId,
       referrerName: referrerId ? referrerNameById.get(referrerId) ?? "—" : null,
+      referrerStartMonth: referralPeriodByCreator.get(id)?.startMonth ?? null,
+      referrerEndMonth: referralPeriodByCreator.get(id)?.endMonth ?? null,
+      agencyAssignedStartMonth:
+        (assignedMonthsByCreator.get(id) ?? []).slice().sort()[0] ?? null,
+      agencyAssignedEndMonth:
+        (assignedMonthsByCreator.get(id) ?? []).slice().sort().at(-1) ?? null,
       accountManagementType,
       commissionRate: toAmount(creator.commission_rate),
       registrationStatus: (creator.registration_status as string | null) ?? null,

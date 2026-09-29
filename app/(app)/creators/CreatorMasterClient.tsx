@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
 
 import {
+  previewReferralChangeAction,
   updateCreatorMasterAction,
   type CreatorMasterActionResult,
 } from "@/app/actions/update-creator-master";
+import {
+  REFERRAL_CHANGE_BLOCK_LABEL,
+  type ReferralChangePlan,
+} from "@/lib/referrals/referral-assignment-change";
 import {
   ACCOUNT_MANAGEMENT_TYPE_OPTIONS,
   accountManagementTypeLabel,
@@ -32,6 +37,242 @@ type Agency = {
   isActive: boolean;
 };
 type Referrer = { id: string; name: string; isActive: boolean };
+
+/*
+  紹介者と適用開始月。
+
+  ■ なぜ開始月を選ばせるのか
+  以前は登録した月がそのまま適用開始月になっていた。過去月から実績が
+  あるクリエイターを後から登録すると、その過去分に紹介報酬が付かない。
+  「登録日」と「何月分から適用するか」は別物なので、必ず選ばせる。
+
+  ■ 実績の最初の月は参考として出すだけ
+  勝手にそれを保存すると、意図しない過去分へ報酬が発生する。
+  候補として見せて、選ぶのは操作者。
+
+  ■ 過去へ遡るときは押す前に影響を見せる
+  影響月・件数・金額を出してから保存させる。
+  確定済み・支払処理へ進んだ月に影響する場合はサーバーが拒否する。
+*/
+function monthOptions(row: CreatorMasterRow): string[] {
+  const candidates = [
+    row.referrerStartMonth,
+    row.agencyAssignedStartMonth,
+    EARLIEST_ASSIGNMENT_MONTH,
+  ].filter((value): value is string => Boolean(value));
+
+  const start = candidates.slice().sort()[0] ?? EARLIEST_ASSIGNMENT_MONTH;
+  const end = currentMonthLabel();
+
+  const out: string[] = [];
+  let [year, month] = start.split("-").map(Number);
+
+  for (let guard = 0; guard < 120; guard += 1) {
+    const cursor = `${year}-${String(month).padStart(2, "0")}`;
+    out.push(cursor);
+    if (cursor >= end) break;
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+
+  return out;
+}
+
+function currentMonthLabel(): string {
+  const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** 所属・紹介者の期間表示で使う一番古い月 */
+const EARLIEST_ASSIGNMENT_MONTH = "2026-01";
+
+function formatPeriod(start: string | null, end: string | null): string {
+  if (!start) return "—";
+  return end ? `${start}〜${end}` : `${start}〜`;
+}
+
+function ReferrerAssignment({
+  row,
+  referrers,
+}: {
+  row: CreatorMasterRow;
+  referrers: Array<{ id: string; name: string; isActive: boolean }>;
+}) {
+  const [referrerId, setReferrerId] = useState(row.referrerId ?? "");
+  const [startMonth, setStartMonth] = useState(
+    row.referrerStartMonth ?? currentMonthLabel(),
+  );
+  const [plan, setPlan] = useState<ReferralChangePlan | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const changed =
+    referrerId !== (row.referrerId ?? "") ||
+    (referrerId !== "" && startMonth !== row.referrerStartMonth);
+
+  const preview = async () => {
+    setPreviewing(true);
+    setPreviewError(null);
+    const result = await previewReferralChangeAction({
+      creatorId: row.id,
+      referrerId: referrerId || null,
+      startMonth: referrerId ? startMonth : null,
+    });
+    setPreviewing(false);
+    if (result.ok) setPlan(result.plan);
+    else setPreviewError(result.error);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <label
+          htmlFor={`referrer-${row.id}`}
+          className="text-[11px] font-medium text-zinc-500"
+        >
+          紹介者
+        </label>
+        <select
+          id={`referrer-${row.id}`}
+          name="referrer_id"
+          value={referrerId}
+          onChange={(event) => {
+            setReferrerId(event.target.value);
+            setPlan(null);
+          }}
+          className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
+        >
+          <option value="">なし</option>
+          {/* 無効な紹介者は新規選択から除外する（現在値のときだけ残す） */}
+          {referrers
+            .filter((referrer) => referrer.isActive || referrer.id === row.referrerId)
+            .map((referrer) => (
+              <option key={referrer.id} value={referrer.id}>
+                {referrer.name}
+                {referrer.isActive ? "" : "（無効）"}
+              </option>
+            ))}
+        </select>
+        <p className="mt-1 text-[10px] text-zinc-500">
+          現在：{row.referrerName ?? "なし"}{" "}
+          {row.referrerStartMonth
+            ? `／ ${formatPeriod(row.referrerStartMonth, row.referrerEndMonth)}`
+            : ""}
+        </p>
+      </div>
+
+      {referrerId ? (
+        <div>
+          <label
+            htmlFor={`referrer-start-${row.id}`}
+            className="text-[11px] font-medium text-zinc-500"
+          >
+            適用開始月（必須）
+          </label>
+          <select
+            id={`referrer-start-${row.id}`}
+            name="referrer_start_month"
+            value={startMonth}
+            onChange={(event) => {
+              setStartMonth(event.target.value);
+              setPlan(null);
+            }}
+            className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
+          >
+            {monthOptions(row).map((month) => (
+              <option key={month} value={month}>
+                {month}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">
+            登録した月ではなく「何月分から適用するか」です。
+          </p>
+        </div>
+      ) : (
+        <input type="hidden" name="referrer_start_month" value="" />
+      )}
+
+      {changed ? (
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={preview}
+            disabled={previewing}
+            className="text-[11px] font-medium text-[var(--accent-cyan)] hover:underline disabled:opacity-50"
+          >
+            {previewing ? "確認中…" : "変更内容を確認"}
+          </button>
+          {previewError ? (
+            <p className="text-[10px] leading-relaxed text-red-300">{previewError}</p>
+          ) : null}
+          {plan ? <ReferralChangePreview plan={plan} /> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ReferralChangePreview({ plan }: { plan: ReferralChangePlan }) {
+  const blocked = plan.blocks.length > 0;
+
+  return (
+    <div
+      className={`space-y-1 rounded-lg border p-2 text-[10px] leading-relaxed ${
+        blocked
+          ? "border-red-400/25 bg-red-400/5 text-red-100"
+          : "border-amber-400/25 bg-amber-400/5 text-amber-100"
+      }`}
+    >
+      <p>
+        現在：{plan.previousReferrerName ?? "なし"}{" "}
+        {plan.previousStartMonth ? `${plan.previousStartMonth}〜` : ""}
+      </p>
+      <p>
+        変更後：{plan.referrerName ?? "なし"}{" "}
+        {plan.startMonth ? `${plan.startMonth}〜` : ""}
+      </p>
+      <p>
+        影響期間：{plan.affectedStartMonth ?? "—"}〜{plan.affectedEndMonth ?? "—"}
+        （{plan.affectedMonths.length}か月）
+      </p>
+      <p>
+        TAP対象：{plan.tapItemCount.toLocaleString("ja-JP")}件 ／ THREE報酬 ¥
+        {plan.tapThreeRevenue.toLocaleString("ja-JP")}
+      </p>
+      <p>
+        想定紹介報酬：¥
+        {plan.estimatedReferralReward.toLocaleString("ja-JP", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}
+        （参考値）
+      </p>
+      <p>affiliate対象：{plan.affiliateItemCount.toLocaleString("ja-JP")}件</p>
+      <p>
+        確定済み月：{plan.finalizedMonths.length}件 ／ 支払明細組入：
+        {plan.claimedItemCount}件 ／ 支払済：{plan.paidItemCount}件
+      </p>
+      {blocked ? (
+        <p className="font-semibold">
+          保存できません：
+          {plan.blocks.map((reason) => REFERRAL_CHANGE_BLOCK_LABEL[reason]).join(" / ")}
+        </p>
+      ) : (
+        <p className="text-zinc-400">
+          保存しても紹介報酬は再計算されません。対象期間の再集計が別途必要です。
+        </p>
+      )}
+      <p className="text-zinc-500">
+        参考：最初のTAP実績 {plan.firstTapMonth ?? "—"} ／ 最初のaffiliate実績{" "}
+        {plan.firstAffiliateMonth ?? "—"}
+      </p>
+    </div>
+  );
+}
 
 function typeBadgeClass(type: AccountManagementType): string {
   switch (type) {
@@ -133,31 +374,15 @@ function EditPanel({
           </select>
         </div>
 
-        <div>
-          <label
-            htmlFor={`referrer-${row.id}`}
-            className="text-[11px] font-medium text-zinc-500"
-          >
-            紹介者
-          </label>
-          <select
-            id={`referrer-${row.id}`}
-            name="referrer_id"
-            defaultValue={row.referrerId ?? ""}
-            className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
-          >
-            <option value="">なし</option>
-            {/* 無効な紹介者は新規選択から除外する（現在値のときだけ残す） */}
-            {referrers
-              .filter((referrer) => referrer.isActive || referrer.id === row.referrerId)
-              .map((referrer) => (
-                <option key={referrer.id} value={referrer.id}>
-                  {referrer.name}
-                  {referrer.isActive ? "" : "（無効）"}
-                </option>
-              ))}
-          </select>
-        </div>
+
+        {/*
+          紹介者を設定するときは適用開始月が必須。
+
+          登録した月ではなく「何月分から適用するか」を選ぶ。
+          過去月から実績があるクリエイターを後から登録しても、
+          その過去分に紹介報酬が付くようにするため。
+        */}
+        <ReferrerAssignment row={row} referrers={referrers} />
 
         <div>
           <label
@@ -531,8 +756,32 @@ export function CreatorMasterClient({
                           {row.linkState === "linked" ? "連携済み" : "未連携"}
                         </span>
                       </td>
-                      <td className={`${td} text-zinc-300`}>{row.agencyName}</td>
-                      <td className={`${td} text-zinc-300`}>{row.referrerName ?? "—"}</td>
+                      {/*
+                        登録日ではなく「何月分から適用されているか」を出す。
+                        所属は現在所属と月別確定が別物なので、両方を並べる。
+                      */}
+                      <td className={`${td} whitespace-normal text-zinc-300`}>
+                        <div>{row.agencyName}</div>
+                        {row.agencyAssignedStartMonth ? (
+                          <div className="text-[10px] text-zinc-500">
+                            月別確定{" "}
+                            {formatPeriod(
+                              row.agencyAssignedStartMonth,
+                              row.agencyAssignedEndMonth,
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-[10px] text-zinc-600">月別確定なし</div>
+                        )}
+                      </td>
+                      <td className={`${td} whitespace-normal text-zinc-300`}>
+                        <div>{row.referrerName ?? "—"}</div>
+                        {row.referrerStartMonth ? (
+                          <div className="text-[10px] text-zinc-500">
+                            {formatPeriod(row.referrerStartMonth, row.referrerEndMonth)}
+                          </div>
+                        ) : null}
+                      </td>
                       <td className={td}>
                         <span
                           className={`rounded-full border px-2 py-0.5 text-[11px] ${typeBadgeClass(

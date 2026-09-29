@@ -9,9 +9,11 @@
   過去月の紹介報酬は referral-period.ts が後続関係の開始月から
   実効終了月を復元しているが、復元に頼らず済むのが本来の形。
 
-  ■ 推測はしない
-  新しい紹介者が決まっていない（紹介者なしにする）場合は境界が無いので
-  end_month を書かない。無効化した日から決めると DB に無い事実を作る。
+  ■ 適用開始月は呼び出し側が必ず決める（2026-09-29 確定）
+  以前は startMonth 省略時に登録月へ落ちていたため、過去月から実績の
+  あるクリエイターでも登録月からしか紹介報酬が付かなかった。
+  いまは省略できず、紹介者を外す場合も「いつから外すか」を渡す。
+  無効化した日から推測することはしない。
 */
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -136,23 +138,39 @@ test("年をまたぐ切り替え（2027-01 開始 → 旧は 2026-12 まで）"
   assert.equal(deactivationCall(supabase.calls).payload.end_month, "2026-12");
 });
 
-test("紹介者なしにする場合は end_month を書かない（推測しない）", async () => {
+test("紹介者なしにする場合も、指定月の前月を終了月にする", async () => {
+  /*
+    2026-09-29 改定。以前は紹介者を外すとき境界が無かったため
+    end_month を書かなかったが、いまは「いつから紹介者なしにするか」を
+    呼び出し側が必ず渡す。その前月が終了月になる（推測ではない）。
+  */
   const supabase = stubSupabase();
 
   const result = await link.linkCreatorToReferrer(supabase, {
     creatorId: CREATOR,
     referrerId: null,
+    startMonth: "2026-09",
   });
 
   assert.deepEqual(result, { ok: true });
 
   const call = deactivationCall(supabase.calls);
   assert.ok(call, "無効化の update が無い");
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(call.payload, "end_month"),
-    false,
-    "境界が無いのに end_month を書いている",
-  );
+  assert.equal(call.payload.end_month, "2026-08");
+});
+
+test("開始月を渡さなければ拒否する（登録月が勝手に入らない）", async () => {
+  const supabase = stubSupabase();
+
+  const result = await link.linkCreatorToReferrer(supabase, {
+    creatorId: CREATOR,
+    referrerId: NEW_REFERRER,
+    startMonth: "",
+  });
+
+  assert.equal(result.ok, false, "開始月なしで保存できてしまう");
+  assert.match(result.error, /適用開始月/);
+  assert.equal(supabase.calls.length, 0, "拒否したのに書き込んでいる");
 });
 
 test("既存関係を再有効化する場合も旧関係に end_month を記録する", async () => {

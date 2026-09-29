@@ -7,6 +7,11 @@ import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
 import { isAccountManagementType } from "@/lib/creators/account-management-type";
 import { linkCreatorToReferrer } from "@/lib/referrals/link-creator-referrer";
 import {
+  buildReferralChangePlan,
+  canApplyReferralChange,
+  describeReferralChangeBlocks,
+} from "@/lib/referrals/referral-assignment-change";
+import {
   ASSIGNMENT_STATE_LABEL,
   assignmentStateForSelection,
   resolveAssignmentState,
@@ -55,23 +60,30 @@ type BulkChange = {
   agencyId: string | null;
   referrerId: string | null;
   accountManagementType: string | null;
+  /**
+   * 紹介者の適用開始月（YYYY-MM）。
+   * 紹介者を設定する変更では必須。creator ごとに指定させ、
+   * 「全員まとめて同じ月」のような暗黙の一括適用はしない。
+   */
+  referrerStartMonth: string;
 };
 
 /**
  * 画面から送られる変更行。
- * "creatorId|agencyId|referrerId|type" 形式。
+ * "creatorId|agencyId|referrerId|type|referrerStartMonth" 形式。
  * 値なしは空文字、変更なしの項目は "-" を送る。
  */
 function parseChanges(formData: FormData): BulkChange[] {
   return formData
     .getAll("changes")
     .map((value) => String(value).split("|"))
-    .filter((parts) => parts.length === 4)
-    .map(([creatorId, agencyId, referrerId, type]) => ({
+    .filter((parts) => parts.length === 5)
+    .map(([creatorId, agencyId, referrerId, type, referrerStartMonth]) => ({
       creatorId: creatorId.trim(),
       agencyId: agencyId === "-" ? null : agencyId.trim() || "",
       referrerId: referrerId === "-" ? null : referrerId.trim() || "",
       accountManagementType: type === "-" ? null : type.trim(),
+      referrerStartMonth: referrerStartMonth.trim(),
     }))
     .filter((change) => change.creatorId)
     .map((change) => ({
@@ -79,6 +91,7 @@ function parseChanges(formData: FormData): BulkChange[] {
       // "" は「未設定にする」、null は「変更しない」
       agencyId: change.agencyId === null ? null : change.agencyId,
       referrerId: change.referrerId === null ? null : change.referrerId,
+      referrerStartMonth: change.referrerStartMonth,
     }));
 }
 
@@ -248,10 +261,37 @@ export async function saveCreatorMasterBulkAction(
           creators.referred_by_referrer_id と creator_referrals を必ず同時に更新し、
           確認状態もこの中で一緒に書く（Single Source of Truth を壊さない）。
         */
+        /*
+          影響範囲と保存可否は referral-assignment-change が単一ソース。
+          確定済み・支払処理へ進んだ月に影響する変更はここで止める。
+        */
+        const plan = await buildReferralChangePlan(supabase, {
+          creatorId: change.creatorId,
+          referrerId: nextReferrerId,
+          startMonth: change.referrerStartMonth || null,
+        });
+
+        if (plan.error) {
+          return { ok: false, error: mapSupabaseErrorToJa(plan.error) };
+        }
+
+        if (!canApplyReferralChange(plan)) {
+          return {
+            ok: false,
+            error: `${plan.tiktokId || change.creatorId} の紹介者は保存できません（${describeReferralChangeBlocks(plan)}）。対象期間 ${plan.affectedStartMonth}〜${plan.affectedEndMonth}`,
+          };
+        }
+
         const linked = await linkCreatorToReferrer(supabase, {
           creatorId: change.creatorId,
           referrerId: nextReferrerId,
+          startMonth: change.referrerStartMonth,
           assignmentState: nextReferrerState,
+          log: {
+            plan,
+            actorId: user?.id ?? "",
+            actorEmail: user?.email ?? null,
+          },
         });
 
         if (!linked.ok) {

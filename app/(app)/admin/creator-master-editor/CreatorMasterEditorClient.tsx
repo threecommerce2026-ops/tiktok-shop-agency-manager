@@ -136,6 +136,12 @@ type Draft = {
   agencyId?: string;
   referrerId?: string;
   accountManagementType?: string;
+  /**
+   * 紹介者の適用開始月（YYYY-MM）。creator ごとに指定する。
+   * 「全員まとめて同じ月」にすると意図しない過去分へ報酬が発生するため、
+   * 一括選択では設定させない。
+   */
+  referrerStartMonth?: string;
 };
 
 type ChangeDetail = {
@@ -434,15 +440,26 @@ export function CreatorMasterEditorClient({
 
   /** サーバーへ送る変更行（変更のない項目は "-"） */
   const payload = useMemo(() => {
-    const byCreator = new Map<string, { agency: string; referrer: string; type: string }>();
+    const byCreator = new Map<
+      string,
+      { agency: string; referrer: string; type: string; referrerStartMonth: string }
+    >();
 
     for (const detail of changeDetails) {
       const entry =
-        byCreator.get(detail.row.id) ?? { agency: "-", referrer: "-", type: "-" };
+        byCreator.get(detail.row.id) ?? {
+          agency: "-",
+          referrer: "-",
+          type: "-",
+          referrerStartMonth: "",
+        };
       const draft = drafts[detail.row.id] ?? {};
 
       if (detail.field === "所属代理店") entry.agency = draft.agencyId ?? "";
-      if (detail.field === "紹介者") entry.referrer = draft.referrerId ?? "";
+      if (detail.field === "紹介者") {
+        entry.referrer = draft.referrerId ?? "";
+        entry.referrerStartMonth = draft.referrerStartMonth ?? "";
+      }
       if (detail.field === "区分") entry.type = draft.accountManagementType ?? "";
 
       byCreator.set(detail.row.id, entry);
@@ -450,7 +467,7 @@ export function CreatorMasterEditorClient({
 
     return [...byCreator.entries()].map(
       ([creatorId, entry]) =>
-        `${creatorId}|${entry.agency}|${entry.referrer}|${entry.type}`,
+        `${creatorId}|${entry.agency}|${entry.referrer}|${entry.type}|${entry.referrerStartMonth}`,
     );
   }, [changeDetails, drafts]);
 
@@ -963,6 +980,26 @@ export function CreatorMasterEditorClient({
                           ),
                         )}
                       </select>
+                      {/*
+                        紹介者を設定するときは適用開始月が必須。
+                        登録月ではなく「何月分から適用するか」を creator ごとに選ぶ。
+                        一括選択では設定しない（全員同じ月にすると危険なため）。
+                      */}
+                      {draftReferrer(row) && draftReferrer(row) !== NONE_SELECTED ? (
+                        <input
+                          type="month"
+                          aria-label={`${row.tiktokIdLabel} の紹介者 適用開始月`}
+                          value={drafts[row.id]?.referrerStartMonth ?? ""}
+                          onChange={(e) =>
+                            updateDraft(row.id, { referrerStartMonth: e.target.value })
+                          }
+                          className={`${primarySelectBase} mt-1`}
+                          style={{
+                            width: SELECT_WIDTHS.referrer,
+                            minWidth: SELECT_WIDTHS.referrer,
+                          }}
+                        />
+                      ) : null}
                     </td>
 
                     <td className={td}>

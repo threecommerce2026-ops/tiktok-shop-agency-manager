@@ -9,6 +9,12 @@ import {
   normalizeAccountManagementType,
 } from "@/lib/creators/account-management-type";
 import { linkCreatorToReferrer } from "@/lib/referrals/link-creator-referrer";
+import {
+  buildReferralChangePlan,
+  canApplyReferralChange,
+  describeReferralChangeBlocks,
+  type ReferralChangePlan,
+} from "@/lib/referrals/referral-assignment-change";
 
 /*
   クリエイターマスタの一括更新。
@@ -41,6 +47,36 @@ function ratesEqual(a: number, b: number): boolean {
   return Math.abs(a - b) < 0.0001;
 }
 
+/*
+  保存前のプレビュー（READ ONLY）。
+
+  過去月へ遡る変更は影響が大きいので、押す前に
+  「どの月が・何件・いくら動くか」を見せる。
+  判定は保存時と同じ buildReferralChangePlan を通す。
+*/
+export type ReferralChangePreviewResult =
+  | { ok: true; plan: ReferralChangePlan }
+  | { ok: false; error: string };
+
+export async function previewReferralChangeAction(input: {
+  creatorId: string;
+  referrerId: string | null;
+  startMonth: string | null;
+}): Promise<ReferralChangePreviewResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const plan = await buildReferralChangePlan(auth.supabase, {
+    creatorId: input.creatorId,
+    referrerId: input.referrerId,
+    startMonth: input.startMonth,
+  });
+
+  if (plan.error) return { ok: false, error: mapSupabaseErrorToJa(plan.error) };
+
+  return { ok: true, plan };
+}
+
 export async function updateCreatorMasterAction(
   _prev: CreatorMasterActionResult | null,
   formData: FormData,
@@ -66,6 +102,14 @@ export async function updateCreatorMasterAction(
 
   const referrerRaw = readText(formData, "referrer_id");
   const referrerId = referrerRaw.length > 0 ? referrerRaw : null;
+  /*
+    適用開始月。紹介者を変えるときは必須。
+
+    以前はここを送らず currentMonthKey() に落ちていたため、
+    過去月から実績のあるクリエイターでも「登録した月」からしか
+    紹介報酬が付かなかった。
+  */
+  const referrerStartMonth = readText(formData, "referrer_start_month");
 
   const typeRaw = readText(formData, "account_management_type");
   if (typeRaw && !isAccountManagementType(typeRaw)) {
@@ -91,6 +135,22 @@ export async function updateCreatorMasterAction(
   const fromRate = Number(current.commission_rate);
   const fromRegistration = (current.registration_status as string | null) ?? null;
   const fromReferrerId = (current.referred_by_referrer_id as string | null) ?? null;
+
+  /*
+    いま有効な紹介関係の開始月。紹介者を変えずに開始月だけ直す
+    ケース（登録月で入ってしまったものの修正）を拾うために読む。
+  */
+  const { data: activeReferral } = await supabase
+    .from("creator_referrals")
+    .select("start_month")
+    .eq("creator_id", creatorId)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const fromReferrerStartMonth =
+    (activeReferral?.start_month as string | null) ?? null;
   const fromType = normalizeAccountManagementType(current.account_management_type);
 
   const registrationRaw = readText(formData, "registration_status");
@@ -105,9 +165,22 @@ export async function updateCreatorMasterAction(
     !ratesEqual(fromRate, commissionRate) ||
     registrationStatus !== fromRegistration;
   const referrerChanged = fromReferrerId !== referrerId;
+  /*
+    紹介者は同じでも開始月だけを直したい場合がある。
+    開始月が空のまま（画面から送られない）のときは変更なしとみなす。
+  */
+  const referrerStartMonthChanged =
+    referrerId != null &&
+    referrerStartMonth.length > 0 &&
+    referrerStartMonth !== fromReferrerStartMonth;
   const typeChanged = fromType !== nextType;
 
-  if (!assignmentChanged && !referrerChanged && !typeChanged) {
+  if (
+    !assignmentChanged &&
+    !referrerChanged &&
+    !referrerStartMonthChanged &&
+    !typeChanged
+  ) {
     return { ok: true, message: "変更はありません" };
   }
 
@@ -161,8 +234,38 @@ export async function updateCreatorMasterAction(
   }
 
   // --- 紹介者（creators と creator_referrals の整合は共通ヘルパが担保）----------
-  if (referrerChanged) {
-    const linked = await linkCreatorToReferrer(supabase, { creatorId, referrerId });
+  if (referrerChanged || referrerStartMonthChanged) {
+    /*
+      影響範囲と保存可否は lib/referrals/referral-assignment-change.ts が
+      単一ソース。画面のプレビューと同じ関数を通す。
+    */
+    const plan = await buildReferralChangePlan(supabase, {
+      creatorId,
+      referrerId,
+      startMonth: referrerStartMonth || null,
+    });
+
+    if (plan.error) {
+      return { ok: false, error: mapSupabaseErrorToJa(plan.error) };
+    }
+
+    if (!canApplyReferralChange(plan)) {
+      return {
+        ok: false,
+        error: `この変更は保存できません（${describeReferralChangeBlocks(plan)}）。対象期間 ${plan.affectedStartMonth}〜${plan.affectedEndMonth}`,
+      };
+    }
+
+    const linked = await linkCreatorToReferrer(supabase, {
+      creatorId,
+      referrerId,
+      startMonth: referrerStartMonth,
+      log: {
+        plan,
+        actorId: user?.id ?? "",
+        actorEmail: user?.email ?? null,
+      },
+    });
 
     if (!linked.ok) {
       return { ok: false, error: mapSupabaseErrorToJa(linked.error) };
@@ -177,7 +280,7 @@ export async function updateCreatorMasterAction(
       changed_by_email: user?.email ?? null,
     });
 
-    changes.push("紹介者");
+    changes.push(referrerChanged ? "紹介者" : "紹介者の適用開始月");
   }
 
   revalidatePath("/creators");
