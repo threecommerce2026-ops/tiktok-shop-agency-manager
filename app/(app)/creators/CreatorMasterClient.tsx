@@ -102,9 +102,24 @@ function ReferrerAssignment({
   referrers: Array<{ id: string; name: string; isActive: boolean }>;
 }) {
   const [referrerId, setReferrerId] = useState(row.referrerId ?? "");
+  /*
+    適用開始月の初期値。
+
+      ① 既存の紹介関係があればその開始月（勝手に動かさない）
+      ② 無ければ、最初に正式な TAP 報酬対象となった月
+      ③ それも無ければ今月
+
+    ② は buildReferralChangePlan が返す firstTapMonth を使う。
+    isTapReferralSourceLine を通った行だけから決めているので、
+    未払い・未決済・返金済みの注文を起点にしない。
+    creators 一覧で TAP 明細を読むのは重いので、紹介者を選んだ
+    ときに creator 1件分だけ取りに行く（読むだけ）。
+  */
   const [startMonth, setStartMonth] = useState(
     row.referrerStartMonth ?? currentMonthLabel(),
   );
+  /* 管理者が自分で選び直したら、初期値の自動補完はもうしない */
+  const [startMonthTouched, setStartMonthTouched] = useState(false);
   const [plan, setPlan] = useState<ReferralChangePlan | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -112,6 +127,18 @@ function ReferrerAssignment({
   const changed =
     referrerId !== (row.referrerId ?? "") ||
     (referrerId !== "" && startMonth !== row.referrerStartMonth);
+
+  /* 最初の正式な TAP 対象月を取り、開始月の初期値にする（読むだけ） */
+  const adoptFirstTapMonth = async (nextReferrerId: string) => {
+    const result = await previewReferralChangeAction({
+      creatorId: row.id,
+      referrerId: nextReferrerId,
+      startMonth,
+    });
+    if (!result.ok) return;
+    const firstTapMonth = result.plan.firstTapMonth;
+    if (firstTapMonth) setStartMonth(firstTapMonth);
+  };
 
   const preview = async () => {
     setPreviewing(true);
@@ -140,8 +167,20 @@ function ReferrerAssignment({
           name="referrer_id"
           value={referrerId}
           onChange={(event) => {
-            setReferrerId(event.target.value);
+            const nextReferrerId = event.target.value;
+            setReferrerId(nextReferrerId);
             setPlan(null);
+            /*
+              新しく紐付けるときだけ、最初の TAP 対象月を初期値にする。
+              既存の紹介関係がある creator の開始月は動かさない。
+            */
+            if (
+              nextReferrerId &&
+              !row.referrerStartMonth &&
+              !startMonthTouched
+            ) {
+              void adoptFirstTapMonth(nextReferrerId);
+            }
           }}
           className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
         >
@@ -178,6 +217,7 @@ function ReferrerAssignment({
             value={startMonth}
             onChange={(event) => {
               setStartMonth(event.target.value);
+              setStartMonthTouched(true);
               setPlan(null);
             }}
             className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"

@@ -307,6 +307,81 @@ export async function fetchReferrerRewardDetailAction(input: {
   /payments の初期表示に載せると代理店・紹介者タブまで遅くなる。
   畳んだあとの 143 行（約 67KB）だけを画面へ渡す。
 */
+export type ReferrerOption = { id: string; name: string; isActive: boolean };
+
+export type CreatorReferrerFormResult =
+  | {
+      ok: true;
+      referrers: ReferrerOption[];
+      /*
+        updateCreatorMasterAction はクリエイターマスタ全体を受け取る。
+        紹介者だけを直したいので、他の項目は現在値をそのまま送り返す。
+        画面が持っていない値をここで読んで渡す。
+      */
+      current: {
+        agencyId: string;
+        commissionRate: string;
+        accountManagementType: string;
+      };
+    }
+  | { ok: false; error: string };
+
+/*
+  TAP実績から紹介者を設定するための下ごしらえ。
+
+  ここでは何も書かない。保存は既存の updateCreatorMasterAction が
+  唯一の入口で、期間競合・月次確定・claim / paid のガードも
+  そちらが持っている。
+*/
+export async function fetchCreatorReferrerFormAction(
+  creatorId: string,
+): Promise<CreatorReferrerFormResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const [referrersResult, creatorResult] = await Promise.all([
+    auth.supabase
+      .from("referrers")
+      .select("id, name, referrer_name, is_active")
+      .order("name", { ascending: true }),
+    auth.supabase
+      .from("creators")
+      .select("id, agency_id, commission_rate, account_management_type")
+      .eq("id", creatorId)
+      .maybeSingle(),
+  ]);
+
+  if (referrersResult.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(referrersResult.error.message) };
+  }
+  if (creatorResult.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(creatorResult.error.message) };
+  }
+  if (!creatorResult.data) {
+    return { ok: false, error: "クリエイターが見つかりません" };
+  }
+
+  const creator = creatorResult.data as Record<string, unknown>;
+
+  return {
+    ok: true,
+    referrers: (referrersResult.data ?? []).map((row) => ({
+      id: String(row.id),
+      name: String(row.referrer_name ?? row.name ?? "（名称未設定）"),
+      isActive: row.is_active !== false,
+    })),
+    current: {
+      agencyId: creator.agency_id == null ? "" : String(creator.agency_id),
+      commissionRate:
+        creator.commission_rate == null ? "" : String(creator.commission_rate),
+      accountManagementType:
+        creator.account_management_type == null
+          ? ""
+          : String(creator.account_management_type),
+    },
+  };
+}
+
 export type ReferrerGapActionResult =
   | { ok: true; summary: ReferrerGapSummary }
   | { ok: false; error: string };

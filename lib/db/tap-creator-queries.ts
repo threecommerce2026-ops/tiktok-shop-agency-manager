@@ -154,6 +154,14 @@ export type TapCreatorRow = {
   referralEligibleType: boolean;
   /** 紹介者の確認状態（creators.referrer_assignment_state） */
   referrerAssignmentState: string | null;
+  /*
+    正式な対象行（isTapReferralSourceLine を通ったもの）の最初の月。
+
+    紹介者を新しく登録するときの適用開始月の初期値に使う。
+    未払い・未決済・返金済みの行は「報酬が発生した」とは言えないので、
+    そこを起点に開始月を決めてはいけない。
+  */
+  firstEligibleMonth: string;
   referrerState: TapReferrerState;
   /** 紹介者名。関係が無ければ null */
   referrerName: string | null;
@@ -608,6 +616,7 @@ export async function fetchTapCreatorOverview(
       estimatedReferralReward: sumReferralAmounts([referralBase * REFERRAL_REWARD_RATE]),
       referralEligibleType: eligibleType,
       referrerAssignmentState: creator?.referrerAssignmentState ?? null,
+      firstEligibleMonth: firstTargetMonth,
       referralRewardAmount: sumReferralAmounts(reward?.amounts ?? []),
       referralRewardItemCount: reward?.itemCount ?? 0,
       referrerState,

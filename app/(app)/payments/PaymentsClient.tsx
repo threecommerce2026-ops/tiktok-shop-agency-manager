@@ -14,6 +14,7 @@ import {
   createPaymentBatchAction,
   exportPaymentCsvAction,
   fetchReferralMonthSettlementsAction,
+  fetchCreatorReferrerFormAction,
   fetchReferrerGapSummaryAction,
   fetchReferrerRewardDetailAction,
   fetchTapCreatorOverviewAction,
@@ -33,6 +34,15 @@ import type {
   ReferrerGapSummary,
   TapCreatorRow,
 } from "@/lib/db/tap-creator-queries";
+import type { CreatorReferrerFormResult } from "@/app/actions/payments";
+import {
+  previewReferralChangeAction,
+  updateCreatorMasterAction,
+} from "@/app/actions/update-creator-master";
+import {
+  REFERRAL_CHANGE_BLOCK_LABEL,
+  type ReferralChangePlan,
+} from "@/lib/referrals/referral-assignment-change";
 import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
 import type {
   PayeeCreatorBreakdown,
@@ -771,6 +781,272 @@ function tapAgencyBadge(row: TapCreatorRow): string {
   return "border-white/[0.1] bg-white/[0.04] text-zinc-400";
 }
 
+
+/*
+  TAP実績から紹介者を設定するパネル。
+
+  保存は既存の updateCreatorMasterAction が唯一の入口。
+  期間競合・月次確定・claim / paid のガードも audit log も
+  そちらが持っているので、ここで独自の更新処理は作らない。
+  （saveCreatorReferralAction は月次確定のガードを通らないので使わない）
+
+  紹介報酬は自動で作り直さない。関係を登録しただけでは
+  referral_reward_items は変わらず、別工程で正式 sync する。
+*/
+function ReferrerAssignPanel({
+  row,
+  onDone,
+  onCancel,
+}: {
+  row: TapCreatorRow;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<
+    Extract<CreatorReferrerFormResult, { ok: true }> | null
+  >(null);
+  const [referrerId, setReferrerId] = useState("");
+  /* 適用開始月は「最初に正式な TAP 報酬対象となった月」を初期値にする */
+  const [startMonth, setStartMonth] = useState(row.firstEligibleMonth);
+  const [plan, setPlan] = useState<ReferralChangePlan | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const load = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await fetchCreatorReferrerFormAction(row.creatorId);
+    setBusy(false);
+    if (result.ok) setForm(result);
+    else setError(result.error);
+  };
+
+  const preview = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await previewReferralChangeAction({
+      creatorId: row.creatorId,
+      referrerId,
+      startMonth,
+    });
+    setBusy(false);
+    if (result.ok) setPlan(result.plan);
+    else setError(result.error);
+  };
+
+  const save = async () => {
+    if (!form || !plan) return;
+    setBusy(true);
+    setError(null);
+
+    /*
+      紹介者以外は現在値をそのまま送り返す。
+      updateCreatorMasterAction は差分があった項目だけを更新するので、
+      同じ値を送れば所属・分配率・区分は変わらない。
+    */
+    const body = new FormData();
+    body.set("creator_id", row.creatorId);
+    body.set("referrer_id", referrerId);
+    body.set("referrer_start_month", startMonth);
+    body.set("agency_id", form.current.agencyId);
+    body.set("commission_rate", form.current.commissionRate);
+    body.set("account_management_type", form.current.accountManagementType);
+
+    const result = await updateCreatorMasterAction(null, body);
+    setBusy(false);
+    if (result.ok) setSaved(true);
+    else setError(result.error);
+  };
+
+  if (!form && !error) {
+    return (
+      <div className="mt-2 rounded-lg border border-white/[0.1] bg-surface-1 p-2">
+        <button
+          type="button"
+          onClick={load}
+          disabled={busy}
+          className="rounded-lg bg-[var(--accent-cyan)] px-2.5 py-1 text-[11px] font-semibold text-black disabled:opacity-50"
+        >
+          {busy ? "読み込み中…" : "紹介者を設定"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ml-2 rounded-lg border border-white/[0.12] px-2.5 py-1 text-[11px] text-zinc-300"
+        >
+          閉じる
+        </button>
+      </div>
+    );
+  }
+
+  if (saved) {
+    return (
+      <div className="mt-2 rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-2">
+        <p className="text-[11px] leading-relaxed text-emerald-200">
+          紹介者を設定しました。
+          <br />
+          <span className="font-semibold">
+            紹介報酬はまだ再計算されていません。
+          </span>
+        </p>
+        <button
+          type="button"
+          onClick={onDone}
+          className="mt-1.5 rounded-lg border border-emerald-400/30 px-2.5 py-1 text-[11px] text-emerald-100 hover:bg-emerald-400/10"
+        >
+          一覧を更新する
+        </button>
+      </div>
+    );
+  }
+
+  const blocked = (plan?.blocks.length ?? 0) > 0;
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-white/[0.12] bg-surface-1 p-2.5">
+      <div className="text-[11px] leading-relaxed text-zinc-400">
+        <span className="font-mono text-zinc-100">{row.tiktokId}</span>
+        {row.creatorName && row.creatorName !== row.tiktokId ? (
+          <span className="ml-1 text-zinc-500">{row.creatorName}</span>
+        ) : null}
+        <br />
+        TAP発生期間：
+        <span className="font-mono">
+          {row.firstTargetMonth}〜{row.lastTargetMonth}
+        </span>
+        <br />
+        成果報酬ベース：<span className="font-mono">{yen(row.commissionBase)}</span>
+        <br />
+        紹介報酬の算定元：
+        <span className="font-mono">{yen(row.referralBaseAmount)}</span>
+        {" / "}
+        想定紹介報酬5%：
+        <span className="font-mono">{yen(row.estimatedReferralReward)}</span>
+        <br />
+        現在の紹介者：<span className="font-semibold text-red-200">未設定</span>
+      </div>
+
+      {error ? (
+        <p className="text-[11px] leading-relaxed text-red-300">{error}</p>
+      ) : null}
+
+      {form ? (
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-[11px] text-zinc-400">
+            紹介者
+            <select
+              value={referrerId}
+              onChange={(event) => {
+                setReferrerId(event.target.value);
+                setPlan(null);
+              }}
+              className="mt-0.5 block min-h-[32px] w-56 rounded-lg border border-white/[0.1] bg-surface-2 px-2 text-xs text-zinc-100"
+            >
+              <option value="">選択してください</option>
+              {/* 「-」も正式な紹介者として選べる（未設定のままとは別） */}
+              {form.referrers
+                .filter((referrer) => referrer.isActive)
+                .map((referrer) => (
+                  <option key={referrer.id} value={referrer.id}>
+                    {referrer.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-zinc-400">
+            紹介開始月
+            <input
+              type="text"
+              inputMode="numeric"
+              value={startMonth}
+              onChange={(event) => {
+                setStartMonth(event.target.value.trim());
+                setPlan(null);
+              }}
+              placeholder="YYYY-MM"
+              className="mt-0.5 block min-h-[32px] w-28 rounded-lg border border-white/[0.1] bg-surface-2 px-2 font-mono text-xs text-zinc-100"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={preview}
+            disabled={busy || !referrerId || !startMonth}
+            className="min-h-[32px] rounded-lg border border-white/[0.14] px-3 text-[11px] text-zinc-200 hover:bg-white/[0.06] disabled:opacity-40"
+          >
+            {busy ? "確認中…" : "設定内容を確認"}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="min-h-[32px] rounded-lg border border-white/[0.12] px-3 text-[11px] text-zinc-400 hover:bg-white/[0.06]"
+          >
+            キャンセル
+          </button>
+        </div>
+      ) : null}
+
+      {plan ? (
+        <div className="space-y-1.5 rounded-lg border border-amber-400/25 bg-amber-400/5 p-2 text-[11px] leading-relaxed">
+          <p className="text-amber-100">
+            クリエイター：<span className="font-mono">{plan.tiktokId}</span>
+            <br />
+            紹介者：<span className="font-semibold">{plan.referrerName ?? "—"}</span>
+            <br />
+            紹介開始月：<span className="font-mono">{plan.startMonth ?? "—"}</span>
+            <br />
+            対象となるTAP期間：
+            <span className="font-mono">
+              {plan.affectedStartMonth ?? "—"}〜{plan.affectedEndMonth ?? "—"}
+            </span>
+            <br />
+            現在：紹介者未設定
+            <br />
+            変更後：{plan.referrerName ?? "—"} / {plan.startMonth ?? "—"}〜
+          </p>
+          <p className="text-amber-200">
+            この設定では過去分の紹介報酬が新たに発生する可能性があります。
+            <br />
+            想定追加紹介報酬：
+            <span className="font-mono font-semibold">
+              {yen(plan.estimatedReferralReward)}
+            </span>
+            <span className="text-amber-200/70">
+              （対象明細 {int(plan.tapItemCount)} 件）
+            </span>
+          </p>
+          {blocked ? (
+            <p className="text-red-300">
+              この変更は保存できません：
+              {plan.blocks
+                .map((reason) => REFERRAL_CHANGE_BLOCK_LABEL[reason])
+                .join(" / ")}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={busy || blocked}
+              className="rounded-lg bg-[var(--accent-cyan)] px-2.5 py-1 text-[11px] font-semibold text-black disabled:opacity-40"
+            >
+              {busy ? "保存中…" : "この内容で設定する"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPlan(null)}
+              className="rounded-lg border border-white/[0.12] px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-white/[0.06]"
+            >
+              戻る
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TapPerformanceTab({
   initialReferrerFilter = "all",
 }: {
@@ -786,6 +1062,8 @@ function TapPerformanceTab({
   const [referrerFilter, setReferrerFilter] =
     useState<(typeof TAP_REFERRER_FILTERS)[number]["key"]>(initialReferrerFilter);
   const [sortKey, setSortKey] = useState<TapSortKey>("commissionBase");
+  /* 紹介者の設定パネルを開いている creator */
+  const [assigning, setAssigning] = useState<string | null>(null);
 
   /*
     取り寄せは操作を起点にする。effect の中で state を書くと
@@ -1116,7 +1394,34 @@ function TapPerformanceTab({
                           {row.accountManagementType}（紹介報酬の対象外）
                         </span>
                       ) : null}
+                      {/*
+                        新規設定のボタンは「関係そのものが無い」creator にだけ出す。
+                        期間外や relation異常は既存の関係を動かす操作になり、
+                        旧紹介者の期間を奪う可能性の説明が別に要るので、
+                        ここからは触らせない（/creators で扱う）。
+                      */}
+                      {row.referrerState === "none" ? (
+                        assigning === row.creatorId ? null : (
+                          <button
+                            type="button"
+                            onClick={() => setAssigning(row.creatorId)}
+                            className="mt-0.5 w-fit rounded-lg border border-[var(--accent-cyan)]/40 px-2 py-0.5 text-[10px] text-[var(--accent-cyan)] hover:bg-white/[0.06]"
+                          >
+                            紹介者を設定
+                          </button>
+                        )
+                      ) : null}
                     </div>
+                    {row.referrerState === "none" && assigning === row.creatorId ? (
+                      <ReferrerAssignPanel
+                        row={row}
+                        onCancel={() => setAssigning(null)}
+                        onDone={() => {
+                          setAssigning(null);
+                          void load();
+                        }}
+                      />
+                    ) : null}
                   </td>
                   <td className={`${td} font-mono text-zinc-300`}>
                     {row.firstTargetMonth === row.lastTargetMonth

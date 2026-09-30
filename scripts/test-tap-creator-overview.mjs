@@ -872,3 +872,230 @@ test("確認範囲は正式な対象行の条件で数える（監査の概算�
     "gap 判定を is_active だけで行っている",
   );
 });
+
+// =============================================================================
+// TAP実績からの紹介者設定（2026-09-30 追加）
+//
+// 保存は既存の updateCreatorMasterAction が唯一の入口。
+// 期間競合・月次確定・claim / paid のガードも audit log もそちらが持つ。
+// saveCreatorReferralAction は月次確定のガードを通らないので使わない。
+//
+// 紹介者を登録しただけでは紹介報酬を作り直さない。
+// =============================================================================
+const CREATORS_UI_RAW = read("app/(app)/creators/CreatorMasterClient.tsx");
+const ADMIN_REFERRALS_RAW = read("app/actions/admin-creator-referrals.ts");
+
+/** ReferrerAssignPanel の本体だけを切り出す */
+function assignPanelSource() {
+  const start = UI_RAW.indexOf("function ReferrerAssignPanel");
+  assert.ok(start >= 0, "ReferrerAssignPanel が無い");
+  const end = UI_RAW.indexOf("function TapPerformanceTab", start);
+  assert.ok(end > start, "パネルの終端が見つからない");
+  return UI_RAW.slice(start, end);
+}
+
+test("設定ボタンは紹介者未設定の creator にだけ出す", () => {
+  // none のときだけボタンとパネルを出す
+  assert.match(
+    UI_RAW,
+    /\{row\.referrerState === "none" \? \(\s*assigning === row\.creatorId \? null : \(/,
+    "未設定以外にもボタンを出している",
+  );
+  assert.match(
+    UI_RAW,
+    /row\.referrerState === "none" && assigning === row\.creatorId \? \(\s*<ReferrerAssignPanel/,
+    "パネルの表示条件が未設定に限定されていない",
+  );
+
+  // assigned / dash_referrer / out_of_period / conflict には出さない
+  for (const state of ["assigned", "dash_referrer", "out_of_period", "conflict"]) {
+    assert.equal(
+      new RegExp(`referrerState === "${state}"[^\\n]*紹介者を設定`).test(UI_RAW),
+      false,
+      `${state} に新規設定ボタンを出している`,
+    );
+  }
+});
+
+test("期間外・relation異常は今回このUIから触らない", () => {
+  const panel = assignPanelSource();
+  // パネル自体が「現在の紹介者：未設定」を前提に書かれている
+  assert.match(panel, /現在の紹介者：/);
+  assert.match(panel, /未設定/);
+  // 既存関係を解除する操作を置かない
+  assert.equal(/紹介者を外す|unlink/.test(panel), false, "解除操作を置いている");
+});
+
+test("「-」も正式な紹介者として選べる", () => {
+  const panel = assignPanelSource();
+  /*
+    有効な紹介者はすべて選択肢に出す。名前で弾かない。
+    「-」は取込時に作られた名前だが管理者が正式に設定した紹介者で、
+    未設定のままにすることとは別。
+  */
+  assert.match(panel, /form\.referrers\s*\.filter\(\(referrer\) => referrer\.isActive\)/);
+  assert.equal(
+    /isDashReferrerName|!== "-"|name !== "-"/.test(panel),
+    false,
+    "「-」を選択肢から除いている",
+  );
+});
+
+test("紹介開始月の初期値は firstEligibleMonth", () => {
+  const panel = assignPanelSource();
+  assert.match(
+    panel,
+    /useState\(row\.firstEligibleMonth\)/,
+    "開始月の初期値が最初の対象月になっていない",
+  );
+  // firstEligibleMonth は正式条件を通った行から作る
+  assert.match(QUERIES, /firstEligibleMonth: firstTargetMonth/);
+  assert.match(QUERIES, /const months = \[\.\.\.bucket\.months\]\.sort\(\)/);
+  // bucket は isTapReferralSourceLine を通った行だけを積む
+  assert.match(QUERIES, /if \(\s*!isTapReferralSourceLine\(/);
+});
+
+test("/creators でも 既存startMonth > firstTapMonth > 今月 の順で決める", () => {
+  // 既存関係があればその開始月を優先
+  assert.match(
+    CREATORS_UI_RAW,
+    /useState\(\s*row\.referrerStartMonth \?\? currentMonthLabel\(\),\s*\)/,
+    "既存の開始月を優先していない",
+  );
+  // 新規紐付けのときだけ firstTapMonth を採用
+  assert.match(CREATORS_UI_RAW, /const adoptFirstTapMonth = async/);
+  assert.match(
+    CREATORS_UI_RAW,
+    /nextReferrerId &&\s*!row\.referrerStartMonth &&\s*!startMonthTouched/,
+    "既存関係の開始月まで書き換えている",
+  );
+  assert.match(CREATORS_UI_RAW, /result\.plan\.firstTapMonth/);
+  // 管理者が触ったら自動補完しない
+  assert.match(CREATORS_UI_RAW, /setStartMonthTouched\(true\)/);
+});
+
+test("プレビューは読むだけ", () => {
+  const panel = assignPanelSource();
+  assert.match(panel, /previewReferralChangeAction\(/);
+  // プレビュー経路が書き込まない
+  const plan = codeOnly(read("lib/referrals/referral-assignment-change.ts"));
+  for (const forbidden of [/\.insert\(/, /\.update\(/, /\.upsert\(/, /\.delete\(/]) {
+    assert.equal(forbidden.test(plan), false, `プレビューが書き込んでいる: ${forbidden}`);
+  }
+});
+
+test("blocks があれば保存できない", () => {
+  const panel = assignPanelSource();
+  assert.match(panel, /const blocked = \(plan\?\.blocks\.length \?\? 0\) > 0;/);
+  assert.match(panel, /disabled=\{busy \|\| blocked\}/, "ブロック時に保存できてしまう");
+  assert.match(panel, /REFERRAL_CHANGE_BLOCK_LABEL\[reason\]/, "理由を表示していない");
+});
+
+test("保存は updateCreatorMasterAction だけを使う", () => {
+  const panel = assignPanelSource();
+  assert.match(panel, /await updateCreatorMasterAction\(null, body\)/);
+
+  /*
+    ガードの無い旧経路を使わない。
+    コメントで名前に触れるのは構わないので、コードだけを見る。
+  */
+  assert.equal(
+    /saveCreatorReferralAction/.test(UI),
+    false,
+    "saveCreatorReferralAction を使っている（月次確定のガードを通らない）",
+  );
+  // 旧経路がガードを持たないことを明示しておく
+  assert.equal(
+    /buildReferralChangePlan|canApplyReferralChange/.test(ADMIN_REFERRALS_RAW),
+    false,
+    "旧経路の前提が変わった。使ってよいか再検討する",
+  );
+  // 独自の更新処理を作らない
+  assert.equal(
+    /\.from\("creator_referrals"\)/.test(UI),
+    false,
+    "画面から creator_referrals を直接触っている",
+  );
+  assert.equal(
+    /\.from\("creators"\)[\s\S]{0,40}\.update\(/.test(UI),
+    false,
+    "画面から creators を直接更新している",
+  );
+});
+
+test("紹介者以外の現在値をそのまま送り返す（意図せず変えない）", () => {
+  const panel = assignPanelSource();
+  for (const field of ["agency_id", "commission_rate", "account_management_type"]) {
+    assert.ok(panel.includes(`body.set("${field}"`), `${field} を送っていない`);
+  }
+  // 現在値は保存直前に読んだものを使う（画面の推測値を送らない）
+  assert.match(panel, /form\.current\.agencyId/);
+  assert.match(panel, /form\.current\.commissionRate/);
+  assert.match(panel, /form\.current\.accountManagementType/);
+
+  // 取得側が creators の現在値を読んでいる
+  assert.match(
+    ACTIONS,
+    /\.select\("id, agency_id, commission_rate, account_management_type"\)/,
+    "現在値の取得が足りない",
+  );
+  // 下ごしらえの action は書き込まない
+  const prep = ACTIONS.slice(
+    ACTIONS.indexOf("export async function fetchCreatorReferrerFormAction"),
+    ACTIONS.indexOf("export type ReferrerGapActionResult"),
+  );
+  for (const forbidden of [/\.insert\(/, /\.update\(/, /\.upsert\(/, /\.delete\(/]) {
+    assert.equal(forbidden.test(prep), false, `下ごしらえが書き込んでいる: ${forbidden}`);
+  }
+});
+
+test("紹介者設定で reward / payout / settlement を自動で動かさない", () => {
+  const panel = assignPanelSource();
+  for (const forbidden of [
+    /syncReferralRewardsForMonth/,
+    /refreshReferralPayouts/,
+    /finalizeReferralMonthAction/,
+    /unfinalizeReferralMonthAction/,
+    /claim/,
+    /payment_batch/,
+    /markReferralPayoutPaid/,
+  ]) {
+    assert.equal(forbidden.test(panel), false, `設定パネルが ${forbidden} を呼んでいる`);
+  }
+
+  // 保存経路も reward / payout を触らない
+  const master = codeOnly(read("app/actions/update-creator-master.ts"));
+  for (const table of ["referral_reward_items", "referral_payouts", "referral_month_settlements"]) {
+    assert.equal(
+      master.includes(`"${table}"`),
+      false,
+      `保存経路が ${table} を触っている`,
+    );
+  }
+  const link = codeOnly(read("lib/referrals/link-creator-referrer.ts"));
+  for (const table of ["referral_reward_items", "referral_payouts"]) {
+    assert.equal(link.includes(`"${table}"`), false, `link が ${table} を触っている`);
+  }
+});
+
+test("保存後は再計算されていないことを伝え、一覧を取り直す", () => {
+  const panel = assignPanelSource();
+  assert.match(panel, /紹介報酬はまだ再計算されていません/);
+  assert.match(panel, /onDone/);
+  // 一覧の再取得を親が行う
+  assert.match(
+    UI_RAW,
+    /onDone=\{\(\) => \{\s*setAssigning\(null\);\s*void load\(\);\s*\}\}/,
+    "保存後に一覧を取り直していない",
+  );
+});
+
+test("紹介者未設定は成果報酬ベースの高い順に並ぶ", () => {
+  // 既定の並びが成果報酬ベース
+  assert.match(UI_RAW, /useState<TapSortKey>\("commissionBase"\)/);
+  assert.match(
+    UI_RAW,
+    /\.sort\(\(a, b\) => b\[sortKey\] - a\[sortKey\]/,
+    "降順になっていない",
+  );
+});
