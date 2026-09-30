@@ -224,9 +224,27 @@ test("紹介者の状態を5つに分ける（あり /「-」/ 期間外 / な�
 // 書き込みをしない
 // =============================================================================
 test("TAP実績の集計は参照のみ", () => {
-  for (const forbidden of [/\.update\(/, /\.delete\(/, /\.upsert\(/, /\.insert\(/, /\.rpc\(/]) {
+  for (const forbidden of [/\.update\(/, /\.delete\(/, /\.upsert\(/, /\.insert\(/]) {
     assert.equal(forbidden.test(QUERIES), false, `書き込みを行っている: ${forbidden}`);
   }
+
+  /*
+    2026-09-30 改定。RPC は読み取り専用のものだけ許す。
+
+    確認範囲を月次確定の対象月から決めるために
+    list_referral_month_settlements（security definer / stable）を呼ぶ。
+    referral_month_settlements は authenticated / service_role に
+    SELECT が grant されていないため、テーブルを直接引くのではなく
+    既存の安全な RPC を通す。
+
+    finalize / unfinalize のような状態を変える RPC は呼ばない。
+  */
+  const rpcs = [...QUERIES.matchAll(/\.rpc\("([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(
+    rpcs,
+    ["list_referral_month_settlements"],
+    `読み取り専用でない RPC を呼んでいる: ${rpcs.join(", ")}`,
+  );
 });
 
 test("TAP実績タブに支払操作を置かない", () => {
@@ -710,5 +728,147 @@ test("16. 既存の reward / payout ロジックへ影響しない", () => {
     /tap-creator-queries/.test(sync),
     false,
     "生成側が表示用の集計に依存している",
+  );
+});
+
+// =============================================================================
+// 確認範囲と支払上限の分離（2026-09-30 追加）
+//
+// MAX_REFERRAL_PAYMENT_CUTOFF_MONTH（2026-07）は「紹介報酬を支払って
+// よい最後の締め月」で、TAP が全量確定していない月を支払わないための
+// 歯止め。2026-08 は 1,343 行中 871 行が未払い（支払済 35.1%）なので、
+// 支払上限は動かさない。
+//
+// 一方、月次確定の対象には 2026-08 が含まれている。確定できる月の
+// 紹介者の入力漏れを確認できないと見逃すので、確認範囲だけを
+// 月次確定の対象月に合わせる。確認は読むだけで支払を発生させない。
+// =============================================================================
+
+test("支払上限は 2026-07 のまま動かさない", () => {
+  assert.equal(cutoff.MAX_REFERRAL_PAYMENT_CUTOFF_MONTH, "2026-07");
+
+  // 支払候補の判定は支払上限で絞り続ける
+  assert.match(
+    codeOnly(PAYMENT_QUERIES_RAW),
+    /targetMonth <= MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/,
+    "支払候補の上限が外れている",
+  );
+  assert.match(
+    codeOnly(PAYMENT_QUERIES_RAW),
+    /params\.cutoffMonth > MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/,
+    "内訳表示のクランプが外れている",
+  );
+});
+
+test("claim RPC の 2026-07 上限を維持する", () => {
+  const migration = read(
+    "supabase/migrations/20260927200000_referral_payment_hold.sql",
+  );
+  assert.match(
+    migration,
+    /if p_cutoff_month > '2026-07' then/,
+    "claim RPC の上限が外れている",
+  );
+});
+
+test("確認範囲は月次確定の対象月から決める（固定値にしない）", () => {
+  assert.match(QUERIES, /export async function resolveReferralReviewEndMonth/);
+  assert.match(
+    QUERIES,
+    /supabase\.rpc\("list_referral_month_settlements"\)/,
+    "settlement を既存の安全な RPC から読んでいない",
+  );
+  // 権限を緩めていない
+  assert.equal(
+    /\.from\("referral_month_settlements"\)/.test(QUERIES),
+    false,
+    "settlement をテーブルから直接読んでいる",
+  );
+  // 取得できなければ支払上限まで狭める（広げる方向へ倒さない）
+  assert.match(QUERIES, /if \(error\) return MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;/);
+  assert.match(
+    QUERIES,
+    /latest < MAX_REFERRAL_PAYMENT_CUTOFF_MONTH\s*\?\s*MAX_REFERRAL_PAYMENT_CUTOFF_MONTH\s*:\s*latest/,
+    "確定対象が支払上限より手前のとき狭い方に合わせていない",
+  );
+});
+
+test("確認範囲は呼び出し側から渡せる（集計側で固定しない）", () => {
+  assert.match(QUERIES, /options\.endMonth \?\? MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/);
+  assert.match(
+    QUERIES,
+    /export async function fetchReferrerGapSummary\(\s*supabase: SupabaseClient,\s*options: \{ endMonth\?: string \} = \{\},/,
+    "gap 集計が範囲を受け取れない",
+  );
+  // Server Action が確認範囲を解決して渡している
+  assert.match(ACTIONS, /resolveReferralReviewEndMonth\(auth\.supabase\)/);
+  assert.match(ACTIONS, /fetchTapCreatorOverview\(getSupabaseAdmin\(\), \{ endMonth \}\)/);
+  assert.match(ACTIONS, /fetchReferrerGapSummary\(getSupabaseAdmin\(\), \{ endMonth \}\)/);
+});
+
+test("確認範囲を広げても支払候補へ混入しない", () => {
+  /*
+    確認範囲（endMonth）は TAP実績と gap 集計にしか渡していない。
+    支払候補を作る fetchPaymentOverview には渡らない。
+  */
+  assert.equal(
+    /fetchPaymentOverview\([^)]*endMonth/.test(ACTIONS),
+    false,
+    "確認範囲が支払候補の集計へ渡っている",
+  );
+  // 支払側は MAX_REFERRAL_PAYMENT_CUTOFF_MONTH だけを見る
+  const payment = codeOnly(PAYMENT_QUERIES_RAW);
+  assert.equal(
+    /resolveReferralReviewEndMonth/.test(payment),
+    false,
+    "支払側が確認範囲を参照している",
+  );
+  assert.equal(
+    /referral_month_settlements/.test(payment),
+    false,
+    "支払側が確定状況で範囲を決めている",
+  );
+});
+
+test("画面で支払上限と確認範囲を取り違えさせない", () => {
+  // gap は両方を返す
+  assert.match(QUERIES, /endMonth: string;/);
+  assert.match(QUERIES, /paymentCutoffMonth: string;/);
+  assert.match(QUERIES, /paymentCutoffMonth: MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/);
+
+  // 画面が両方を出す
+  assert.ok(UI_RAW.includes("確認対象："), "確認範囲を表示していない");
+  assert.ok(UI_RAW.includes("支払可能な締め月："), "支払上限を表示していない");
+  // 支払上限より後の月に注記を出す
+  assert.match(
+    UI_RAW,
+    /row\.targetMonth > MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/,
+    "支払上限より後の月の注記が無い",
+  );
+  assert.ok(UI_RAW.includes("TAP未確定・支払対象外"));
+});
+
+test("確認範囲は正式な対象行の条件で数える（監査の概算とは一致しない）", () => {
+  /*
+    母集団は isTapReferralSourceLine を通す。未払い・未決済・返金済みの
+    行は「報酬が発生した」とは言えないので除く。
+
+    W+X>0 だけで数えた概算（153名）より少なくなるのが正しい。
+    2026-08 は 1,343 行中 871 行が未払いで、その分が落ちる。
+  */
+  assert.match(QUERIES, /isTapReferralSourceLine\(/);
+
+  // gap 側は「その月を覆う関係が無い」で判定する。
+  // 「active relation が無い」だけで数えると、関係はあるが対象月を
+  // 覆わない creator（期間外）を取りこぼす。
+  assert.match(
+    QUERIES,
+    /if \(resolution\.period\?\.referrerId\) continue;/,
+    "その月を覆うかで判定していない",
+  );
+  assert.equal(
+    /cr\.is_active[^\n]*gap/i.test(QUERIES),
+    false,
+    "gap 判定を is_active だけで行っている",
   );
 });

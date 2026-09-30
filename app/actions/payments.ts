@@ -24,6 +24,7 @@ import {
 import {
   fetchReferrerGapSummary,
   fetchTapCreatorOverview,
+  resolveReferralReviewEndMonth,
   type ReferrerGapSummary,
   type TapCreatorOverview,
 } from "@/lib/db/tap-creator-queries";
@@ -321,7 +322,14 @@ export async function fetchReferrerGapSummaryAction(): Promise<ReferrerGapAction
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const summary = await fetchReferrerGapSummary(getSupabaseAdmin());
+  /*
+    確認範囲は月次確定の対象月から決める（支払上限とは別）。
+    referral_month_settlements は RPC 経由でしか読めず、その RPC は
+    auth.uid() を要求するので、ログイン中のクライアントで解決してから
+    集計側（サービスロール）へ渡す。
+  */
+  const endMonth = await resolveReferralReviewEndMonth(auth.supabase);
+  const summary = await fetchReferrerGapSummary(getSupabaseAdmin(), { endMonth });
 
   if (summary.error) {
     return { ok: false, error: mapSupabaseErrorToJa(summary.error) };
@@ -343,7 +351,8 @@ export async function fetchTapCreatorOverviewAction(): Promise<TapCreatorOvervie
     tap_affiliate_order_lines は RLS が管理者限定になっている。
     管理者判定は requireAdminAction で先に済ませている。
   */
-  const overview = await fetchTapCreatorOverview(getSupabaseAdmin());
+  const endMonth = await resolveReferralReviewEndMonth(auth.supabase);
+  const overview = await fetchTapCreatorOverview(getSupabaseAdmin(), { endMonth });
 
   if (overview.error) {
     return { ok: false, error: mapSupabaseErrorToJa(overview.error) };

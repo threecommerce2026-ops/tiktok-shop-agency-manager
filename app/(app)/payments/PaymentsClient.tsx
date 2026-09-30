@@ -448,6 +448,13 @@ function ReferralSettlementSection({
             <span className="font-semibold text-zinc-300">すべての月</span>
             が確定済みである必要があります。報酬が 0 件の月も確定が必要です。
             確定しても報酬額は変わりません。
+            <br />
+            支払対象にできるのは{" "}
+            <span className="font-semibold text-zinc-300">
+              {MAX_REFERRAL_PAYMENT_CUTOFF_MONTH} 末締め
+            </span>
+            までです。それより後の月は TAP の全量取込が済んでいないため、
+            確定しても支払には進めません。
           </p>
         </div>
         <button
@@ -497,6 +504,13 @@ function ReferralSettlementSection({
             <span className="font-mono">{yen(gap.estimatedReferralReward)}</span>
             <br />
             月次確定の前にご確認ください。
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+            確認対象：{gap.endMonth} まで ／ 支払可能な締め月：
+            {gap.paymentCutoffMonth} まで
+            <br />
+            確認範囲は月次確定の対象月に合わせています。支払の上限とは別で、
+            {gap.paymentCutoffMonth} より後の月は支払対象になりません。
           </p>
           {gap.months.length > 0 ? (
             <div className="mt-2 overflow-x-auto">
@@ -557,7 +571,19 @@ function ReferralSettlementSection({
                 const locked = row.claimedItemCount > 0 || row.paidItemCount > 0;
                 return (
                   <tr key={row.targetMonth} className="border-t border-zinc-800/70 align-top">
-                    <td className="px-2 py-1.5 font-mono text-zinc-200">{row.targetMonth}</td>
+                    <td className="px-2 py-1.5 font-mono text-zinc-200">
+                      {row.targetMonth}
+                      {/*
+                        支払上限より後の月。確定はできるが支払には進めない。
+                        TAP の全量取込が済んでいないので、いま確定すると
+                        暫定値を確定させることになる。
+                      */}
+                      {row.targetMonth > MAX_REFERRAL_PAYMENT_CUTOFF_MONTH ? (
+                        <span className="mt-0.5 block w-fit rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-200">
+                          TAP未確定・支払対象外
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-2 py-1.5">
                       <SettlementStatusBadge status={row.status} />
                     </td>

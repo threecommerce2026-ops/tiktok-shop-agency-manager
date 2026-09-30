@@ -16,7 +16,11 @@ import {
   sumReferralAmounts,
 } from "@/lib/referrals/referral-reward-engine";
 import { toAmount } from "@/lib/revenue/amount";
-import { EARLIEST_CUTOFF_MONTH, MAX_REFERRAL_PAYMENT_CUTOFF_MONTH } from "@/lib/payments/cutoff-month";
+import {
+  CUTOFF_MONTH_PATTERN,
+  EARLIEST_CUTOFF_MONTH,
+  MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
+} from "@/lib/payments/cutoff-month";
 
 /*
   TAP実績（クリエイター単位の成果と報酬構造）。
@@ -252,6 +256,53 @@ function readCreatorCommission(raw: string | null): {
  *
  * 画面へ渡すのは集計後の行だけ。明細はサーバー側で畳んでから返す。
  */
+/*
+  紹介者を「確認する」範囲の終わり。
+
+  ■ 支払の上限とは別物
+  MAX_REFERRAL_PAYMENT_CUTOFF_MONTH（2026-07）は「紹介報酬を支払って
+  よい最後の締め月」で、TAP が全量確定していない月を支払わないための
+  歯止め。確認は読むだけで支払を発生させないので、同じ値に縛る理由がない。
+
+  実際 2026-08 は月次確定の対象になっているのに、確認範囲が 2026-07 の
+  ままだと未設定のクリエイターが画面にも警告にも出ず、入力漏れを
+  見逃す。確定できる月は確認もできなければならない。
+
+  ■ 月次確定の対象月から決める
+  referral_month_settlements に行がある月が「確定しようとしている対象」
+  そのものなので、その最大月を確認範囲の終わりにする。月が増えれば
+  画面も自動で追随し、定数を書き換え忘れる余地が無くなる。
+
+  ■ 読み取りは RPC 経由
+  referral_month_settlements は authenticated / service_role に SELECT が
+  grant されていない（postgres のみ）。権限を緩めず、既存の
+  list_referral_month_settlements() を使う。呼び出しには auth.uid() を
+  持つ認証済みクライアントが要る（サービスロールでは呼べない）。
+
+  取得できなかった場合は支払上限まで狭める。広げる方向へ倒すと、
+  根拠の無い月まで確認対象に見せてしまう。
+*/
+export async function resolveReferralReviewEndMonth(
+  supabase: SupabaseClient,
+): Promise<string> {
+  const { data, error } = await supabase.rpc("list_referral_month_settlements");
+
+  if (error) return MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
+
+  const months = ((data as Array<Record<string, unknown>> | null) ?? [])
+    .map((row) => String(row.target_month ?? ""))
+    .filter((month) => CUTOFF_MONTH_PATTERN.test(month))
+    .sort();
+
+  const latest = months.at(-1);
+  if (!latest) return MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
+
+  /* 確定対象が支払上限より手前なら、狭い方に合わせる */
+  return latest < MAX_REFERRAL_PAYMENT_CUTOFF_MONTH
+    ? MAX_REFERRAL_PAYMENT_CUTOFF_MONTH
+    : latest;
+}
+
 export async function fetchTapCreatorOverview(
   supabase: SupabaseClient,
   options: { startMonth?: string; endMonth?: string } = {},
@@ -657,6 +708,10 @@ export type ReferrerGapMonth = {
 
 export type ReferrerGapSummary = {
   months: ReferrerGapMonth[];
+  /** 確認した範囲の終わり。支払上限とは別 */
+  endMonth: string;
+  /** 支払ってよい最後の締め月（画面で取り違えないよう一緒に返す） */
+  paymentCutoffMonth: string;
   /** 全期間で一度でも未設定だったクリエイターの実数（月をまたいで重複させない） */
   creatorCount: number;
   referralBaseAmount: number;
@@ -666,6 +721,8 @@ export type ReferrerGapSummary = {
 
 const EMPTY_GAP: ReferrerGapSummary = {
   months: [],
+  endMonth: MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
+  paymentCutoffMonth: MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
   creatorCount: 0,
   referralBaseAmount: 0,
   estimatedReferralReward: 0,
@@ -674,9 +731,10 @@ const EMPTY_GAP: ReferrerGapSummary = {
 
 export async function fetchReferrerGapSummary(
   supabase: SupabaseClient,
+  options: { endMonth?: string } = {},
 ): Promise<ReferrerGapSummary> {
   const startMonth = EARLIEST_CUTOFF_MONTH;
-  const endMonth = MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
+  const endMonth = options.endMonth ?? MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
 
   const [linesResult, creatorsResult, referralsResult] = await Promise.all([
     fetchAllFrom<TapLineRow>(supabase, "tap_affiliate_order_lines", TAP_LINE_COLUMNS, (query) =>
@@ -696,7 +754,7 @@ export async function fetchReferrerGapSummary(
 
   const error =
     linesResult.error ?? creatorsResult.error ?? referralsResult.error ?? null;
-  if (error) return { ...EMPTY_GAP, error };
+  if (error) return { ...EMPTY_GAP, endMonth, error };
 
   const eligibleById = new Map<string, boolean>();
   for (const row of creatorsResult.data) {
@@ -755,6 +813,8 @@ export async function fetchReferrerGapSummary(
 
   return {
     months,
+    endMonth,
+    paymentCutoffMonth: MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
     creatorCount: allCreators.size,
     referralBaseAmount: totalBase,
     estimatedReferralReward: sumReferralAmounts([totalBase * REFERRAL_REWARD_RATE]),
