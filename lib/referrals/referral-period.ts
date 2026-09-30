@@ -46,6 +46,32 @@ import {
   いつまで有効だったかがどこにも記録されていない。
   ここで「無効化した日まで」などと決めると、DBに無い事実を作ってしまう。
   unresolved として外に出し、呼び出し側が件数を報告する。
+
+  ■ 誤登録の履歴は期間計算に入れない（2026-09-30 確定）
+  現時点で「途中から紹介者が変わった」クリエイターは1人も居ない。
+  creator_referrals に複数行あるのは期間の切り替えではなく、
+  登録されていた紹介者が間違っていたので後から直した履歴である。
+
+  この履歴を期間計算に混ぜると、現在の紹介者の期間が誤登録行に
+  切られてしまう。実際 eripyon.ec で、有効な関係を 2026-04 へ
+  遡らせたところ、誤登録の 2026-05 行が「後続」と見なされて
+  有効な関係が 2026-04 の1か月で終わり、2026-05 の報酬が
+  どの紹介者にも帰属しなくなった。
+
+  そこで期間計算に使うのは次の2つだけにする。
+
+      is_active = true                        現在の正しい関係
+      is_active = false かつ end_month あり   実際に有効だった過去の関係
+
+  is_active = false かつ end_month が無いものは、いつまで有効だったか
+  が記録されていない＝誤登録の履歴として扱い、期間の境界にも
+  報酬の帰属先にも使わない。行は履歴として残すので消さない。
+
+  ■ 本当に紹介者が変わった場合はこれまでどおり分割できる
+  旧紹介者に end_month を明示して is_active = false、
+  新紹介者を is_active = true にすれば、下の導出ロジックが
+  そのまま期間を分ける。end_month が「実際に有効だった」ことの
+  唯一の根拠になる、というのがこのルールの要点。
 */
 
 export type ReferralRelationRow = {
@@ -113,6 +139,17 @@ function toNumber(value: unknown, fallback: number): number {
  * 並びは start_month の昇順（同じ月なら created_at の昇順）。
  * 実効終了月は end_month があればそれ、無ければ後続関係の開始月の前月。
  */
+/**
+ * 期間計算に使ってよい関係か。
+ *
+ * 誤登録を直した履歴（無効化されていて終了月も無い行）を除く。
+ * 詳しい理由はこのファイル冒頭の「誤登録の履歴は期間計算に入れない」。
+ */
+function isUsableForPeriod(row: ReferralRelationRow): boolean {
+  if (row.is_active === true) return true;
+  return row.end_month != null;
+}
+
 export function buildReferralPeriods(
   rows: readonly ReferralRelationRow[],
 ): ReferralPeriodIndex {
@@ -121,6 +158,7 @@ export function buildReferralPeriods(
   for (const row of rows) {
     const creatorId = row.creator_id;
     if (!creatorId) continue;
+    if (!isUsableForPeriod(row)) continue;
     const list = grouped.get(creatorId);
     if (list) list.push(row);
     else grouped.set(creatorId, [row]);
