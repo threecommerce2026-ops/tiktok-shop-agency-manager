@@ -14,6 +14,7 @@ import {
   createPaymentBatchAction,
   exportPaymentCsvAction,
   fetchReferralMonthSettlementsAction,
+  fetchReferrerGapSummaryAction,
   fetchReferrerRewardDetailAction,
   fetchTapCreatorOverviewAction,
   finalizeReferralMonthAction,
@@ -29,6 +30,7 @@ import {
 import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
 import type {
   TapCreatorOverview,
+  ReferrerGapSummary,
   TapCreatorRow,
 } from "@/lib/db/tap-creator-queries";
 import { BankStateBadge, PayeeBankForm } from "@/components/payments/PayeeBankForm";
@@ -378,7 +380,12 @@ function SettlementStatusBadge({ status }: { status: string }) {
   );
 }
 
-function ReferralSettlementSection() {
+function ReferralSettlementSection({
+  onReviewReferrers,
+}: {
+  /* 「TAP実績で確認する」を押したときに親がタブを切り替える */
+  onReviewReferrers: () => void;
+}) {
   const [rows, setRows] = useState<ReferralMonthSettlementRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -386,14 +393,24 @@ function ReferralSettlementSection() {
 
   const [result, setResult] = useState<ReferralSettlementActionResult | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const [gap, setGap] = useState<ReferrerGapSummary | null>(null);
 
   const load = async () => {
     setLoading(true);
     setError(null);
-    const listed = await fetchReferralMonthSettlementsAction();
+    /*
+      確定状況と、紹介者の入力漏れを一緒に取る。
+      入力漏れの方は件数と金額だけを返す軽い経路なので、
+      TAP実績の一覧（2万件超）は読まない。
+    */
+    const [listed, gapResult] = await Promise.all([
+      fetchReferralMonthSettlementsAction(),
+      fetchReferrerGapSummaryAction(),
+    ]);
     setLoading(false);
     if (listed.ok) setRows(listed.rows);
     else setError(listed.error);
+    setGap(gapResult.ok ? gapResult.summary : null);
   };
 
   /*
@@ -454,6 +471,71 @@ function ReferralSettlementSection() {
         >
           {result.ok ? result.message : result.error}
         </p>
+      ) : null}
+
+      {/*
+        紹介者の入力漏れ警告。
+
+        確定してしまうと、あとで紹介者を登録したときに確定済みの月の
+        金額が変わる。確定の直前にここで気づけるようにする。
+        検出するだけで、紹介者の登録も報酬の生成もここでは行わない。
+      */}
+      {gap && gap.creatorCount > 0 ? (
+        <div className="rounded-lg border border-red-400/25 bg-red-400/5 p-3">
+          <p className="text-xs font-semibold text-red-200">
+            ⚠ 紹介者の確認が必要です
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-red-100/90">
+            TAP報酬が発生している紹介報酬の対象区分のクリエイターのうち、紹介者が未設定のものが{" "}
+            <span className="font-mono font-semibold">{int(gap.creatorCount)} 名</span>{" "}
+            います。
+            <br />
+            紹介報酬の算定元：
+            <span className="font-mono">{yen(gap.referralBaseAmount)}</span>
+            {" / "}
+            紹介報酬換算：
+            <span className="font-mono">{yen(gap.estimatedReferralReward)}</span>
+            <br />
+            月次確定の前にご確認ください。
+          </p>
+          {gap.months.length > 0 ? (
+            <div className="mt-2 overflow-x-auto">
+              <table className="min-w-[420px] border-collapse text-[11px]">
+                <thead>
+                  <tr className="text-left text-red-200/70">
+                    <th className="px-2 py-1 font-medium">対象月</th>
+                    <th className="px-2 py-1 text-right font-medium">未設定</th>
+                    <th className="px-2 py-1 text-right font-medium">算定元</th>
+                    <th className="px-2 py-1 text-right font-medium">紹介報酬換算</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gap.months.map((month) => (
+                    <tr key={month.targetMonth} className="text-red-100/90">
+                      <td className="px-2 py-1 font-mono">{month.targetMonth}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {int(month.creatorCount)} 名
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {yen(month.referralBaseAmount)}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {yen(month.estimatedReferralReward)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={onReviewReferrers}
+            className="mt-2 rounded-lg border border-red-400/30 px-3 py-1 text-[11px] text-red-100 hover:bg-red-400/10"
+          >
+            TAP実績で確認する
+          </button>
+        </div>
       ) : null}
 
       {rows ? (
@@ -589,18 +671,66 @@ const TAP_AGENCY_FILTERS = [
   { key: "unconfirmed", label: "所属: 未確認" },
 ] as const;
 
+/*
+  紹介者の絞り込み。
+
+  「-」と「未設定」は別項目にする。「-」は管理者が正式に設定した
+  有効な紹介者で、未設定（関係そのものが無い）とは意味が違う。
+  ここで同じ選択肢にまとめると入力漏れを見つけられなくなる。
+*/
 const TAP_REFERRER_FILTERS = [
   { key: "all", label: "紹介者: すべて" },
-  { key: "assigned", label: "紹介者: あり" },
-  { key: "none", label: "紹介者: なし" },
-  { key: "out_of_period", label: "紹介者: 期間外" },
+  { key: "assigned", label: "紹介者: 設定済み" },
+  { key: "dash_referrer", label: "紹介者: 「-」設定済み" },
+  { key: "none", label: "紹介者: 未設定" },
+  { key: "review", label: "紹介者: 要確認" },
 ] as const;
+
+/** 紹介者の状態の表示。未設定と「-」を取り違えないようにする */
+function tapReferrerBadge(state: TapCreatorRow["referrerState"]): {
+  label: string;
+  className: string;
+} {
+  switch (state) {
+    case "assigned":
+      return {
+        label: "設定済み",
+        className: "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
+      };
+    case "dash_referrer":
+      return {
+        label: "「-」設定済み",
+        className: "border-white/[0.14] bg-white/[0.05] text-zinc-300",
+      };
+    case "out_of_period":
+      return {
+        label: "期間外・要確認",
+        className: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+      };
+    case "conflict":
+      return {
+        label: "relation異常・要確認",
+        className: "border-red-400/30 bg-red-400/10 text-red-200",
+      };
+    default:
+      return {
+        label: "要確認",
+        className: "border-red-400/30 bg-red-400/10 text-red-200",
+      };
+  }
+}
+
+/** 要確認（未設定・期間外・異常）か */
+function tapNeedsReview(state: TapCreatorRow["referrerState"]): boolean {
+  return state === "none" || state === "out_of_period" || state === "conflict";
+}
 
 const TAP_SORTS = [
   { key: "commissionBase", label: "成果報酬ベース順" },
   { key: "tapRevenue", label: "THREE報酬順" },
   { key: "creatorEstimatedCommission", label: "クリエイター報酬順" },
   { key: "referralRewardAmount", label: "紹介報酬順" },
+  { key: "referralBaseAmount", label: "紹介報酬の算定元順" },
 ] as const;
 
 type TapSortKey = (typeof TAP_SORTS)[number]["key"];
@@ -615,7 +745,12 @@ function tapAgencyBadge(row: TapCreatorRow): string {
   return "border-white/[0.1] bg-white/[0.04] text-zinc-400";
 }
 
-function TapPerformanceTab() {
+function TapPerformanceTab({
+  initialReferrerFilter = "all",
+}: {
+  /* 月次確定の警告から来たときに「未設定だけ」を初期選択する */
+  initialReferrerFilter?: (typeof TAP_REFERRER_FILTERS)[number]["key"];
+}) {
   const [overview, setOverview] = useState<TapCreatorOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -623,7 +758,7 @@ function TapPerformanceTab() {
   const [agencyFilter, setAgencyFilter] =
     useState<(typeof TAP_AGENCY_FILTERS)[number]["key"]>("all");
   const [referrerFilter, setReferrerFilter] =
-    useState<(typeof TAP_REFERRER_FILTERS)[number]["key"]>("all");
+    useState<(typeof TAP_REFERRER_FILTERS)[number]["key"]>(initialReferrerFilter);
   const [sortKey, setSortKey] = useState<TapSortKey>("commissionBase");
 
   /*
@@ -655,7 +790,16 @@ function TapPerformanceTab() {
         ) {
           return false;
         }
-        if (referrerFilter !== "all" && row.referrerState !== referrerFilter) return false;
+        if (referrerFilter === "review" && !tapNeedsReview(row.referrerState)) {
+          return false;
+        }
+        if (
+          referrerFilter !== "all" &&
+          referrerFilter !== "review" &&
+          row.referrerState !== referrerFilter
+        ) {
+          return false;
+        }
         return true;
       })
       .sort((a, b) => b[sortKey] - a[sortKey] || a.tiktokId.localeCompare(b.tiktokId, "ja"));
@@ -744,6 +888,73 @@ function TapPerformanceTab() {
         />
       </div>
 
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <Kpi label="紹介者 設定済み" value={`${int(totals.referrerAssignedCount)} 名`} />
+        <Kpi
+          label="紹介者「-」"
+          value={`${int(totals.referrerDashCount)} 名`}
+          hint="正式に設定された紹介者"
+        />
+        <Kpi
+          label="紹介者 未設定"
+          value={`${int(totals.referrerNoneCount)} 名`}
+          hint="有効な紹介関係なし"
+        />
+        <Kpi
+          label="要確認"
+          value={`${int(totals.referrerReviewCount)} 名`}
+          hint="未設定・期間外・relation異常"
+        />
+        <Kpi
+          label="紹介者の入力漏れ"
+          value={`${int(totals.missingReferrerCreatorCount)} 名`}
+          hint="紹介報酬の対象区分のみ"
+        />
+      </div>
+
+      {totals.missingReferrerCreatorCount > 0 ? (
+        <div className="rounded-xl border border-red-400/25 bg-red-400/5 p-4">
+          <p className="text-xs font-semibold text-red-200">
+            ⚠ 紹介者の確認が必要です
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-red-100/90">
+            TAP報酬が発生している
+            <span className="font-semibold">紹介報酬の対象区分</span>
+            のクリエイターのうち、紹介者が未設定のものが{" "}
+            <span className="font-mono font-semibold">
+              {int(totals.missingReferrerCreatorCount)} 名
+            </span>{" "}
+            います。
+            <br />
+            紹介報酬の算定元：
+            <span className="font-mono">{yen(totals.missingReferrerBaseAmount)}</span>
+            {" / "}
+            紹介報酬換算：
+            <span className="font-mono">
+              {yen(totals.missingReferrerEstimatedReward)}
+            </span>
+            <br />
+            月次確定の前にご確認ください。紹介者はここでは登録されません。
+          </p>
+          <button
+            type="button"
+            onClick={() => setReferrerFilter("none")}
+            className="mt-2 rounded-lg border border-red-400/30 px-3 py-1 text-[11px] text-red-100 hover:bg-red-400/10"
+          >
+            紹介者未設定だけを表示
+          </button>
+        </div>
+      ) : null}
+
+      {totals.referrerNoneCount > totals.missingReferrerCreatorCount ? (
+        <p className="text-[11px] leading-relaxed text-zinc-500">
+          紹介者未設定 {int(totals.referrerNoneCount)} 名のうち{" "}
+          {int(totals.referrerNoneCount - totals.missingReferrerCreatorCount)}{" "}
+          名は self_operated / account_lending
+          などの区分で、区分により紹介報酬の対象外です。入力漏れの警告には含めていません。
+        </p>
+      ) : null}
+
       {totals.creatorCommissionMissingCount > 0 ? (
         <p className="text-[11px] leading-relaxed text-zinc-500">
           クリエイター報酬がTAPデータに記録されていない明細が{" "}
@@ -807,6 +1018,7 @@ function TapPerformanceTab() {
           <thead>
             <tr>
               <th className={th}>TikTok ID</th>
+              <th className={th}>区分</th>
               <th className={th}>所属</th>
               <th className={th}>紹介者</th>
               <th className={th}>対象期間</th>
@@ -814,13 +1026,15 @@ function TapPerformanceTab() {
               <th className={`${th} text-right`}>成果報酬ベース</th>
               <th className={`${th} text-right`}>THREE報酬</th>
               <th className={`${th} text-right`}>クリエイター報酬</th>
-              <th className={`${th} text-right`}>紹介報酬</th>
+              <th className={`${th} text-right`}>紹介報酬の算定元</th>
+              <th className={`${th} text-right`}>想定紹介報酬5%</th>
+              <th className={`${th} text-right`}>紹介報酬（実績）</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-sm text-zinc-500">
+                <td colSpan={12} className="px-4 py-10 text-center text-sm text-zinc-500">
                   該当するクリエイターがいません。
                 </td>
               </tr>
@@ -831,6 +1045,19 @@ function TapPerformanceTab() {
                     <span className="font-mono text-zinc-100">
                       {row.tiktokId || row.creatorName || row.creatorId.slice(0, 8)}
                     </span>
+                    {row.creatorName && row.creatorName !== row.tiktokId ? (
+                      <span className="block text-[10px] text-zinc-500">
+                        {row.creatorName}
+                      </span>
+                    ) : null}
+                    {row.referrerAssignmentState ? (
+                      <span className="block text-[10px] text-zinc-600">
+                        確認状態: {row.referrerAssignmentState}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className={`${td} whitespace-normal text-zinc-400`}>
+                    {row.accountManagementType ?? "-"}
                   </td>
                   <td className={`${td} whitespace-normal`}>
                     <span
@@ -840,18 +1067,30 @@ function TapPerformanceTab() {
                     </span>
                   </td>
                   <td className={`${td} whitespace-normal`}>
-                    {row.referrerState === "none" ? (
-                      <span className="text-zinc-500">なし</span>
-                    ) : (
-                      <div className="flex flex-col gap-0.5">
+                    <div className="flex flex-col gap-0.5">
+                      {row.referrerState === "none" ? (
+                        <span className="font-semibold text-red-200">未設定</span>
+                      ) : (
                         <span className="text-zinc-200">{row.referrerName}</span>
-                        {row.referrerState === "out_of_period" ? (
-                          <span className="text-[10px] text-amber-200">
-                            期間外（{row.referralPeriodLabel}）
-                          </span>
-                        ) : null}
-                      </div>
-                    )}
+                      )}
+                      <span
+                        className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${
+                          tapReferrerBadge(row.referrerState).className
+                        }`}
+                      >
+                        {tapReferrerBadge(row.referrerState).label}
+                      </span>
+                      {row.referrerState === "out_of_period" ? (
+                        <span className="text-[10px] text-amber-200">
+                          {row.referralPeriodLabel}
+                        </span>
+                      ) : null}
+                      {row.referrerState === "none" && !row.referralEligibleType ? (
+                        <span className="text-[10px] text-zinc-500">
+                          {row.accountManagementType}（紹介報酬の対象外）
+                        </span>
+                      ) : null}
+                    </div>
                   </td>
                   <td className={`${td} font-mono text-zinc-300`}>
                     {row.firstTargetMonth === row.lastTargetMonth
@@ -869,6 +1108,26 @@ function TapPerformanceTab() {
                   </td>
                   <td className={`${td} text-right font-mono text-zinc-300`}>
                     {yen(row.creatorEstimatedCommission)}
+                  </td>
+                  <td className={`${td} text-right font-mono text-zinc-200`}>
+                    {yen(row.referralBaseAmount)}
+                  </td>
+                  <td className={`${td} text-right font-mono`}>
+                    {/*
+                      想定額。まだ報酬が生成されていない場合に
+                      どれだけの規模かを示すためのもので、確定額ではない。
+                    */}
+                    {row.referralEligibleType ? (
+                      <span
+                        className={
+                          row.referrerState === "none" ? "text-red-200" : "text-zinc-400"
+                        }
+                      >
+                        {yen(row.estimatedReferralReward)}
+                      </span>
+                    ) : (
+                      <span className="text-zinc-600">対象外</span>
+                    )}
                   </td>
                   <td className={`${td} text-right font-mono text-emerald-300`}>
                     {row.referralRewardAmount > 0 ? yen(row.referralRewardAmount) : "—"}
@@ -1047,6 +1306,9 @@ export function PaymentsClient({
   allTimeUnpaidAmount: number;
 }) {
   const [tab, setTab] = useState<TabKey>("all");
+  /* 月次確定の警告から TAP実績へ渡す初期フィルタ */
+  const [tapReferrerFilter, setTapReferrerFilter] =
+    useState<(typeof TAP_REFERRER_FILTERS)[number]["key"]>("all");
   const [search, setSearch] = useState("");
   const [bankFilter, setBankFilter] = useState<"all" | "registered" | "not_ready">("all");
   const [payableOnly, setPayableOnly] = useState(false);
@@ -1370,7 +1632,10 @@ export function PaymentsClient({
       ) : tab === "seller" ? (
         <SellerInvoiceTable overview={overview} />
       ) : tab === "tap" ? (
-        <TapPerformanceTab />
+        <TapPerformanceTab
+          key={tapReferrerFilter}
+          initialReferrerFilter={tapReferrerFilter}
+        />
       ) : (
         <>
           {openBatches.length > 0 ? (
@@ -1586,7 +1851,14 @@ export function PaymentsClient({
             紹介者タブでだけ月次確定を出す。代理店の支払はこの確定を
             前提にしていないので、他タブに置くと関係が誤解される。
           */}
-          {tab === "referrer" ? <ReferralSettlementSection /> : null}
+          {tab === "referrer" ? (
+            <ReferralSettlementSection
+              onReviewReferrers={() => {
+                setTapReferrerFilter("none");
+                setTab("tap");
+              }}
+            />
+          ) : null}
 
           <section className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">

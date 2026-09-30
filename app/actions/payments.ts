@@ -22,7 +22,9 @@ import {
   type ReferrerRewardDetail,
 } from "@/lib/db/payment-queries";
 import {
+  fetchReferrerGapSummary,
   fetchTapCreatorOverview,
+  type ReferrerGapSummary,
   type TapCreatorOverview,
 } from "@/lib/db/tap-creator-queries";
 import {
@@ -304,6 +306,30 @@ export async function fetchReferrerRewardDetailAction(input: {
   /payments の初期表示に載せると代理店・紹介者タブまで遅くなる。
   畳んだあとの 143 行（約 67KB）だけを画面へ渡す。
 */
+export type ReferrerGapActionResult =
+  | { ok: true; summary: ReferrerGapSummary }
+  | { ok: false; error: string };
+
+/*
+  月次確定の前に「TAP報酬が発生しているのに紹介者が未設定」の
+  クリエイターを知るための集計。
+
+  TAP実績の一覧は2万件超を読むので、確定セクションを開くたびに
+  走らせない。件数と金額だけを返す軽い経路を分けておく。
+*/
+export async function fetchReferrerGapSummaryAction(): Promise<ReferrerGapActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const summary = await fetchReferrerGapSummary(getSupabaseAdmin());
+
+  if (summary.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(summary.error) };
+  }
+
+  return { ok: true, summary };
+}
+
 export type TapCreatorOverviewActionResult =
   | { ok: true; overview: TapCreatorOverview }
   | { ok: false; error: string };

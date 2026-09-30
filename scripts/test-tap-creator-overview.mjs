@@ -138,23 +138,45 @@ test("画面は4つの金額を別の列で出す", () => {
 // =============================================================================
 // 紹介報酬は referral_reward_items が唯一の正
 // =============================================================================
-test("紹介報酬を再計算しない（5% をここで掛けない）", () => {
+test("実績としての紹介報酬を再計算しない（実績テーブルが唯一の正）", () => {
+  /*
+    2026-09-30 改定。
+
+    「発生した紹介報酬」は従来どおり referral_reward_items が唯一の正で、
+    ここで作り直さない（computeReferralReward を呼ばない）。
+
+    一方で「紹介者が未設定のため、まだ報酬が作られていない」場合に
+    どれだけの規模かを画面へ出す必要が出たので、想定額
+    （算定元 × 料率）だけは計算する。実績と想定は列を分けて出す。
+
+    料率は REFERRAL_REWARD_RATE を通す。5% をベタ書きすると
+    料率が変わったときにここだけ取り残される。
+  */
+  assert.equal(
+    /computeReferralReward\(/.test(QUERIES),
+    false,
+    "TAP実績側で報酬を計算し直している",
+  );
   assert.equal(
     /0\.05/.test(QUERIES),
     false,
-    "TAP実績側で 5% を計算している",
+    "料率をベタ書きしている（REFERRAL_REWARD_RATE を使う）",
   );
-  assert.equal(
-    /REFERRAL_REWARD_RATE/.test(QUERIES),
-    false,
-    "紹介料率をここで使っている",
+  assert.match(
+    QUERIES,
+    /referralBase \* REFERRAL_REWARD_RATE/,
+    "想定額を正式な料率定数から作っていない",
   );
   assert.match(
     QUERIES,
     /"referral_reward_items"/,
-    "紹介報酬を実績テーブルから読んでいない",
+    "紹介報酬の実績を実績テーブルから読んでいない",
   );
   assert.match(QUERIES, /resolveRewardItemAmount\(/);
+
+  // 実績と想定を別の項目として持つ
+  assert.match(QUERIES, /referralRewardAmount: number;/);
+  assert.match(QUERIES, /estimatedReferralReward: number;/);
 });
 
 test("紹介報酬は is_reward_target の明細だけ数える", () => {
@@ -165,10 +187,37 @@ test("紹介報酬は is_reward_target の明細だけ数える", () => {
   );
 });
 
-test("紹介者の状態を3つに分ける（あり / 期間外 / なし）", () => {
-  assert.match(QUERIES, /"assigned" \| "out_of_period" \| "none"/);
-  assert.match(QUERIES, /referrerState = covering \? "assigned" : "out_of_period"/);
+test("紹介者の状態を5つに分ける（あり /「-」/ 期間外 / なし / 異常）", () => {
+  /*
+    2026-09-30 改定。3つ（あり / 期間外 / なし）では足りなくなった。
+
+    ①「紹介者が -」と「紹介者が未設定」を分ける必要がある。
+      「-」は管理者が正式に設定した有効な紹介者で報酬もそこへ帰属する。
+      未設定（relation そのものが無い）と同じ扱いにすると、
+      紹介者の入力漏れを見つけられない。
+    ② 有効な関係が重なっている異常を黙って1件選ばずに出す。
+
+    「期間外」を出すという元の意図はそのまま残している。
+  */
+  for (const state of [
+    '"assigned"',
+    '"dash_referrer"',
+    '"out_of_period"',
+    '"none"',
+    '"conflict"',
+  ]) {
+    assert.ok(QUERIES.includes(state), `${state} が型に無い`);
+  }
+  assert.equal(
+    /"placeholder"/.test(QUERIES),
+    false,
+    "「-」を placeholder 扱いしている（正式な紹介者なので使わない）",
+  );
+  assert.match(QUERIES, /referrerState = "dash_referrer"/);
+  assert.match(QUERIES, /referrerState = "out_of_period"/);
+  assert.match(QUERIES, /referrerState = "conflict"/);
   assert.ok(UI_RAW.includes("期間外"), "画面に期間外の表示が無い");
+  assert.ok(UI_RAW.includes("未設定"), "画面に未設定の表示が無い");
 });
 
 // =============================================================================
@@ -317,5 +366,349 @@ test("所属は既存の月別確定と is_in_house から決める（推測し�
     /THREE\.inc/.test(QUERIES),
     false,
     "代理店名の文字列で自社を判定している",
+  );
+});
+
+// =============================================================================
+// 紹介者ステータス（2026-09-30 追加）
+//
+// 「紹介者が -」と「紹介者が未設定」を絶対に混同しないこと。
+// 「-」は取込時に作られた名前だが、管理者が正式に設定した有効な紹介者で
+// あり、報酬もそこへ帰属する。未設定（relation そのものが無い）と
+// 同じ扱いにすると、紹介者の入力漏れを見つけられなくなる。
+//
+// 母集団は TAP 側の成果データ。creator_referrals や
+// referral_reward_items を起点にすると、紹介者が未設定の
+// クリエイターは一覧にすら現れない（紹介者が無ければ報酬も作られない）。
+// =============================================================================
+const tap = await jiti.import(path.join(root, "lib/db/tap-creator-queries.ts"));
+const period = await jiti.import(path.join(root, "lib/referrals/referral-period.ts"));
+const engine = await jiti.import(path.join(root, "lib/referrals/referral-reward-engine.ts"));
+const accountTypes = await jiti.import(
+  path.join(root, "lib/creators/account-management-type.ts"),
+);
+
+// =============================================================================
+// 1. 母集団は TAP 側の成果データ
+// =============================================================================
+test("1. 母集団は tap_affiliate_order_lines（relation や reward を起点にしない）", () => {
+  /*
+    紹介者が未設定のクリエイターは紹介報酬が作られないので、
+    reward_items を起点にすると一覧に出てこない。
+    creator_referrals を起点にしても同じ理由で漏れる。
+  */
+  assert.match(
+    QUERIES,
+    /fetchAllFrom<TapLineRow>\(\s*supabase,\s*"tap_affiliate_order_lines"/,
+    "TAP の明細を母集団にしていない",
+  );
+
+  // 行の組み立ては TAP 明細から作った buckets を回す
+  assert.match(QUERIES, /for \(const \[creatorId, bucket\] of buckets\)/);
+  assert.equal(
+    /for \(const .* of referralsResult\.data\) \{\s*rows\.push/.test(QUERIES),
+    false,
+    "紹介関係を起点に行を作っている",
+  );
+});
+
+// =============================================================================
+// 2〜7. 紹介者ステータスの判定
+// =============================================================================
+const CREATOR = "creator-1";
+const relation = (overrides = {}) => ({
+  creator_id: CREATOR,
+  referrer_id: "referrer-A",
+  referral_rate: 0.05,
+  start_month: "2026-05",
+  end_month: null,
+  is_active: true,
+  lifetime_payout_cap: null,
+  lifetime_paid_amount: 0,
+  created_at: "2026-05-01T00:00:00Z",
+  ...overrides,
+});
+
+/** 実装と同じ手順で状態を決める（判定の流れを固定する） */
+function resolveState(rows, months, nameById) {
+  const index = period.buildReferralPeriods(rows);
+  const periods = index.byCreator.get(CREATOR);
+  if (!periods || periods.length === 0) return { state: "none", name: null };
+
+  const conflicted = months.some(
+    (m) => period.resolveReferralForMonth(periods, m).conflicts.length > 0,
+  );
+  const covering = months
+    .map((m) => period.resolveReferralForMonth(periods, m).period)
+    .find((p) => p != null);
+  const shown = covering ?? periods[periods.length - 1];
+  const name = nameById[shown.referrerId] ?? "（不明な紹介者）";
+
+  if (conflicted) return { state: "conflict", name };
+  if (!covering) return { state: "out_of_period", name };
+  if (tap.isDashReferrerName(name)) return { state: "dash_referrer", name };
+  return { state: "assigned", name };
+}
+
+test("2. assigned: 通常の紹介者が対象月を覆う", () => {
+  const got = resolveState(
+    [relation({ referrer_id: "r-1" })],
+    ["2026-05", "2026-06"],
+    { "r-1": "岸幸星" },
+  );
+  assert.equal(got.state, "assigned");
+  assert.equal(got.name, "岸幸星");
+});
+
+test("3. dash_referrer: 紹介者「-」が正式に設定されている", () => {
+  const got = resolveState(
+    [relation({ referrer_id: "r-dash" })],
+    ["2026-05"],
+    { "r-dash": "-" },
+  );
+  assert.equal(got.state, "dash_referrer", "「-」を assigned に混ぜてはいけない");
+  assert.equal(got.name, "-");
+});
+
+test("4. none: 有効な紹介関係が無い＝未設定", () => {
+  const got = resolveState([], ["2026-05"], {});
+  assert.equal(got.state, "none");
+  assert.equal(got.name, null);
+});
+
+test("5. out_of_period: 関係はあるが対象月を覆わない", () => {
+  const got = resolveState(
+    [relation({ referrer_id: "r-1", start_month: "2026-09" })],
+    ["2026-05", "2026-06"],
+    { "r-1": "岸幸星" },
+  );
+  assert.equal(got.state, "out_of_period");
+});
+
+test("6. conflict: 期間が重なる関係が2件ある", () => {
+  const got = resolveState(
+    [
+      relation({ referrer_id: "r-1", start_month: "2026-05", end_month: "2026-10" }),
+      relation({
+        referrer_id: "r-2",
+        start_month: "2026-09",
+        created_at: "2026-09-27T00:00:00Z",
+      }),
+    ],
+    ["2026-09"],
+    { "r-1": "A", "r-2": "B" },
+  );
+  assert.equal(got.state, "conflict");
+});
+
+test("7. 「-」と未設定を混同しない", () => {
+  const dash = resolveState([relation({ referrer_id: "r-dash" })], ["2026-05"], {
+    "r-dash": "-",
+  });
+  const none = resolveState([], ["2026-05"], {});
+
+  assert.notEqual(dash.state, none.state, "同じ状態にしてはいけない");
+  assert.equal(dash.state, "dash_referrer");
+  assert.equal(none.state, "none");
+
+  // 型に placeholder という名前を使わない（「-」は正式な紹介者）
+  assert.equal(
+    /"placeholder"/.test(QUERIES),
+    false,
+    "「-」を placeholder 扱いしている",
+  );
+  assert.match(QUERIES, /"dash_referrer"/);
+
+  // 表記ゆれも拾う
+  for (const name of ["-", " - ", "−", "ー", "—"]) {
+    assert.equal(tap.isDashReferrerName(name), true, `${name} を「-」と認識しない`);
+  }
+  for (const name of ["岸幸星", "", null, undefined, "--"]) {
+    assert.equal(tap.isDashReferrerName(name), false, `${name} を「-」と誤認`);
+  }
+});
+
+// =============================================================================
+// 8〜9. 入力漏れ警告の対象
+// =============================================================================
+test("8. self_operated / account_lending は入力漏れ警告に含めない", () => {
+  /*
+    区分により紹介報酬の対象外なので、紹介者が無くても入力漏れではない。
+    混ぜると警告の人数と金額が過大になる。
+  */
+  for (const t of ["self_operated", "account_lending"]) {
+    assert.equal(accountTypes.isReferralRewardEligibleType(t), false, `${t} が対象になっている`);
+  }
+  assert.match(
+    QUERIES,
+    /row\.referrerState === "none" && row\.referralEligibleType/,
+    "警告対象を区分で絞っていない",
+  );
+});
+
+test("9. standard かつ未設定を警告対象にする", () => {
+  assert.equal(accountTypes.isReferralRewardEligibleType("standard"), true);
+  assert.match(QUERIES, /missingReferrerCreatorCount: missingReferrer\.length/);
+  assert.match(QUERIES, /missingReferrerBaseAmount/);
+  assert.match(QUERIES, /missingReferrerEstimatedReward/);
+});
+
+// =============================================================================
+// 10〜11. 金額
+// =============================================================================
+test("10. 算定元は referralBaseAmount（W + X）を通す", () => {
+  assert.equal(engine.referralBaseAmount({ partner_estimated_commission: 1680 }), 1680);
+  assert.equal(
+    engine.referralBaseAmount({ partner_shop_ads_estimated_commission: 265 }),
+    265,
+  );
+  assert.equal(
+    engine.referralBaseAmount({
+      partner_estimated_commission: 100,
+      partner_shop_ads_estimated_commission: 50,
+    }),
+    150,
+  );
+  // ボーナスは入れない
+  assert.equal(
+    engine.referralBaseAmount({
+      partner_estimated_commission: 100,
+      partner_bonus_estimated_commission: 900,
+    }),
+    100,
+  );
+
+  assert.match(
+    QUERIES,
+    /bucket\.referralBase\.push\(referralBaseAmount\(line\)\)/,
+    "算定元を自前で足し直している",
+  );
+  assert.equal(
+    /partner_estimated_commission\s*\)\s*\+\s*toAmount/.test(QUERIES),
+    false,
+    "W と X を直接足している箇所がある",
+  );
+});
+
+test("11. 想定紹介報酬は REFERRAL_REWARD_RATE を使う（5% をベタ書きしない）", () => {
+  assert.equal(engine.REFERRAL_REWARD_RATE, 0.05);
+  assert.match(QUERIES, /referralBase \* REFERRAL_REWARD_RATE/);
+  assert.equal(
+    /estimatedReferralReward[^\n]*0\.05/.test(QUERIES),
+    false,
+    "料率をベタ書きしている",
+  );
+});
+
+// =============================================================================
+// 12〜13. フィルター
+// =============================================================================
+test("12. 紹介者未設定だけを絞り込める", () => {
+  assert.match(UI_RAW, /\{ key: "none", label: "紹介者: 未設定" \}/);
+  assert.match(UI_RAW, /\{ key: "dash_referrer", label: "紹介者: 「-」設定済み" \}/);
+  // 「-」と未設定が同じ選択肢になっていない
+  assert.equal(
+    /key: "none"[^\n]*「-」/.test(UI_RAW),
+    false,
+    "未設定の選択肢に「-」を混ぜている",
+  );
+});
+
+test("13. 要確認は未設定・期間外・異常をまとめる", () => {
+  assert.match(UI_RAW, /\{ key: "review", label: "紹介者: 要確認" \}/);
+  assert.match(
+    UI_RAW,
+    /state === "none" \|\| state === "out_of_period" \|\| state === "conflict"/,
+  );
+  assert.match(QUERIES, /export function needsReferrerReview/);
+  for (const [state, expected] of [
+    ["none", true],
+    ["out_of_period", true],
+    ["conflict", true],
+    ["assigned", false],
+    ["dash_referrer", false],
+  ]) {
+    assert.equal(
+      tap.needsReferrerReview(state),
+      expected,
+      `${state} の要確認判定が違う`,
+    );
+  }
+});
+
+// =============================================================================
+// 14. 月別の警告判定
+// =============================================================================
+test("14. 警告は月ごとに判定する（後の月のTAPで過去月を警告しない）", () => {
+  /*
+    2026-09 開始の紹介関係しか無いクリエイターに 2026-05 の TAP がある場合、
+    2026-05 は未設定として警告するが、2026-09 は警告しない。
+  */
+  const rows = [relation({ referrer_id: "r-1", start_month: "2026-09" })];
+  const index = period.buildReferralPeriods(rows);
+  const periods = index.byCreator.get(CREATOR);
+
+  assert.equal(
+    period.resolveReferralForMonth(periods, "2026-05").period,
+    null,
+    "2026-05 は覆われていない",
+  );
+  assert.ok(
+    period.resolveReferralForMonth(periods, "2026-09").period,
+    "2026-09 は覆われている",
+  );
+
+  // 実装が月ごとに解決していること
+  assert.match(
+    QUERIES,
+    /resolveReferralForMonth\(\s*index\.byCreator\.get\(creatorId\),\s*targetMonth,\s*\)/,
+    "月ごとに解決していない",
+  );
+  assert.match(QUERIES, /export type ReferrerGapMonth/);
+  assert.match(QUERIES, /targetMonth: string;/);
+});
+
+// =============================================================================
+// 15〜16. 副作用が無いこと
+// =============================================================================
+test("15. 紹介者を自動登録しない（この経路は読むだけ）", () => {
+  for (const forbidden of [/\.insert\(/, /\.update\(/, /\.upsert\(/, /\.delete\(/]) {
+    assert.equal(
+      forbidden.test(QUERIES),
+      false,
+      `TAP実績の集計が書き込んでいる: ${forbidden}`,
+    );
+  }
+  // 「-」を既定値として埋めていない
+  assert.equal(
+    /referrerName = "-"/.test(QUERIES),
+    false,
+    "紹介者名に「-」を勝手に埋めている",
+  );
+});
+
+test("16. 既存の reward / payout ロジックへ影響しない", () => {
+  /*
+    紹介報酬の金額は referral_reward_items の実績をそのまま出す。
+    この画面で作り直さない（生成側と食い違う元になる）。
+  */
+  assert.match(QUERIES, /referralRewardAmount: sumReferralAmounts\(reward\?\.amounts \?\? \[\]\)/);
+  assert.equal(
+    /computeReferralReward\(/.test(QUERIES),
+    false,
+    "TAP実績側で報酬を計算し直している",
+  );
+
+  // 生成側は従来どおり
+  const sync = readFileSync(
+    path.join(root, "lib/referrals/sync-referral-rewards.ts"),
+    "utf8",
+  );
+  assert.match(sync, /buildReferralPeriods\(/);
+  assert.match(sync, /computeReferralReward\(/);
+  assert.equal(
+    /tap-creator-queries/.test(sync),
+    false,
+    "生成側が表示用の集計に依存している",
   );
 });

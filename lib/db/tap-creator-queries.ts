@@ -8,7 +8,13 @@ import {
   resolveReferralForMonth,
   type ReferralRelationRow,
 } from "@/lib/referrals/referral-period";
-import { resolveRewardItemAmount, sumReferralAmounts } from "@/lib/referrals/referral-reward-engine";
+import { isReferralRewardEligibleType } from "@/lib/creators/account-management-type";
+import {
+  referralBaseAmount,
+  REFERRAL_REWARD_RATE,
+  resolveRewardItemAmount,
+  sumReferralAmounts,
+} from "@/lib/referrals/referral-reward-engine";
 import { toAmount } from "@/lib/revenue/amount";
 import { EARLIEST_CUTOFF_MONTH, MAX_REFERRAL_PAYMENT_CUTOFF_MONTH } from "@/lib/payments/cutoff-month";
 
@@ -53,6 +59,8 @@ const TAP_LINE_COLUMNS = [
   "target_month",
   "commission_base",
   "tap_revenue",
+  "partner_estimated_commission",
+  "partner_shop_ads_estimated_commission",
   "order_status",
   "payment_status",
   "refund_status",
@@ -65,14 +73,44 @@ type TapLineRow = {
   target_month: string | null;
   commission_base: number | string | null;
   tap_revenue: number | string | null;
+  partner_estimated_commission: number | string | null;
+  partner_shop_ads_estimated_commission: number | string | null;
   order_status: string | null;
   payment_status: string | null;
   refund_status: string | null;
   creator_commission_raw: string | null;
 };
 
-/** 紹介者の状態。金額の意味を取り違えないよう3つに分ける */
-export type TapReferrerState = "assigned" | "out_of_period" | "none";
+/*
+  紹介者の状態。
+
+  「紹介者が -」と「紹介者が未設定」を必ず分ける。
+  「-」は取込時に作られた名前だが、管理者が正式に設定した有効な紹介者で
+  あり、報酬もそこへ帰属する。未設定（relation そのものが無い）と
+  同じ扱いにすると、入力漏れを見つけられなくなる。
+*/
+export type TapReferrerState =
+  /** 通常の紹介者が設定済み */
+  | "assigned"
+  /** 紹介者「-」が正式に設定済み。未設定ではない */
+  | "dash_referrer"
+  /** 関係はあるが TAP の対象月を1つも覆わない */
+  | "out_of_period"
+  /** 有効な紹介関係が無い＝紹介者未設定。入力漏れの可能性 */
+  | "none"
+  /** 有効な関係が複数あるなど、期間を決められない異常 */
+  | "conflict";
+
+/** 紹介者名が「-」かどうか。表記ゆれ（全角ダッシュなど）も拾う */
+export function isDashReferrerName(name: string | null | undefined): boolean {
+  const trimmed = String(name ?? "").trim();
+  return trimmed === "-" || trimmed === "−" || trimmed === "ー" || trimmed === "—";
+}
+
+/** 紹介者の確認が必要な状態か（未設定・期間外・異常） */
+export function needsReferrerReview(state: TapReferrerState): boolean {
+  return state === "none" || state === "out_of_period" || state === "conflict";
+}
 
 /** 所属の状態 */
 export type TapAgencyState =
@@ -102,6 +140,16 @@ export type TapCreatorRow = {
   /** 紹介報酬（referral_reward_items の実績。ここで再計算しない） */
   referralRewardAmount: number;
   referralRewardItemCount: number;
+  /** クリエイター区分。紹介報酬の対象かどうかの判断に使う */
+  accountManagementType: string | null;
+  /** 紹介報酬の算定元（W + X）。報酬が未生成でも金額規模が分かるようにする */
+  referralBaseAmount: number;
+  /** 算定元 × 5%。まだ発生していない場合の想定額 */
+  estimatedReferralReward: number;
+  /** 紹介報酬が発生しうる区分か（standard のみ true） */
+  referralEligibleType: boolean;
+  /** 紹介者の確認状態（creators.referrer_assignment_state） */
+  referrerAssignmentState: string | null;
   referrerState: TapReferrerState;
   /** 紹介者名。関係が無ければ null */
   referrerName: string | null;
@@ -126,8 +174,24 @@ export type TapCreatorOverview = {
     /** クリエイター報酬が記録されていない行数（全体） */
     creatorCommissionMissingCount: number;
     referrerAssignedCount: number;
+    referrerDashCount: number;
     referrerOutOfPeriodCount: number;
     referrerNoneCount: number;
+    referrerConflictCount: number;
+    /** 確認が必要な件数（未設定 + 期間外 + 異常） */
+    referrerReviewCount: number;
+    /** 算定元（W + X）の合計 */
+    referralBaseAmount: number;
+    /*
+      紹介者の入力漏れ警告に使う数。
+
+      紹介報酬が発生しうる区分（standard）だけを数える。
+      self_operated / account_lending は区分により報酬対象外なので、
+      紹介者が無くても入力漏れではない。混ぜると警告が過大になる。
+    */
+    missingReferrerCreatorCount: number;
+    missingReferrerBaseAmount: number;
+    missingReferrerEstimatedReward: number;
   };
   error: string | null;
 };
@@ -141,8 +205,15 @@ const EMPTY_TOTALS: TapCreatorOverview["totals"] = {
   referralRewardAmount: 0,
   creatorCommissionMissingCount: 0,
   referrerAssignedCount: 0,
+  referrerDashCount: 0,
   referrerOutOfPeriodCount: 0,
   referrerNoneCount: 0,
+  referrerConflictCount: 0,
+  referrerReviewCount: 0,
+  referralBaseAmount: 0,
+  missingReferrerCreatorCount: 0,
+  missingReferrerBaseAmount: 0,
+  missingReferrerEstimatedReward: 0,
 };
 
 type Bucket = {
@@ -150,6 +221,8 @@ type Bucket = {
   itemCount: number;
   commissionBase: number[];
   tapRevenue: number[];
+  /** 紹介報酬の算定元（W + X） */
+  referralBase: number[];
   creatorCommission: number[];
   creatorCommissionMissing: number;
 };
@@ -210,10 +283,16 @@ export async function fetchTapCreatorOverview(
         (query) =>
           query.gte("target_month", startMonth).lte("target_month", endMonth),
       ),
-      fetchAllFrom<{ id: string; tiktok_id: string | null; creator_name: string | null }>(
+      fetchAllFrom<{
+        id: string;
+        tiktok_id: string | null;
+        creator_name: string | null;
+        account_management_type: string | null;
+        referrer_assignment_state: string | null;
+      }>(
         supabase,
         "creators",
-        "id, tiktok_id, creator_name",
+        "id, tiktok_id, creator_name, account_management_type, referrer_assignment_state",
       ),
       fetchAllFrom<ReferralRelationRow>(
         supabase,
@@ -257,11 +336,25 @@ export async function fetchTapCreatorOverview(
   if (error) return { ...empty, error };
 
   // ---- マスタ ---------------------------------------------------------------
-  const creatorById = new Map<string, { tiktokId: string; creatorName: string | null }>();
+  const creatorById = new Map<
+    string,
+    {
+      tiktokId: string;
+      creatorName: string | null;
+      accountManagementType: string | null;
+      referrerAssignmentState: string | null;
+    }
+  >();
   for (const row of creatorsResult.data) {
     creatorById.set(String(row.id), {
       tiktokId: String(row.tiktok_id ?? ""),
       creatorName: row.creator_name == null ? null : String(row.creator_name),
+      accountManagementType:
+        row.account_management_type == null ? null : String(row.account_management_type),
+      referrerAssignmentState:
+        row.referrer_assignment_state == null
+          ? null
+          : String(row.referrer_assignment_state),
     });
   }
 
@@ -333,6 +426,7 @@ export async function fetchTapCreatorOverview(
         itemCount: 0,
         commissionBase: [],
         tapRevenue: [],
+        referralBase: [],
         creatorCommission: [],
         creatorCommissionMissing: 0,
       } satisfies Bucket);
@@ -343,6 +437,11 @@ export async function fetchTapCreatorOverview(
     bucket.itemCount += 1;
     bucket.commissionBase.push(toAmount(line.commission_base));
     bucket.tapRevenue.push(toAmount(line.tap_revenue));
+    /*
+      紹介報酬の算定元は referralBaseAmount が唯一の入口（W + X）。
+      ここで W や X から自前で足し直さない（報酬側と食い違う元になる）。
+    */
+    bucket.referralBase.push(referralBaseAmount(line));
     bucket.creatorCommission.push(creatorCommission.amount);
     if (creatorCommission.missing) bucket.creatorCommissionMissing += 1;
 
@@ -360,6 +459,10 @@ export async function fetchTapCreatorOverview(
     const creator = creatorById.get(creatorId);
     const periods = referralIndex.byCreator.get(creatorId);
     const reward = rewardByCreator.get(creatorId);
+    const referralBase = sumReferralAmounts(bucket.referralBase);
+    const eligibleType = isReferralRewardEligibleType(
+      creator?.accountManagementType ?? null,
+    );
 
     /*
       紹介者の状態。
@@ -373,15 +476,36 @@ export async function fetchTapCreatorOverview(
     let referralPeriodLabel: string | null = null;
 
     if (periods && periods.length > 0) {
+      /*
+        対象月のどれかで期間が重なっていたら異常として出す。
+        黙ってどれかを選ぶと、誰に帰属するのか分からないまま
+        画面だけ正常に見えてしまう。
+      */
+      const conflicted = months.some(
+        (month) => resolveReferralForMonth(periods, month).conflicts.length > 0,
+      );
       const covering = months
         .map((month) => resolveReferralForMonth(periods, month).period)
         .find((period) => period != null);
 
       const shown = covering ?? periods[periods.length - 1];
-      referrerState = covering ? "assigned" : "out_of_period";
       referrerName =
         referrerNameById.get(shown.referrerId) ?? "（不明な紹介者）";
       referralPeriodLabel = `${shown.startMonth}〜${shown.endMonth ?? ""}`;
+
+      if (conflicted) {
+        referrerState = "conflict";
+      } else if (!covering) {
+        referrerState = "out_of_period";
+      } else if (isDashReferrerName(referrerName)) {
+        /*
+          紹介者「-」。取込時に作られた名前だが管理者が正式に設定した
+          有効な紹介者で、報酬もここへ帰属する。未設定とは別に数える。
+        */
+        referrerState = "dash_referrer";
+      } else {
+        referrerState = "assigned";
+      }
     }
 
     // ---- 所属 ---------------------------------------------------------------
@@ -428,6 +552,11 @@ export async function fetchTapCreatorOverview(
       tapRevenue: sumReferralAmounts(bucket.tapRevenue),
       creatorEstimatedCommission: sumReferralAmounts(bucket.creatorCommission),
       creatorCommissionMissingCount: bucket.creatorCommissionMissing,
+      accountManagementType: creator?.accountManagementType ?? null,
+      referralBaseAmount: referralBase,
+      estimatedReferralReward: sumReferralAmounts([referralBase * REFERRAL_REWARD_RATE]),
+      referralEligibleType: eligibleType,
+      referrerAssignmentState: creator?.referrerAssignmentState ?? null,
       referralRewardAmount: sumReferralAmounts(reward?.amounts ?? []),
       referralRewardItemCount: reward?.itemCount ?? 0,
       referrerState,
@@ -442,6 +571,11 @@ export async function fetchTapCreatorOverview(
     (a, b) =>
       b.commissionBase - a.commissionBase ||
       a.tiktokId.localeCompare(b.tiktokId, "ja"),
+  );
+
+  /** 紹介者の入力漏れ（報酬対象の区分なのに紹介者が未設定） */
+  const missingReferrer = rows.filter(
+    (row) => row.referrerState === "none" && row.referralEligibleType,
   );
 
   return {
@@ -464,10 +598,166 @@ export async function fetchTapCreatorOverview(
         0,
       ),
       referrerAssignedCount: rows.filter((row) => row.referrerState === "assigned").length,
+      referrerDashCount: rows.filter((row) => row.referrerState === "dash_referrer").length,
       referrerOutOfPeriodCount: rows.filter((row) => row.referrerState === "out_of_period")
         .length,
       referrerNoneCount: rows.filter((row) => row.referrerState === "none").length,
+      referrerConflictCount: rows.filter((row) => row.referrerState === "conflict").length,
+      referrerReviewCount: rows.filter((row) => needsReferrerReview(row.referrerState))
+        .length,
+      referralBaseAmount: sumReferralAmounts(rows.map((row) => row.referralBaseAmount)),
+      /*
+        入力漏れ警告の対象は「紹介報酬が発生しうる区分で、紹介者が未設定」。
+        self_operated / account_lending は区分により報酬対象外なので、
+        紹介者が無くても入力漏れではない。混ぜると警告が過大になる。
+      */
+      missingReferrerCreatorCount: missingReferrer.length,
+      missingReferrerBaseAmount: sumReferralAmounts(
+        missingReferrer.map((row) => row.referralBaseAmount),
+      ),
+      missingReferrerEstimatedReward: sumReferralAmounts(
+        missingReferrer.map((row) => row.estimatedReferralReward),
+      ),
     },
+    error: null,
+  };
+}
+
+// =============================================================================
+// 紹介者の入力漏れ（月次確定前の警告用）
+// =============================================================================
+/*
+  月次確定の前に「TAP報酬が発生しているのに紹介者が未設定」の
+  クリエイターを知るための集計。
+
+  ■ 月ごとに判定する
+  確定するのはひと月ずつなので、その月より後の TAP だけを理由に
+  過去月の確定を警告してはいけない。各 target_month について、
+  その月の TAP 算定元が発生していて、かつその月を覆う紹介関係が
+  無いクリエイターだけを数える。
+
+  ■ 区分で絞る
+  紹介報酬が発生しうる区分（standard）だけを対象にする。
+  self_operated / account_lending は区分により報酬対象外なので、
+  紹介者が無くても入力漏れではない。
+
+  ■ ここでは何も書かない
+  検出するだけ。紹介者の自動登録も報酬の生成も行わない。
+*/
+
+export type ReferrerGapMonth = {
+  targetMonth: string;
+  /** その月に紹介者が未設定だったクリエイター数 */
+  creatorCount: number;
+  /** その月の算定元（W + X）合計 */
+  referralBaseAmount: number;
+  /** 算定元 × 5% */
+  estimatedReferralReward: number;
+};
+
+export type ReferrerGapSummary = {
+  months: ReferrerGapMonth[];
+  /** 全期間で一度でも未設定だったクリエイターの実数（月をまたいで重複させない） */
+  creatorCount: number;
+  referralBaseAmount: number;
+  estimatedReferralReward: number;
+  error: string | null;
+};
+
+const EMPTY_GAP: ReferrerGapSummary = {
+  months: [],
+  creatorCount: 0,
+  referralBaseAmount: 0,
+  estimatedReferralReward: 0,
+  error: null,
+};
+
+export async function fetchReferrerGapSummary(
+  supabase: SupabaseClient,
+): Promise<ReferrerGapSummary> {
+  const startMonth = EARLIEST_CUTOFF_MONTH;
+  const endMonth = MAX_REFERRAL_PAYMENT_CUTOFF_MONTH;
+
+  const [linesResult, creatorsResult, referralsResult] = await Promise.all([
+    fetchAllFrom<TapLineRow>(supabase, "tap_affiliate_order_lines", TAP_LINE_COLUMNS, (query) =>
+      query.gte("target_month", startMonth).lte("target_month", endMonth),
+    ),
+    fetchAllFrom<{ id: string; account_management_type: string | null }>(
+      supabase,
+      "creators",
+      "id, account_management_type",
+    ),
+    fetchAllFrom<ReferralRelationRow>(
+      supabase,
+      "creator_referrals",
+      REFERRAL_RELATION_COLUMNS,
+    ),
+  ]);
+
+  const error =
+    linesResult.error ?? creatorsResult.error ?? referralsResult.error ?? null;
+  if (error) return { ...EMPTY_GAP, error };
+
+  const eligibleById = new Map<string, boolean>();
+  for (const row of creatorsResult.data) {
+    eligibleById.set(
+      String(row.id),
+      isReferralRewardEligibleType(row.account_management_type),
+    );
+  }
+
+  const index = buildReferralPeriods(referralsResult.data);
+
+  /* 月 → creator → 算定元 */
+  const byMonth = new Map<string, Map<string, number>>();
+
+  for (const line of linesResult.data) {
+    const creatorId = line.creator_id;
+    const targetMonth = line.target_month;
+    if (!creatorId || !targetMonth) continue;
+    if (!eligibleById.get(creatorId)) continue;
+
+    const base = referralBaseAmount(line);
+    if (!Number.isFinite(base) || base <= 0) continue;
+
+    /* その月を覆う紹介関係があるなら入力漏れではない */
+    const resolution = resolveReferralForMonth(
+      index.byCreator.get(creatorId),
+      targetMonth,
+    );
+    if (resolution.period?.referrerId) continue;
+
+    const bucket = byMonth.get(targetMonth) ?? new Map<string, number>();
+    bucket.set(creatorId, (bucket.get(creatorId) ?? 0) + base);
+    byMonth.set(targetMonth, bucket);
+  }
+
+  const months: ReferrerGapMonth[] = [...byMonth]
+    .map(([targetMonth, perCreator]) => {
+      const base = sumReferralAmounts([...perCreator.values()]);
+      return {
+        targetMonth,
+        creatorCount: perCreator.size,
+        referralBaseAmount: base,
+        estimatedReferralReward: sumReferralAmounts([base * REFERRAL_REWARD_RATE]),
+      };
+    })
+    .sort((a, b) => a.targetMonth.localeCompare(b.targetMonth));
+
+  /* 全期間の実数は creator を重複させずに数える */
+  const allCreators = new Map<string, number>();
+  for (const perCreator of byMonth.values()) {
+    for (const [creatorId, base] of perCreator) {
+      allCreators.set(creatorId, (allCreators.get(creatorId) ?? 0) + base);
+    }
+  }
+  const totalBase = sumReferralAmounts([...allCreators.values()]);
+
+  return {
+    months,
+    creatorCount: allCreators.size,
+    referralBaseAmount: totalBase,
+    estimatedReferralReward: sumReferralAmounts([totalBase * REFERRAL_REWARD_RATE]),
     error: null,
   };
 }
