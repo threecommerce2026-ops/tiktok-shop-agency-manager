@@ -1364,11 +1364,32 @@ function TapPerformanceTab({
                     {row.accountManagementType ?? "-"}
                   </td>
                   <td className={`${td} whitespace-normal`}>
-                    <span
-                      className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] ${tapAgencyBadge(row)}`}
-                    >
-                      {row.agencyLabel}
-                    </span>
+                    <div className="flex flex-col gap-0.5">
+                      <span
+                        className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${tapAgencyBadge(row)}`}
+                      >
+                        {row.agencyLabel}
+                      </span>
+                      {row.agencyState === "unconfirmed" ||
+                      row.agencyState === "partially_unconfirmed" ? (
+                        <span className="text-[10px] text-amber-200">
+                          {row.agencyState === "unconfirmed"
+                            ? "月別の所属が未確定です"
+                            : "一部の月が未確定です"}
+                        </span>
+                      ) : null}
+                      {/*
+                        所属はこの画面では変更しない。月ごとに確定するものなので、
+                        既存の月別管理画面へ対象を引き継いで移動する。
+                        （紹介者はこの画面から設定できる。役割を分けている）
+                      */}
+                      <Link
+                        href={`/admin/creator-assignment?creator=${encodeURIComponent(row.tiktokId)}`}
+                        className="w-fit rounded-lg border border-white/[0.14] px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-white/[0.06]"
+                      >
+                        所属を確認・変更
+                      </Link>
+                    </div>
                   </td>
                   <td className={`${td} whitespace-normal`}>
                     <div className="flex flex-col gap-0.5">

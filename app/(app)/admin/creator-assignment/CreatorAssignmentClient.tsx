@@ -412,8 +412,14 @@ export function CreatorAssignmentClient({
   unassignedCreators,
   pendingCreators,
   targetMonth,
-}: Props) {
-  const [search, setSearch] = useState("");
+  initialSearch = "",
+}: Props & { initialSearch?: string }) {
+  /*
+    TAP実績から creator を指定して飛んでくる場合がある。
+    その TikTok ID を初期の検索語にして、開いた時点で対象だけが
+    出ている状態にする（探し直さずに済むように）。
+  */
+  const [search, setSearch] = useState(initialSearch);
   const [agencyFilter, setAgencyFilter] = useState("all");
   const [unassignedOnly, setUnassignedOnly] = useState(false);
 
@@ -526,6 +532,24 @@ export function CreatorAssignmentClient({
             </label>
           </div>
         </div>
+
+        {/*
+          TAP実績から指定されて開いたことを分かるようにする。
+          検索語は自由に変えられるので、絞り込みが外れたら消える。
+        */}
+        {initialSearch && search === initialSearch ? (
+          <div className="rounded-xl border border-[var(--accent-cyan)]/25 bg-[var(--accent-cyan)]/5 px-4 py-2.5">
+            <p className="text-xs text-[var(--accent-cyan)]">
+              TAP実績から
+              <span className="font-mono font-semibold"> {initialSearch} </span>
+              を指定して開きました（
+              {filtered.length} 件に絞り込み中）
+            </p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-400">
+              下の一覧で対象月の所属を確認・変更してください。検索欄を空にすると全件に戻ります。
+            </p>
+          </div>
+        ) : null}
 
         <p className="text-xs text-zinc-600">
           表示件数: <span className="font-mono text-zinc-400">{filtered.length}</span> / {creators.length}

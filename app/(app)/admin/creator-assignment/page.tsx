@@ -18,7 +18,21 @@ import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
-export default async function CreatorAssignmentPage() {
+/*
+  TAP実績から「所属を確認・変更」で飛んでくる。
+
+  対象クリエイターを探し直さずに済むよう、TikTok ID を検索語として
+  受け取り、開いた時点で絞り込んだ状態にする。
+  所属そのものはこの画面の既存の月別確定機能で変更する。
+*/
+export default async function CreatorAssignmentPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ creator?: string }>;
+}) {
+  const { creator: initialSearchRaw } = await searchParams;
+  const initialSearch = String(initialSearchRaw ?? "").trim().slice(0, 100);
+
   const supabase = await createClient();
   const {
     data: { user },
@@ -117,6 +131,7 @@ export default async function CreatorAssignmentPage() {
         unassignedCreators={sortedUnassigned}
         pendingCreators={pendingResult.data}
         targetMonth={month}
+        initialSearch={initialSearch}
       />
 
       <div className="flex justify-center">

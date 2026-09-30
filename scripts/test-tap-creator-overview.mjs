@@ -1099,3 +1099,94 @@ test("紹介者未設定は成果報酬ベースの高い順に並ぶ", () => {
     "降順になっていない",
   );
 });
+
+// =============================================================================
+// 警告の母集団を揃える / 所属は月別管理画面へ渡す（2026-09-30 追加）
+// =============================================================================
+const ASSIGNMENT_UI_RAW = read(
+  "app/(app)/admin/creator-assignment/CreatorAssignmentClient.tsx",
+);
+const ASSIGNMENT_PAGE_RAW = read("app/(app)/admin/creator-assignment/page.tsx");
+
+test("gap 警告も一覧と同じ正式条件で数える", () => {
+  /*
+    gap だけ isTapReferralSourceLine を通していなかったため、
+    未払い・未決済・返金済みの行だけを理由に警告へ入る creator が
+    5名いた（いずれも 2026-08。あの月は 1,343 行中 871 行が未払い）。
+
+    報酬が発生していない行を根拠に「紹介者の入力漏れ」と言ってはいけない。
+    条件を揃えた結果として、一覧の入力漏れ件数と一致する。
+  */
+  const gap = QUERIES.slice(
+    QUERIES.indexOf("export async function fetchReferrerGapSummary"),
+  );
+  assert.match(
+    gap,
+    /if \(\s*!isTapReferralSourceLine\(/,
+    "gap 集計が正式な対象行の条件を通していない",
+  );
+  // 条件を書き写していない（既存関数を呼ぶ）
+  for (const copied of [/決済済み/, /支払い済み/, /fully_refunded/]) {
+    assert.equal(copied.test(gap), false, `対象条件を書き写している: ${copied}`);
+  }
+});
+
+test("gap と一覧の入力漏れは同じ絞り込みで作る", () => {
+  const gap = QUERIES.slice(
+    QUERIES.indexOf("export async function fetchReferrerGapSummary"),
+  );
+  // どちらも「紹介報酬が発生しうる区分」だけを数える
+  assert.match(gap, /if \(!eligibleById\.get\(creatorId\)\) continue;/);
+  assert.match(QUERIES, /row\.referrerState === "none" && row\.referralEligibleType/);
+  // どちらも算定元は referralBaseAmount を通す
+  assert.match(gap, /const base = referralBaseAmount\(line\);/);
+  assert.match(QUERIES, /bucket\.referralBase\.push\(referralBaseAmount\(line\)\)/);
+  // gap は月ごとに覆われているかで判定する（一覧は creator 単位）
+  assert.match(gap, /if \(resolution\.period\?\.referrerId\) continue;/);
+});
+
+test("所属はこの画面で書き換えず、月別管理画面へ対象を渡す", () => {
+  // TAP実績から creator を指定して遷移する
+  assert.match(
+    UI_RAW,
+    /\/admin\/creator-assignment\?creator=\$\{encodeURIComponent\(row\.tiktokId\)\}/,
+    "対象を引き継ぐ導線が無い",
+  );
+  assert.ok(UI_RAW.includes("所属を確認・変更"));
+
+  // TAP実績側では所属を書き換えない
+  for (const forbidden of [
+    /confirmMonthlyAgencyAssignmentAction/,
+    /atomic_monthly_agency_assignment/,
+    /bulk_confirm_monthly_agency_assignments/,
+    /creator_monthly_agency_assignments/,
+  ]) {
+    assert.equal(
+      forbidden.test(UI),
+      false,
+      `TAP実績が所属を書き換えている: ${forbidden}`,
+    );
+  }
+  // 紹介者の保存に agency_id を混ぜない（現在値をそのまま返すだけ）
+  const panel = assignPanelSource();
+  assert.match(panel, /body\.set\("agency_id", form\.current\.agencyId\)/);
+  assert.equal(
+    /setAgency|selectAgency|agencyId, set/.test(panel),
+    false,
+    "紹介者パネルで所属を選ばせている",
+  );
+});
+
+test("月別管理画面は creator 指定を受け取って絞り込む", () => {
+  // page 側で受け取る
+  assert.match(ASSIGNMENT_PAGE_RAW, /searchParams: Promise<\{ creator\?: string \}>/);
+  assert.match(ASSIGNMENT_PAGE_RAW, /initialSearch={initialSearch}/);
+  // 長すぎる値をそのまま使わない
+  assert.match(ASSIGNMENT_PAGE_RAW, /\.trim\(\)\.slice\(0, 100\)/);
+
+  // client 側で初期の検索語にする
+  assert.match(ASSIGNMENT_UI_RAW, /initialSearch = ""/);
+  assert.match(ASSIGNMENT_UI_RAW, /useState\(initialSearch\)/);
+  // 指定されて開いたことが分かる
+  assert.ok(ASSIGNMENT_UI_RAW.includes("TAP実績から"));
+});

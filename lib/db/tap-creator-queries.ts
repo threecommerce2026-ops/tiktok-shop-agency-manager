@@ -784,6 +784,32 @@ export async function fetchReferrerGapSummary(
     if (!creatorId || !targetMonth) continue;
     if (!eligibleById.get(creatorId)) continue;
 
+    /*
+      対象行の判定は TAP実績の一覧と同じ正式条件を通す。
+
+      ここを通していなかったため、未払い・未決済・返金済みの行だけを
+      理由に警告へ入る creator が 5 名いた（いずれも 2026-08。あの月は
+      1,343 行中 871 行が未払い）。報酬が発生していない行を根拠に
+      「紹介者の入力漏れ」と言ってはいけない。
+
+      一覧側の集計（missingReferrerCreatorCount）と同じ母集団になる。
+    */
+    if (
+      !isTapReferralSourceLine({
+        source_row_key: line.source_row_key,
+        order_id: null,
+        product_id: null,
+        creator_id: line.creator_id,
+        target_month: line.target_month,
+        commission_base: line.commission_base,
+        payment_status: line.payment_status,
+        order_status: line.order_status,
+        refund_status: line.refund_status,
+      })
+    ) {
+      continue;
+    }
+
     const base = referralBaseAmount(line);
     if (!Number.isFinite(base) || base <= 0) continue;
 
