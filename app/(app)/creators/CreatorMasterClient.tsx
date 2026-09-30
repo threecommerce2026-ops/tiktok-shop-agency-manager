@@ -54,15 +54,16 @@ type Referrer = { id: string; name: string; isActive: boolean };
   影響月・件数・金額を出してから保存させる。
   確定済み・支払処理へ進んだ月に影響する場合はサーバーが拒否する。
 */
-function monthOptions(row: CreatorMasterRow): string[] {
+function monthOptions(row: CreatorMasterRow, selected?: string | null): string[] {
   const candidates = [
     row.referrerStartMonth,
     row.agencyAssignedStartMonth,
+    selected,
     EARLIEST_ASSIGNMENT_MONTH,
   ].filter((value): value is string => Boolean(value));
 
   const start = candidates.slice().sort()[0] ?? EARLIEST_ASSIGNMENT_MONTH;
-  const end = currentMonthLabel();
+  const end = [currentMonthLabel(), ...candidates].slice().sort().at(-1) ?? currentMonthLabel();
 
   const out: string[] = [];
   let [year, month] = start.split("-").map(Number);
@@ -78,7 +79,15 @@ function monthOptions(row: CreatorMasterRow): string[] {
     }
   }
 
-  return out;
+  /*
+    選択中の月が選択肢に無いと、ブラウザは先頭（2026-01）を表示する。
+    DB の開始月と画面の表示が食い違う元になるので必ず含める。
+  */
+  for (const value of [row.referrerStartMonth, selected]) {
+    if (value && !out.includes(value)) out.push(value);
+  }
+
+  return [...new Set(out)].sort();
 }
 
 function currentMonthLabel(): string {
@@ -97,9 +106,12 @@ function formatPeriod(start: string | null, end: string | null): string {
 function ReferrerAssignment({
   row,
   referrers,
+  onPendingChange,
 }: {
   row: CreatorMasterRow;
   referrers: Array<{ id: string; name: string; isActive: boolean }>;
+  /* 紹介者に未確認の変更があるか（保存を止めるため親へ伝える） */
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const [referrerId, setReferrerId] = useState(row.referrerId ?? "");
   /*
@@ -128,6 +140,23 @@ function ReferrerAssignment({
     referrerId !== (row.referrerId ?? "") ||
     (referrerId !== "" && startMonth !== row.referrerStartMonth);
 
+  /*
+    紹介者を変えるときは必ず内容を確認してから保存させる。
+
+    確認を挟まないと、画面で選んだつもりの値が送られていなくても
+    「保存しました」とだけ出て気づけない（kanya_land で実際に起きた）。
+    確認すると plan が出るので、送られる値がその場で分かる。
+
+    親への通知は操作したときだけ行う。描画中に親の state を
+    書くと、更新が別コンポーネントの描画中に走ってしまう。
+  */
+  const notifyPending = (nextReferrerId: string, nextStartMonth: string, hasPlan: boolean) => {
+    const nextChanged =
+      nextReferrerId !== (row.referrerId ?? "") ||
+      (nextReferrerId !== "" && nextStartMonth !== row.referrerStartMonth);
+    onPendingChange?.(nextChanged && !hasPlan);
+  };
+
   /* 最初の正式な TAP 対象月を取り、開始月の初期値にする（読むだけ） */
   const adoptFirstTapMonth = async (nextReferrerId: string) => {
     const result = await previewReferralChangeAction({
@@ -137,7 +166,10 @@ function ReferrerAssignment({
     });
     if (!result.ok) return;
     const firstTapMonth = result.plan.firstTapMonth;
-    if (firstTapMonth) setStartMonth(firstTapMonth);
+    if (firstTapMonth) {
+      setStartMonth(firstTapMonth);
+      notifyPending(nextReferrerId, firstTapMonth, false);
+    }
   };
 
   const preview = async () => {
@@ -149,8 +181,12 @@ function ReferrerAssignment({
       startMonth: referrerId ? startMonth : null,
     });
     setPreviewing(false);
-    if (result.ok) setPlan(result.plan);
-    else setPreviewError(result.error);
+    if (result.ok) {
+      setPlan(result.plan);
+      notifyPending(referrerId, startMonth, true);
+    } else {
+      setPreviewError(result.error);
+    }
   };
 
   return (
@@ -170,6 +206,7 @@ function ReferrerAssignment({
             const nextReferrerId = event.target.value;
             setReferrerId(nextReferrerId);
             setPlan(null);
+            notifyPending(nextReferrerId, startMonth, false);
             /*
               新しく紐付けるときだけ、最初の TAP 対象月を初期値にする。
               既存の紹介関係がある creator の開始月は動かさない。
@@ -219,10 +256,11 @@ function ReferrerAssignment({
               setStartMonth(event.target.value);
               setStartMonthTouched(true);
               setPlan(null);
+              notifyPending(referrerId, event.target.value, false);
             }}
             className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
           >
-            {monthOptions(row).map((month) => (
+            {monthOptions(row, startMonth).map((month) => (
               <option key={month} value={month}>
                 {month}
               </option>
@@ -256,6 +294,12 @@ function ReferrerAssignment({
   );
 }
 
+/** 紹介者名が「-」か。表記ゆれも拾う（未設定とは別物） */
+function isDashReferrerLabel(name: string | null | undefined): boolean {
+  const trimmed = String(name ?? "").trim();
+  return trimmed === "-" || trimmed === "−" || trimmed === "ー" || trimmed === "—";
+}
+
 function ReferralChangePreview({ plan }: { plan: ReferralChangePlan }) {
   const blocked = plan.blocks.length > 0;
 
@@ -267,13 +311,32 @@ function ReferralChangePreview({ plan }: { plan: ReferralChangePlan }) {
           : "border-amber-400/25 bg-amber-400/5 text-amber-100"
       }`}
     >
+      {/*
+        「紹介者なし（解除）」と「紹介者『-』」は意味が違う。
+
+        なし  … 紹介関係そのものを持たない状態に戻す
+        「-」 … 名前が「-」の紹介者を正式に設定する
+
+        同じ表示にすると取り違える。見出しで必ず分ける。
+      */}
+      <p className="font-semibold">
+        {plan.referrerId == null
+          ? "紹介者relationを解除します"
+          : isDashReferrerLabel(plan.referrerName)
+            ? "紹介者を「-」へ変更します"
+            : plan.previousReferrerId == null
+              ? "紹介者を新しく設定します"
+              : "紹介者を変更します"}
+      </p>
       <p>
-        現在：{plan.previousReferrerName ?? "なし"}{" "}
+        現在：{plan.previousReferrerName ?? "紹介者なし（未設定）"}{" "}
         {plan.previousStartMonth ? `${plan.previousStartMonth}〜` : ""}
       </p>
       <p>
-        変更後：{plan.referrerName ?? "なし"}{" "}
-        {plan.startMonth ? `${plan.startMonth}〜` : ""}
+        変更後：
+        {plan.referrerId == null
+          ? "紹介者なし（解除）"
+          : `${plan.referrerName ?? "—"} ${plan.startMonth ? `${plan.startMonth}〜` : ""}`}
       </p>
       <p>
         影響期間：{plan.affectedStartMonth ?? "—"}〜{plan.affectedEndMonth ?? "—"}
@@ -362,6 +425,9 @@ function EditPanel({
   referrers: Referrer[];
   onClose: () => void;
 }) {
+  /* 紹介者に未確認の変更があるあいだは保存させない */
+  const [referrerNeedsPreview, setReferrerNeedsPreview] = useState(false);
+
   const [state, formAction, pending] = useActionState<
     CreatorMasterActionResult | null,
     FormData
@@ -422,7 +488,25 @@ function EditPanel({
           過去月から実績があるクリエイターを後から登録しても、
           その過去分に紹介報酬が付くようにするため。
         */}
-        <ReferrerAssignment row={row} referrers={referrers} />
+        {/*
+          DB の値が変わったら内部 state を作り直す。
+
+          ReferrerAssignment は紹介者と適用開始月を useState で持つ。
+          useState の初期値はマウント時に一度しか評価されないので、
+          保存して revalidate されても古い値を握ったままだった。
+          その結果、画面で選び直した紹介者が保存時に送られず
+          「保存は成功したのに紹介者だけ元に戻る」ように見えていた
+          （kanya_land で実際に発生。代理店と区分だけ更新され、
+           creator_referral_logs に記録が残らなかった）。
+
+          key に現在値を含めて、変わったら別物として作り直させる。
+        */}
+        <ReferrerAssignment
+          key={`${row.id}:${row.referrerId ?? ""}:${row.referrerStartMonth ?? ""}`}
+          row={row}
+          referrers={referrers}
+          onPendingChange={setReferrerNeedsPreview}
+        />
 
         <div>
           <label
@@ -508,11 +592,17 @@ function EditPanel({
       <div className="flex items-center gap-3">
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || referrerNeedsPreview}
           className="min-h-[40px] rounded-lg bg-white px-5 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:opacity-50"
         >
           {pending ? "保存中…" : "保存"}
         </button>
+
+        {referrerNeedsPreview ? (
+          <span className="text-xs text-amber-200" role="status">
+            紹介者を変更しています。「変更内容を確認」を押してから保存してください。
+          </span>
+        ) : null}
 
         {state ? (
           <span
