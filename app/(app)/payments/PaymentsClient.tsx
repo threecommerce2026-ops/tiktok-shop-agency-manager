@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { accountManagementTypeLabel } from "@/lib/creators/account-management-type";
+import { MonthlyAssignmentLauncher } from "@/components/agency/MonthlyAssignmentLauncher";
 import {
   EARLIEST_CUTOFF_MONTH,
   MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
@@ -1839,22 +1840,30 @@ function TapPerformanceTab({
                         </span>
                       ) : null}
                       {/*
-                        所属はこの画面では変更しない。月ごとに確定するものなので、
-                        既存の月別管理画面へ対象を引き継いで移動する。
-                        （紹介者はこの画面から設定できる。役割を分けている）
+                        月別所属はこの画面の中で確認・確定する。
+
+                        保存は既存の MonthlyAssignmentPanel（→
+                        confirmCreatorMonthlyAssignmentsAction →
+                        confirmMonthlyAssignments →
+                        set_creator_monthly_agency_assignment RPC）を
+                        そのまま使う。支払済のブロックも履歴も現在所属を
+                        変えない扱いも、すべてそちらが持っている。
+                        ここで独自の保存処理は作らない。
                       */}
-                      <Link
-                        href={`/admin/creator-assignment?creator=${encodeURIComponent(row.tiktokId)}`}
+                      <MonthlyAssignmentLauncher
+                        creatorId={row.creatorId}
+                        label={
+                          row.unconfirmedAgencyMonths.length > 0
+                            ? "月別所属を確認・確定"
+                            : "月別所属を確認"
+                        }
                         className={`w-fit rounded-lg border px-2 py-0.5 text-[10px] ${
                           row.unconfirmedAgencyMonths.length > 0
                             ? "border-amber-400/30 text-amber-100 hover:bg-amber-400/10"
                             : "border-white/[0.14] text-zinc-300 hover:bg-white/[0.06]"
                         }`}
-                      >
-                        {row.unconfirmedAgencyMonths.length > 0
-                          ? "月別所属を確認・確定"
-                          : "所属を確認・変更"}
-                      </Link>
+                        onSaved={load}
+                      />
                     </div>
                   </td>
                   <td className={`${td} whitespace-normal`}>

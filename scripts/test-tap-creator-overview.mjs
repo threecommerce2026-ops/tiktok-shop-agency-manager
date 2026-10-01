@@ -1162,14 +1162,15 @@ test("gap と一覧の入力漏れは同じ絞り込みで作る", () => {
   assert.match(gap, /if \(resolution\.period\?\.referrerId\) continue;/);
 });
 
-test("所属はこの画面で書き換えず、月別管理画面へ対象を渡す", () => {
-  // TAP実績から creator を指定して遷移する
-  assert.match(
-    UI_RAW,
-    /\/admin\/creator-assignment\?creator=\$\{encodeURIComponent\(row\.tiktokId\)\}/,
-    "対象を引き継ぐ導線が無い",
-  );
-  assert.ok(UI_RAW.includes("所属を確認・変更"));
+test("所属はこの画面で書き換えず、共通の確定処理へ渡す", () => {
+  /*
+    2026-10-01 変更。別ページへ遷移する代わりに、同じ creator を対象に
+    共通パネル（MonthlyAssignmentPanel）をこの画面の中で開く。
+    「TAP実績が自前で所属を書き換えない」という条件は以前のまま。
+  */
+  assert.match(UI, /<MonthlyAssignmentLauncher/, "所属を確認する導線が無い");
+  assert.match(UI, /creatorId=\{row\.creatorId\}/, "対象 creator を渡していない");
+  assert.ok(UI_RAW.includes("月別所属を確認"));
 
   /*
     TAP実績側では所属を書き換えない。
@@ -1341,11 +1342,17 @@ test("何月が未確認か creator ごとに見える", () => {
   assert.match(UI, /row\.unconfirmedAgencyMonths\.join\(" \/ "\)/, "月を並べていない");
 });
 
-test("月別所属の確定は既存の管理画面へ渡す", () => {
-  assert.match(
-    UI_RAW,
-    /\/admin\/creator-assignment\?creator=\$\{encodeURIComponent\(row\.tiktokId\)\}/,
+test("月別所属の確定は既存の確定処理へ渡す（画面内で完結する）", () => {
+  /*
+    2026-10-01 変更。以前は /admin/creator-assignment へ遷移していたが、
+    同じ共通パネルを TAP実績の中に開くようにした。
+    「この画面が独自に所属を書き換えない」という意図は変わらない。
+  */
+  assert.ok(
+    !/\/admin\/creator-assignment\?creator=/.test(UI_RAW),
+    "まだ別ページへ遷移している",
   );
+  assert.match(UI, /<MonthlyAssignmentLauncher/, "共通パネルを開いていない");
   assert.ok(UI_RAW.includes("月別所属を確認・確定"));
   assert.ok(
     UI_RAW.includes("月別所属が確定するまで代理店報酬の支払対象にはなりません"),

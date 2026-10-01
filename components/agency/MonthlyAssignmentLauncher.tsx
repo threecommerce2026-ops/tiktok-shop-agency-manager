@@ -17,10 +17,13 @@ export function MonthlyAssignmentLauncher({
   creatorId,
   label = "月別所属を確認",
   className,
+  onSaved,
 }: {
   creatorId: string;
   label?: string;
   className?: string;
+  /** 保存後に呼び出し側の集計を DB から読み直させる */
+  onSaved?: () => void;
 }) {
   const [result, setResult] = useState<LoadMonthlyAssignmentResult | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -57,6 +60,7 @@ export function MonthlyAssignmentLauncher({
             data={result.data}
             agencies={result.agencies}
             onClose={() => setResult(null)}
+            onSaved={onSaved}
           />
         </div>
       ) : null}
