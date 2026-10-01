@@ -10,6 +10,10 @@ import {
 } from "@/lib/referrals/referral-period";
 import { isReferralRewardEligibleType } from "@/lib/creators/account-management-type";
 import {
+  normalizeAssignmentState,
+  resolveAssignmentState,
+} from "@/lib/creators/assignment-state";
+import {
   referralBaseAmount,
   REFERRAL_REWARD_RATE,
   resolveRewardItemAmount,
@@ -854,5 +858,300 @@ export async function fetchReferrerGapSummary(
     referralBaseAmount: totalBase,
     estimatedReferralReward: sumReferralAmounts([totalBase * REFERRAL_REWARD_RATE]),
     error: null,
+  };
+}
+
+// =============================================================================
+// 紹介者の帰属状況（支払管理の紹介者タブで使う表示専用の集計）
+// =============================================================================
+/*
+  TAP の紹介報酬の算定元があるクリエイターを、紹介者の帰属で分けて見る。
+
+  ■ 母集団
+  isTapReferralSourceLine を通り、かつ算定元（W + X）が 0 より大きいもの。
+  算定元が 0 のクリエイターは紹介報酬の帰属を考える対象にならないので
+  ここでは数えない（TAP実績の一覧からは消さない。別の画面の話）。
+
+  ■ 4つを混同しない
+      assigned       通常の紹介者が設定済み
+      dash_referrer  紹介者「-」が正式に設定済み
+      no_referrer    紹介者がいないと確認済み（state = none）
+      unconfirmed    まだ確認していない（要確認）
+
+  「-」は管理者が正式に設定した有効な紹介者で、「紹介者なし」とは別物。
+  「紹介者なし（確認済み）」と「未確認」も別物で、
+  creators.referrer_assignment_state でしか区別できない
+  （lib/creators/assignment-state.ts が単一ソース）。
+
+  ■ 支払とは完全に分けて持つ
+  これは読むだけの集計で、PaymentUnpaidRow には混ぜない。
+  支払候補・claim・支払明細・振込CSV へは一切流さない。
+  支払先として成立するのは referral_reward_items に行がある紹介者だけで、
+  紹介者がいないクリエイターはそもそも referrer_id を持たない。
+
+  ■ 確定額と想定額を混ぜない
+  referralRewardAmount は referral_reward_items の実績。
+  未設定のクリエイターの「設定したらいくらになるか」は
+  estimatedReferralReward として別に持つ。足し合わせない。
+*/
+
+export type ReferrerCoverageKind =
+  | "assigned"
+  | "dash_referrer"
+  | "no_referrer"
+  | "unconfirmed";
+
+export const REFERRER_COVERAGE_LABEL: Record<ReferrerCoverageKind, string> = {
+  assigned: "紹介者あり",
+  dash_referrer: "「-」設定済み",
+  no_referrer: "紹介者なし（確認済み）",
+  unconfirmed: "未設定・要確認",
+};
+
+export type ReferrerCoverageCreator = {
+  creatorId: string;
+  tiktokId: string;
+  creatorName: string | null;
+  accountManagementType: string | null;
+  /** 紹介報酬が発生しうる区分か（standard のみ true） */
+  referralEligibleType: boolean;
+  agencyLabel: string;
+  firstEligibleMonth: string;
+  firstTargetMonth: string;
+  lastTargetMonth: string;
+  eligibleItemCount: number;
+  commissionBase: number;
+  /** 紹介報酬の算定元（W + X） */
+  referralBaseAmount: number;
+  /** 実績。referral_reward_items が正 */
+  referralRewardAmount: number;
+  /** 算定元 × 料率。確定額ではない */
+  estimatedReferralReward: number;
+  referrerName: string | null;
+  referrerAssignmentState: string | null;
+  /*
+    単純な入力漏れではなく、relation の整合を見ないといけないもの。
+
+    関係が登録されていて確認済みになっているのに、対象月の帰属先を
+    正式に解決できない状態（odebu888 が該当）。新規設定で上書きすると
+    既存の関係や過去の帰属を壊すので、別物として見せる。
+  */
+  relationInconsistent: boolean;
+  /** 不整合の内容（画面でそのまま出す） */
+  relationNote: string | null;
+};
+
+export type ReferrerCoverageGroup = {
+  kind: ReferrerCoverageKind;
+  /** assigned のときだけ入る。紹介者ごとに1グループ */
+  referrerId: string | null;
+  referrerName: string | null;
+  creatorCount: number;
+  /** うち relation の整合を確認すべきもの（単純な入力漏れではない） */
+  relationInconsistentCount: number;
+  eligibleItemCount: number;
+  commissionBase: number;
+  referralBaseAmount: number;
+  referralRewardAmount: number;
+  estimatedReferralReward: number;
+  firstTargetMonth: string | null;
+  lastTargetMonth: string | null;
+  creators: ReferrerCoverageCreator[];
+};
+
+export type ReferrerCoverage = {
+  groups: ReferrerCoverageGroup[];
+  totals: {
+    creatorCount: number;
+    assignedCount: number;
+    dashReferrerCount: number;
+    noReferrerCount: number;
+    unconfirmedCount: number;
+    /** うち relation の整合を確認すべきもの */
+    relationInconsistentCount: number;
+    referralBaseAmount: number;
+    referralRewardAmount: number;
+    /*
+      現在の区分では紹介報酬の対象外なのに、DB に実績が残っている分。
+
+      区分を standard から変えたあと reward を再集計していないと起きる。
+      画面で勝手に 0 へ置き換えず、実績として見せたうえで
+      「現在は対象外」と並べて出す。
+    */
+    ineligibleRewardAmount: number;
+    ineligibleRewardCreatorCount: number;
+  };
+};
+
+const EMPTY_COVERAGE: ReferrerCoverage = {
+  groups: [],
+  totals: {
+    creatorCount: 0,
+    assignedCount: 0,
+    dashReferrerCount: 0,
+    noReferrerCount: 0,
+    unconfirmedCount: 0,
+    relationInconsistentCount: 0,
+    referralBaseAmount: 0,
+    referralRewardAmount: 0,
+    ineligibleRewardAmount: 0,
+    ineligibleRewardCreatorCount: 0,
+  },
+};
+
+/**
+ * TapCreatorRow から紹介者の帰属状況を組み立てる。
+ *
+ * 集計そのものは fetchTapCreatorOverview を再利用する。母集団・区分・
+ * 所属ラベル・算定元・firstEligibleMonth はすべてそちらが持っている。
+ */
+export function buildReferrerCoverage(
+  rows: readonly TapCreatorRow[],
+): ReferrerCoverage {
+  /* 算定元が 0 のクリエイターは帰属を考える対象にしない */
+  const target = rows.filter((row) => row.referralBaseAmount > 0);
+  if (target.length === 0) return EMPTY_COVERAGE;
+
+  /*
+    紹介関係はあるのに帰属先を解決できないもの。
+
+    relation が存在して確認済みなのに referrerState が none になる。
+    期間が重なって黙って選べない、開始月が不正、同月開始が並んで
+    すべて superseded になった、などが原因になりうる。
+  */
+  const isInconsistent = (row: TapCreatorRow): boolean => {
+    if (row.referrerState !== "none") return false;
+    /*
+      分類に使う実効状態（resolveAssignmentState）は ID が NULL なら
+      決して "assigned" を返さないので、ここでは保存値をそのまま見る。
+
+      保存値が assigned ＝ 誰かが紹介者を設定した記録がある。
+      それでいて帰属先を解決できないなら、単純な入力漏れではない。
+    */
+    return normalizeAssignmentState(row.referrerAssignmentState) === "assigned";
+  };
+
+  const toCreator = (row: TapCreatorRow): ReferrerCoverageCreator => ({
+    creatorId: row.creatorId,
+    tiktokId: row.tiktokId,
+    creatorName: row.creatorName,
+    accountManagementType: row.accountManagementType,
+    referralEligibleType: row.referralEligibleType,
+    agencyLabel: row.agencyLabel,
+    firstEligibleMonth: row.firstEligibleMonth,
+    firstTargetMonth: row.firstTargetMonth,
+    lastTargetMonth: row.lastTargetMonth,
+    eligibleItemCount: row.eligibleItemCount,
+    commissionBase: row.commissionBase,
+    referralBaseAmount: row.referralBaseAmount,
+    referralRewardAmount: row.referralRewardAmount,
+    estimatedReferralReward: row.estimatedReferralReward,
+    referrerName: row.referrerName,
+    referrerAssignmentState: row.referrerAssignmentState,
+    relationInconsistent: isInconsistent(row),
+    relationNote: isInconsistent(row)
+      ? "紹介関係は登録されていますが、対象月の帰属先を解決できていません。新規設定で上書きせず、relation を個別に確認してください。"
+      : null,
+  });
+
+  /*
+    どの分類に入るか。
+
+    有効な紹介関係があるかは referrerState が決める
+    （期間外や relation異常もここでは「関係はある」側に寄せず、
+     後続の分岐で assigned 扱いにする。帰属先が居ることは確かなので）。
+    関係が無い場合だけ、確認済みか未確認かを state で分ける。
+  */
+  const kindOf = (row: TapCreatorRow): ReferrerCoverageKind => {
+    if (row.referrerState === "none") {
+      return resolveAssignmentState(null, row.referrerAssignmentState) === "none"
+        ? "no_referrer"
+        : "unconfirmed";
+    }
+    return row.referrerState === "dash_referrer" ? "dash_referrer" : "assigned";
+  };
+
+  /* 紹介者ありは紹介者ごと、それ以外は分類ごとに1グループ */
+  const buckets = new Map<string, { kind: ReferrerCoverageKind; referrerId: string | null; rows: TapCreatorRow[] }>();
+
+  for (const row of target) {
+    const kind = kindOf(row);
+    const key =
+      kind === "assigned" ? `assigned:${row.referrerName ?? ""}` : kind;
+    const bucket = buckets.get(key) ?? { kind, referrerId: null, rows: [] };
+    bucket.rows.push(row);
+    buckets.set(key, bucket);
+  }
+
+  const groups: ReferrerCoverageGroup[] = [...buckets.values()].map((bucket) => {
+    const creators = bucket.rows.map(toCreator);
+    const months = bucket.rows
+      .flatMap((row) => [row.firstTargetMonth, row.lastTargetMonth])
+      .filter((value) => Boolean(value))
+      .sort();
+
+    return {
+      kind: bucket.kind,
+      referrerId: bucket.referrerId,
+      referrerName:
+        bucket.kind === "assigned" || bucket.kind === "dash_referrer"
+          ? bucket.rows[0]?.referrerName ?? null
+          : null,
+      creatorCount: creators.length,
+      relationInconsistentCount: creators.filter((c) => c.relationInconsistent).length,
+      eligibleItemCount: creators.reduce((sum, c) => sum + c.eligibleItemCount, 0),
+      commissionBase: sumReferralAmounts(creators.map((c) => c.commissionBase)),
+      referralBaseAmount: sumReferralAmounts(creators.map((c) => c.referralBaseAmount)),
+      referralRewardAmount: sumReferralAmounts(creators.map((c) => c.referralRewardAmount)),
+      estimatedReferralReward: sumReferralAmounts(
+        creators.map((c) => c.estimatedReferralReward),
+      ),
+      firstTargetMonth: months[0] ?? null,
+      lastTargetMonth: months.at(-1) ?? null,
+      creators: creators
+        .slice()
+        .sort((a, b) => b.referralBaseAmount - a.referralBaseAmount),
+    };
+  });
+
+  const order: Record<ReferrerCoverageKind, number> = {
+    unconfirmed: 0,
+    assigned: 1,
+    dash_referrer: 2,
+    no_referrer: 3,
+  };
+  groups.sort(
+    (a, b) =>
+      order[a.kind] - order[b.kind] ||
+      b.referralBaseAmount - a.referralBaseAmount,
+  );
+
+  const countOf = (kind: ReferrerCoverageKind) =>
+    groups.filter((g) => g.kind === kind).reduce((sum, g) => sum + g.creatorCount, 0);
+
+  return {
+    groups,
+    totals: {
+      creatorCount: target.length,
+      assignedCount: countOf("assigned"),
+      dashReferrerCount: countOf("dash_referrer"),
+      noReferrerCount: countOf("no_referrer"),
+      unconfirmedCount: countOf("unconfirmed"),
+      relationInconsistentCount: target.filter((row) => isInconsistent(row)).length,
+      referralBaseAmount: sumReferralAmounts(
+        target.map((row) => row.referralBaseAmount),
+      ),
+      referralRewardAmount: sumReferralAmounts(
+        target.map((row) => row.referralRewardAmount),
+      ),
+      ineligibleRewardAmount: sumReferralAmounts(
+        target
+          .filter((row) => !row.referralEligibleType)
+          .map((row) => row.referralRewardAmount),
+      ),
+      ineligibleRewardCreatorCount: target.filter(
+        (row) => !row.referralEligibleType && row.referralRewardAmount > 0,
+      ).length,
+    },
   };
 }

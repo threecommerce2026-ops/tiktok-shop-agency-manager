@@ -22,9 +22,11 @@ import {
   type ReferrerRewardDetail,
 } from "@/lib/db/payment-queries";
 import {
+  buildReferrerCoverage,
   fetchReferrerGapSummary,
   fetchTapCreatorOverview,
   resolveReferralReviewEndMonth,
+  type ReferrerCoverage,
   type ReferrerGapSummary,
   type TapCreatorOverview,
 } from "@/lib/db/tap-creator-queries";
@@ -380,6 +382,41 @@ export async function fetchCreatorReferrerFormAction(
           : String(creator.account_management_type),
     },
   };
+}
+
+export type ReferrerCoverageActionResult =
+  | { ok: true; coverage: ReferrerCoverage; endMonth: string }
+  | { ok: false; error: string };
+
+/*
+  紹介者の帰属状況（支払管理の紹介者タブで出す表示専用の集計）。
+
+  ■ 支払とは完全に分けて返す
+  PaymentOverview には載せない。あちらに混ぜると支払画面を開くたびに
+  TAP 明細（2万件超）を読むことになり、かつ支払候補を作る経路と
+  同じ型に入ってしまう。別の経路で返せば、支払候補・claim・
+  支払明細・振込CSV へ流れ込む余地が構造的に無くなる。
+
+  ■ 母集団は算定元があるクリエイターだけ
+  isTapReferralSourceLine を通り、かつ W + X > 0。
+  算定元が 0 のクリエイターは帰属を考える対象にならない
+  （TAP実績の一覧からは消さない。あちらは従来どおり）。
+
+  ■ 何も書かない
+  紹介者の登録も報酬の生成もしない。
+*/
+export async function fetchReferrerCoverageAction(): Promise<ReferrerCoverageActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const endMonth = await resolveReferralReviewEndMonth(auth.supabase);
+  const overview = await fetchTapCreatorOverview(getSupabaseAdmin(), { endMonth });
+
+  if (overview.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(overview.error) };
+  }
+
+  return { ok: true, coverage: buildReferrerCoverage(overview.rows), endMonth };
 }
 
 export type ReferrerGapActionResult =

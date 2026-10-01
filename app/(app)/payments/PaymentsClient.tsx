@@ -6,7 +6,7 @@ import {
   MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
   formatCutoffLabel,
 } from "@/lib/payments/cutoff-month";
-import { useActionState, useMemo, useState } from "react";
+import { Fragment, useActionState, useMemo, useState } from "react";
 
 import {
   approvePaymentBatchesBulkAction,
@@ -15,6 +15,7 @@ import {
   exportPaymentCsvAction,
   fetchReferralMonthSettlementsAction,
   fetchCreatorReferrerFormAction,
+  fetchReferrerCoverageAction,
   fetchReferrerGapSummaryAction,
   fetchReferrerRewardDetailAction,
   fetchTapCreatorOverviewAction,
@@ -31,9 +32,11 @@ import {
 import type { ReferrerRewardDetail } from "@/lib/db/payment-queries";
 import type {
   TapCreatorOverview,
+  ReferrerCoverage,
   ReferrerGapSummary,
   TapCreatorRow,
 } from "@/lib/db/tap-creator-queries";
+import { REFERRER_COVERAGE_LABEL } from "@/lib/db/tap-creator-queries";
 import type { CreatorReferrerFormResult } from "@/app/actions/payments";
 import {
   previewReferralChangeAction,
@@ -387,6 +390,372 @@ function SettlementStatusBadge({ status }: { status: string }) {
     <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] ${cls}`}>
       {SETTLEMENT_STATUS_LABEL[status] ?? status}
     </span>
+  );
+}
+
+
+const COVERAGE_FILTERS = [
+  { key: "all", label: "すべて" },
+  { key: "assigned", label: "紹介者あり" },
+  { key: "dash_referrer", label: "「-」" },
+  { key: "no_referrer", label: "紹介者なし" },
+  { key: "unconfirmed", label: "未設定・要確認" },
+] as const;
+
+/*
+  紹介者の帰属状況。
+
+  TAP の紹介報酬の算定元があるクリエイターを、紹介者の帰属で分けて見る。
+  ここは確認用で、支払操作は無い。支払候補とは別の経路で取っているので
+  ここに出たクリエイターが振込対象へ混ざることはない。
+
+  「-」/「紹介者なし（確認済み）」/「未設定・要確認」は別物として扱う。
+*/
+function ReferrerCoverageSection({ onReviewReferrer }: { onReviewReferrer: () => void }) {
+  const [coverage, setCoverage] = useState<ReferrerCoverage | null>(null);
+  const [endMonth, setEndMonth] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<(typeof COVERAGE_FILTERS)[number]["key"]>("all");
+  const [open, setOpen] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    const result = await fetchReferrerCoverageAction();
+    setLoading(false);
+    if (result.ok) {
+      setCoverage(result.coverage);
+      setEndMonth(result.endMonth);
+    } else {
+      setError(result.error);
+    }
+  };
+
+  if (!coverage) {
+    return (
+      <section className="space-y-3 rounded-xl border border-white/[0.08] bg-surface-1 p-4">
+        <h2 className="text-sm font-semibold text-zinc-100">紹介者帰属状況</h2>
+        <p className="text-[11px] leading-relaxed text-zinc-400">
+          TAPの紹介報酬の算定元があるクリエイターを、紹介者の帰属で分けて確認します。
+          紹介者が未設定のクリエイターもここに出ます。確認用の集計で、支払操作はありません。
+        </p>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="min-h-[36px] rounded-lg bg-[var(--accent-cyan)] px-4 text-xs font-semibold text-black disabled:opacity-50"
+        >
+          {loading ? "集計中…" : "紹介者帰属状況を表示"}
+        </button>
+        {error ? (
+          <p className="text-[11px] leading-relaxed text-red-300">{error}</p>
+        ) : null}
+      </section>
+    );
+  }
+
+  const t = coverage.totals;
+  const groups = coverage.groups.filter((g) => filter === "all" || g.kind === filter);
+
+  return (
+    <section className="space-y-3 rounded-xl border border-white/[0.08] bg-surface-1 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-100">
+            紹介者帰属状況（{endMonth ? `〜${endMonth}` : ""}）
+          </h2>
+          <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+            紹介報酬の算定元（W + X）があるクリエイターが対象です。
+            この一覧は確認用で、
+            <span className="font-semibold text-zinc-300">支払対象とは別</span>
+            です。紹介者がいないクリエイターが振込対象になることはありません。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="min-h-[32px] shrink-0 rounded-lg border border-white/[0.12] px-3 text-xs text-zinc-300 hover:bg-white/[0.06] disabled:opacity-50"
+        >
+          {loading ? "集計中…" : "再読み込み"}
+        </button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <Kpi label="対象クリエイター" value={`${int(t.creatorCount)} 名`} />
+        <Kpi label="紹介者あり" value={`${int(t.assignedCount)} 名`} />
+        <Kpi label="「-」設定済み" value={`${int(t.dashReferrerCount)} 名`} hint="正式な紹介者" />
+        <Kpi label="紹介者なし" value={`${int(t.noReferrerCount)} 名`} hint="確認済み" />
+        <Kpi
+          label="未設定・要確認"
+          value={`${int(t.unconfirmedCount)} 名`}
+          hint={
+            t.relationInconsistentCount > 0
+              ? `うち relation要確認 ${int(t.relationInconsistentCount)} 名`
+              : undefined
+          }
+        />
+      </div>
+
+      {t.ineligibleRewardCreatorCount > 0 ? (
+        <div className="rounded-lg border border-amber-400/25 bg-amber-400/5 p-3">
+          <p className="text-[11px] leading-relaxed text-amber-100">
+            現在の区分では紹介報酬の対象外なのに、DBに実績が残っているクリエイターが{" "}
+            <span className="font-mono font-semibold">
+              {int(t.ineligibleRewardCreatorCount)} 名
+            </span>
+            （実績 <span className="font-mono">{yen(t.ineligibleRewardAmount)}</span>）います。
+            <br />
+            区分を変更したあと紹介報酬を再集計していないためです。実績はそのまま表示しています。
+            次回の正式な再集計で現在のルールに合わせて計算し直されます。
+          </p>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap gap-2">
+        {COVERAGE_FILTERS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => setFilter(item.key)}
+            className={`min-h-[32px] rounded-lg border px-3 text-xs transition ${
+              filter === item.key
+                ? "border-[var(--accent-cyan)]/40 bg-white/[0.08] font-semibold text-zinc-50"
+                : "border-white/[0.1] text-zinc-400 hover:bg-white/[0.04]"
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950/60">
+        <table className="min-w-[980px] w-full border-collapse">
+          <thead>
+            <tr>
+              <th className={th}>区分 / 紹介者</th>
+              <th className={`${th} text-right`}>対象</th>
+              <th className={th}>対象期間</th>
+              <th className={`${th} text-right`}>紹介報酬の算定元</th>
+              <th className={`${th} text-right`}>紹介報酬（現在DB実績）</th>
+              <th className={`${th} text-right`}>設定時の参考額</th>
+              <th className={th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
+                  該当するグループがありません。
+                </td>
+              </tr>
+            ) : (
+              groups.map((group) => {
+                const groupKey = `${group.kind}:${group.referrerName ?? ""}`;
+                const warn = group.kind === "unconfirmed";
+                return (
+                  <Fragment key={groupKey}>
+                    <tr className="border-b border-zinc-800/70 align-top">
+                      <td className={`${td} whitespace-normal`}>
+                        <span
+                          className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${
+                            warn
+                              ? "border-red-400/30 bg-red-400/10 text-red-200"
+                              : group.kind === "no_referrer"
+                                ? "border-white/[0.14] bg-white/[0.05] text-zinc-300"
+                                : group.kind === "dash_referrer"
+                                  ? "border-white/[0.14] bg-white/[0.05] text-zinc-300"
+                                  : "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
+                          }`}
+                        >
+                          {REFERRER_COVERAGE_LABEL[group.kind]}
+                        </span>
+                        {group.kind === "assigned" ? (
+                          <span className="mt-0.5 block text-zinc-100">
+                            {group.referrerName ?? "—"}
+                          </span>
+                        ) : null}
+                        {warn ? (
+                          <span className="mt-0.5 block text-[10px] text-red-200">
+                            紹介者の確認が必要です
+                            {group.relationInconsistentCount > 0
+                              ? `（うち relation要確認 ${int(group.relationInconsistentCount)} 名）`
+                              : ""}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-200`}>
+                        {int(group.creatorCount)} 名
+                      </td>
+                      <td className={`${td} font-mono text-zinc-400`}>
+                        {group.firstTargetMonth === group.lastTargetMonth
+                          ? group.firstTargetMonth
+                          : `${group.firstTargetMonth}〜${group.lastTargetMonth}`}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-200`}>
+                        {yen(group.referralBaseAmount)}
+                      </td>
+                      <td className={`${td} text-right font-mono text-emerald-300`}>
+                        {group.referralRewardAmount > 0
+                          ? yen(group.referralRewardAmount)
+                          : "¥0.00"}
+                      </td>
+                      <td className={`${td} text-right font-mono text-zinc-500`}>
+                        {group.kind === "unconfirmed" || group.kind === "no_referrer"
+                          ? yen(group.estimatedReferralReward)
+                          : "—"}
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <button
+                          type="button"
+                          onClick={() => setOpen(open === groupKey ? null : groupKey)}
+                          className="rounded-lg border border-white/[0.12] px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/[0.06]"
+                        >
+                          {open === groupKey ? "閉じる" : "内訳"}
+                        </button>
+                      </td>
+                    </tr>
+                    {open === groupKey ? (
+                      <tr className="border-b border-zinc-800/70">
+                        <td colSpan={7} className="px-3 py-2">
+                          <CoverageCreatorTable
+                            group={group}
+                            onReviewReferrer={onReviewReferrer}
+                          />
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-zinc-500">
+        「紹介報酬（現在DB実績）」は referral_reward_items の実績です。
+        「設定時の参考額」は算定元に料率をかけた参考値で、まだ発生していません。
+        両者を足し合わせないでください。
+      </p>
+    </section>
+  );
+}
+
+function CoverageCreatorTable({
+  group,
+  onReviewReferrer,
+}: {
+  group: ReferrerCoverage["groups"][number];
+  onReviewReferrer: () => void;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-zinc-800">
+      <table className="min-w-[1080px] w-full border-collapse text-[11px]">
+        <thead>
+          <tr className="text-left text-zinc-500">
+            <th className="px-2 py-1.5 font-medium">TikTok ID</th>
+            <th className="px-2 py-1.5 font-medium">区分</th>
+            <th className="px-2 py-1.5 font-medium">所属</th>
+            <th className="px-2 py-1.5 font-medium">最初の対象月</th>
+            <th className="px-2 py-1.5 font-medium">対象期間</th>
+            <th className="px-2 py-1.5 text-right font-medium">対象件数</th>
+            <th className="px-2 py-1.5 text-right font-medium">成果報酬ベース</th>
+            <th className="px-2 py-1.5 text-right font-medium">算定元 W+X</th>
+            <th className="px-2 py-1.5 text-right font-medium">現在DB実績</th>
+            <th className="px-2 py-1.5 font-medium">紹介者設定状況</th>
+          </tr>
+        </thead>
+        <tbody>
+          {group.creators.map((c) => (
+            <tr key={c.creatorId} className="border-t border-zinc-800/70 align-top">
+              <td className="px-2 py-1.5">
+                <span className="font-mono text-zinc-100">{c.tiktokId}</span>
+                {c.creatorName && c.creatorName !== c.tiktokId ? (
+                  <span className="block text-[10px] text-zinc-500">{c.creatorName}</span>
+                ) : null}
+              </td>
+              <td className="px-2 py-1.5 text-zinc-400">
+                {c.accountManagementType ?? "—"}
+                {!c.referralEligibleType ? (
+                  <span className="mt-0.5 block w-fit rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-[10px] text-amber-200">
+                    現在は紹介報酬対象外
+                  </span>
+                ) : null}
+              </td>
+              <td className="px-2 py-1.5 text-zinc-400">{c.agencyLabel}</td>
+              <td className="px-2 py-1.5 font-mono text-zinc-400">{c.firstEligibleMonth}</td>
+              <td className="px-2 py-1.5 font-mono text-zinc-400">
+                {c.firstTargetMonth === c.lastTargetMonth
+                  ? c.firstTargetMonth
+                  : `${c.firstTargetMonth}〜${c.lastTargetMonth}`}
+              </td>
+              <td className="px-2 py-1.5 text-right font-mono text-zinc-400">
+                {int(c.eligibleItemCount)}
+              </td>
+              <td className="px-2 py-1.5 text-right font-mono text-zinc-200">
+                {yen(c.commissionBase)}
+              </td>
+              <td className="px-2 py-1.5 text-right font-mono text-zinc-200">
+                {yen(c.referralBaseAmount)}
+              </td>
+              <td className="px-2 py-1.5 text-right font-mono text-emerald-300">
+                {/* DB の実績。現在の区分で対象外でも隠さない */}
+                {c.referralRewardAmount > 0 ? yen(c.referralRewardAmount) : "¥0.00"}
+              </td>
+              <td className="px-2 py-1.5 whitespace-normal">
+                {c.relationInconsistent ? (
+                  <>
+                    <span className="inline-flex w-fit rounded-full border border-red-400/30 bg-red-400/10 px-1.5 text-[10px] text-red-200">
+                      relation要確認
+                    </span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-red-100/90">
+                      紹介者 {c.referrerName ?? "—"} ／ 確認状態 {c.referrerAssignmentState}
+                      ／ 期間解決：未解決
+                      {c.referralRewardAmount > 0
+                        ? ` ／ 現在の帰属額 ${yen(c.referralRewardAmount)}`
+                        : ""}
+                    </span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-zinc-400">
+                      {c.relationNote}
+                    </span>
+                    <Link
+                      href={`/creators?q=${encodeURIComponent(c.tiktokId)}`}
+                      className="mt-1 inline-flex rounded-lg border border-red-400/30 px-2 py-0.5 text-[10px] text-red-100 hover:bg-red-400/10"
+                    >
+                      relationを個別に確認する
+                    </Link>
+                  </>
+                ) : group.kind === "unconfirmed" ? (
+                  <>
+                    <span className="inline-flex w-fit rounded-full border border-red-400/30 bg-red-400/10 px-1.5 text-[10px] text-red-200">
+                      未設定
+                    </span>
+                    <button
+                      type="button"
+                      onClick={onReviewReferrer}
+                      className="mt-1 block rounded-lg border border-[var(--accent-cyan)]/40 px-2 py-0.5 text-[10px] text-[var(--accent-cyan)] hover:bg-white/[0.06]"
+                    >
+                      紹介者を確認・設定
+                    </button>
+                  </>
+                ) : group.kind === "no_referrer" ? (
+                  <span className="text-zinc-400">
+                    紹介者なし（確認済み）／ 紹介報酬 ¥0.00
+                  </span>
+                ) : (
+                  <span className="text-zinc-400">
+                    {c.referrerName ?? "—"}
+                    {c.firstEligibleMonth ? ` ／ ${c.firstEligibleMonth}〜` : ""}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -2203,6 +2572,15 @@ export function PaymentsClient({
             紹介者タブでだけ月次確定を出す。代理店の支払はこの確定を
             前提にしていないので、他タブに置くと関係が誤解される。
           */}
+          {tab === "referrer" ? (
+            <ReferrerCoverageSection
+              onReviewReferrer={() => {
+                setTapReferrerFilter("none");
+                setTab("tap");
+              }}
+            />
+          ) : null}
+
           {tab === "referrer" ? (
             <ReferralSettlementSection
               onReviewReferrers={() => {
