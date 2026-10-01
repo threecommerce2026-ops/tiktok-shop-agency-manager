@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+
+import { accountManagementTypeLabel } from "@/lib/creators/account-management-type";
 import {
   EARLIEST_CUTOFF_MONTH,
   MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
@@ -657,7 +659,7 @@ function CoverageCreatorTable({
           <tr className="text-left text-zinc-500">
             <th className="px-2 py-1.5 font-medium">TikTok ID</th>
             <th className="px-2 py-1.5 font-medium">区分</th>
-            <th className="px-2 py-1.5 font-medium">所属</th>
+            <th className="px-2 py-1.5 font-medium">所属（月別確定ベース）</th>
             <th className="px-2 py-1.5 font-medium">最初の対象月</th>
             <th className="px-2 py-1.5 font-medium">対象期間</th>
             <th className="px-2 py-1.5 text-right font-medium">対象件数</th>
@@ -677,7 +679,10 @@ function CoverageCreatorTable({
                 ) : null}
               </td>
               <td className="px-2 py-1.5 text-zinc-400">
-                {c.accountManagementType ?? "—"}
+                {accountManagementTypeLabel(c.accountManagementType)}
+                <span className="block text-[10px] text-zinc-600">
+                  {c.accountManagementType ?? "—"}
+                </span>
                 {!c.referralEligibleType ? (
                   <span className="mt-0.5 block w-fit rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-[10px] text-amber-200">
                     現在は紹介報酬対象外
@@ -1071,7 +1076,7 @@ function ReferralSettlementSection({
 */
 const TAP_AGENCY_FILTERS = [
   { key: "all", label: "所属: すべて" },
-  { key: "in_house", label: "所属: 自社運営" },
+  { key: "in_house", label: "所属: 自社代理店" },
   { key: "external", label: "所属: 外部代理店" },
   { key: "unconfirmed", label: "所属: 未確認" },
 ] as const;
@@ -1515,6 +1520,14 @@ function TapPerformanceTab({
           <span className="font-semibold text-zinc-300">
             この画面は確認用で、支払操作はありません。
           </span>
+          <br />
+          「所属」は
+          <span className="font-semibold text-zinc-300">月別に確定した所属</span>
+          （creator_monthly_agency_assignments）です。対象月すべてが自社代理店
+          （THREE.inc /（株）3）なら「自社代理店所属」と出ます。
+          クリエイターの
+          <span className="font-semibold text-zinc-300">区分</span>
+          （通常 / 自社運用 / アカウント貸出）とは別の項目です。
         </p>
         <dl className="mt-3 grid gap-2 text-[11px] leading-relaxed text-zinc-400 sm:grid-cols-2">
           <div>
@@ -1692,7 +1705,7 @@ function TapPerformanceTab({
             <tr>
               <th className={th}>TikTok ID</th>
               <th className={th}>区分</th>
-              <th className={th}>所属</th>
+              <th className={th}>所属（月別確定ベース）</th>
               <th className={th}>紹介者</th>
               <th className={th}>対象期間</th>
               <th className={`${th} text-right`}>対象件数</th>
@@ -1730,7 +1743,14 @@ function TapPerformanceTab({
                     ) : null}
                   </td>
                   <td className={`${td} whitespace-normal text-zinc-400`}>
-                    {row.accountManagementType ?? "-"}
+                    {/*
+                      区分は所属とは別の項目。所属の「自社代理店所属」と
+                      取り違えないよう、日本語ラベルで出す。
+                    */}
+                    {accountManagementTypeLabel(row.accountManagementType)}
+                    <span className="block text-[10px] text-zinc-600">
+                      {row.accountManagementType ?? "-"}
+                    </span>
                   </td>
                   <td className={`${td} whitespace-normal`}>
                     <div className="flex flex-col gap-0.5">

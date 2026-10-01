@@ -600,8 +600,18 @@ export async function fetchTapCreatorOverview(
         const agencyId = assignments?.get(month);
         return agencyId != null && agencyById.get(agencyId)?.isInHouse === true;
       });
+      /*
+        所属が自社代理店（THREE.inc /（株）3）かどうか。
+
+        区分（account_management_type）の self_operated＝自社運用とは
+        別の概念。「自社運営」と書くと区分の「自社運用」と1文字しか
+        違わず、同じ行に並べると取り違える
+        （nikkoro.gashi で実際に「自社運営なのにアカウント貸出？」と
+         読めてしまった。所属 THREE.inc / 区分 account_lending で
+         どちらも正しい）。所属側であることが分かる名前にする。
+      */
       agencyState = allInHouse ? "in_house" : "external";
-      agencyLabel = allInHouse ? "自社運営" : assignedAgencies.join(" → ");
+      agencyLabel = allInHouse ? "自社代理店所属" : assignedAgencies.join(" → ");
     }
 
     rows.push({

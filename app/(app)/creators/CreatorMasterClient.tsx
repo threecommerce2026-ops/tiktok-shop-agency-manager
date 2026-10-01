@@ -460,13 +460,14 @@ function EditPanel({
             htmlFor={`agency-${row.id}`}
             className="text-[11px] font-medium text-zinc-500"
           >
-            所属代理店
+            現在の所属代理店
           </label>
           <select
             id={`agency-${row.id}`}
             name="agency_id"
             defaultValue={row.agencyId ?? ""}
             className="mt-1 w-full rounded-lg border border-white/[0.08] bg-surface-1 px-3 py-2 text-sm text-zinc-100"
+            aria-describedby={`agency-note-${row.id}`}
           >
             <option value="">未振り分け</option>
             {agencies
@@ -576,9 +577,20 @@ function EditPanel({
         <p className="text-[11px] font-semibold text-zinc-300">
           この編集フォームは「現在所属」を変更します
         </p>
-        <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+        <p
+          id={`agency-note-${row.id}`}
+          className="mt-1 text-[11px] leading-relaxed text-zinc-500"
+        >
           過去月の代理店報酬の帰属先は「月別所属」で確定します。
           現在所属を変えても、月別確定済みの過去月の帰属は変わりません。
+          {/*
+            支払管理のTAP実績に出る「所属」は月別確定の方を見ている。
+            こちらの現在所属と食い違って見えることがあるので明記する。
+          */}
+          <br />
+          支払管理の「TAP実績」に出る所属は
+          <span className="font-semibold text-zinc-400">月別確定ベース</span>
+          なので、ここの現在所属と表示が違うことがあります。
         </p>
         <div className="mt-2">
           <MonthlyAssignmentLauncher

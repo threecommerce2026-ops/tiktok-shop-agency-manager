@@ -4,6 +4,11 @@ import { requireAdminAction } from "@/lib/db/admin-access";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
 import { REFERRAL_REWARD_RATE } from "@/lib/referrals/referral-reward-engine";
 import { linkCreatorToReferrer } from "@/lib/referrals/link-creator-referrer";
+import {
+  buildReferralChangePlan,
+  canApplyReferralChange,
+  describeReferralChangeBlocks,
+} from "@/lib/referrals/referral-assignment-change";
 import { isPendingReferralTiktokId } from "@/lib/creators/referral-registration";
 import { normalizeTiktokId } from "@/lib/sales/parse-partner-sales";
 import { revalidatePath } from "next/cache";
@@ -50,6 +55,31 @@ export async function saveCreatorReferralAction(
   }
 
   /*
+    影響範囲と保存可否は lib/referrals/referral-assignment-change.ts が
+    単一ソース。/creators と同じ関数を通す。
+
+    以前はここだけ plan を通していなかったため、月次確定済みの月や
+    支払処理へ進んだ月に影響する変更をそのまま保存できた。
+    画面ごとに別のガードを持たせない。
+  */
+  const plan = await buildReferralChangePlan(auth.supabase, {
+    creatorId,
+    referrerId,
+    startMonth,
+  });
+
+  if (plan.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(plan.error) };
+  }
+
+  if (!canApplyReferralChange(plan)) {
+    return {
+      ok: false,
+      error: `この変更は保存できません（${describeReferralChangeBlocks(plan)}）。対象期間 ${plan.affectedStartMonth}〜${plan.affectedEndMonth}`,
+    };
+  }
+
+  /*
     creators.referred_by_referrer_id と creator_referrals を必ず同時に更新する。
     片方だけだと紹介者報酬が発生しなくなる。
   */
@@ -59,6 +89,11 @@ export async function saveCreatorReferralAction(
     referralRate,
     startMonth,
     endMonth,
+    log: {
+      plan,
+      actorId: auth.user?.id ?? "",
+      actorEmail: auth.user?.email ?? null,
+    },
   });
 
   if (!linked.ok) {

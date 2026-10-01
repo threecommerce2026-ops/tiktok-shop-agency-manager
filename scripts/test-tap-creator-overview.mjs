@@ -1004,12 +1004,29 @@ test("保存は updateCreatorMasterAction だけを使う", () => {
     false,
     "saveCreatorReferralAction を使っている（月次確定のガードを通らない）",
   );
-  // 旧経路がガードを持たないことを明示しておく
-  assert.equal(
-    /buildReferralChangePlan|canApplyReferralChange/.test(ADMIN_REFERRALS_RAW),
-    false,
-    "旧経路の前提が変わった。使ってよいか再検討する",
+  /*
+    2026-10-01 改定。
+
+    saveCreatorReferralAction は以前 buildReferralChangePlan を通して
+    おらず、月次確定済みの月への変更を素通ししていた。そのため
+    「使ってはいけない経路」として扱い、ここでガードが無いことを
+    固定していた。
+
+    いまは同じガードを通すようになったので、前提を逆にする。
+    紹介者を変える経路はすべて plan → 可否判定 → linkCreatorToReferrer
+    の順で揃っていること（scripts/test-agency-label-and-referral-guard.mjs
+    が全経路を検査する）。
+
+    それでもこの画面からは呼ばない。保存に必要な現在値（所属・分配率・
+    区分）をこの画面が持っておらず、updateCreatorMasterAction を通す方が
+    1本に揃うため。
+  */
+  assert.match(
+    ADMIN_REFERRALS_RAW,
+    /buildReferralChangePlan/,
+    "旧経路が共通ガードを通していない",
   );
+  assert.match(ADMIN_REFERRALS_RAW, /canApplyReferralChange/);
   // 独自の更新処理を作らない
   assert.equal(
     /\.from\("creator_referrals"\)/.test(UI),
@@ -1154,12 +1171,17 @@ test("所属はこの画面で書き換えず、月別管理画面へ対象を�
   );
   assert.ok(UI_RAW.includes("所属を確認・変更"));
 
-  // TAP実績側では所属を書き換えない
+  /*
+    TAP実績側では所属を書き換えない。
+
+    テーブル名は説明文として画面に出す（所属が月別確定ベースである
+    ことを管理者へ伝えるため）ので、書き込みの呼び出しだけを見る。
+  */
   for (const forbidden of [
     /confirmMonthlyAgencyAssignmentAction/,
     /atomic_monthly_agency_assignment/,
     /bulk_confirm_monthly_agency_assignments/,
-    /creator_monthly_agency_assignments/,
+    /\.from\("creator_monthly_agency_assignments"\)/,
   ]) {
     assert.equal(
       forbidden.test(UI),
