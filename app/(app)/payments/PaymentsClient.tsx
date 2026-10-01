@@ -1079,6 +1079,7 @@ const TAP_AGENCY_FILTERS = [
   { key: "in_house", label: "所属: 自社代理店" },
   { key: "external", label: "所属: 外部代理店" },
   { key: "unconfirmed", label: "所属: 未確認" },
+  { key: "agency_unconfirmed", label: "所属: 月別未確認あり" },
 ] as const;
 
 /*
@@ -1142,6 +1143,9 @@ const TAP_SORTS = [
   { key: "referralRewardAmount", label: "紹介報酬順" },
   { key: "referralBaseAmount", label: "紹介報酬の算定元順" },
 ] as const;
+
+/* 月別所属の未確認を初期フィルタにして開くためのキー */
+const AGENCY_UNCONFIRMED_FILTER = "agency_unconfirmed" as const;
 
 type TapSortKey = (typeof TAP_SORTS)[number]["key"];
 
@@ -1468,6 +1472,13 @@ function TapPerformanceTab({
         ) {
           return false;
         }
+        /* 対象月のうち1か月でも月別所属が未確定なもの */
+        if (
+          agencyFilter === "agency_unconfirmed" &&
+          row.unconfirmedAgencyMonths.length === 0
+        ) {
+          return false;
+        }
         if (referrerFilter === "review" && !tapNeedsReview(row.referrerState)) {
           return false;
         }
@@ -1632,6 +1643,54 @@ function TapPerformanceTab({
         </div>
       ) : null}
 
+      {totals.unconfirmedAgencyCreatorCount > 0 ? (
+        <div className="rounded-xl border border-amber-400/25 bg-amber-400/5 p-4">
+          <p className="text-xs font-semibold text-amber-200">
+            ⚠ 月別所属の確認が必要です
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-amber-100/90">
+            TAP実績が発生しているクリエイターのうち、月別所属が未確定のものが{" "}
+            <span className="font-mono font-semibold">
+              {int(totals.unconfirmedAgencyCreatorCount)} 名
+            </span>{" "}
+            います。
+            <br />
+            未確定月：
+            <span className="font-mono">
+              {int(totals.unconfirmedAgencyMonthCount)} creator×month
+            </span>
+            {" / "}
+            対象TAP件数：
+            <span className="font-mono">{int(totals.unconfirmedAgencyItemCount)} 件</span>
+            <br />
+            成果報酬ベース：
+            <span className="font-mono">{yen(totals.unconfirmedAgencyCommissionBase)}</span>
+            {" / "}
+            THREE報酬：
+            <span className="font-mono">{yen(totals.unconfirmedAgencyTapRevenue)}</span>
+            {" / "}
+            紹介報酬の算定元：
+            <span className="font-mono">{yen(totals.unconfirmedAgencyReferralBase)}</span>
+            <br />
+            <span className="font-semibold">
+              月別所属が確定するまで代理店報酬の支払対象にはなりません。
+            </span>
+            現在所属は過去月の所属の根拠にならないため、ここからは確定しません。
+            月別所属の確定は管理画面で行ってください。
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setAgencyFilter(AGENCY_UNCONFIRMED_FILTER);
+              setSortKey("commissionBase");
+            }}
+            className="mt-2 rounded-lg border border-amber-400/30 px-3 py-1 text-[11px] text-amber-100 hover:bg-amber-400/10"
+          >
+            月別所属未確認だけを表示
+          </button>
+        </div>
+      ) : null}
+
       {totals.referrerNoneCount > totals.missingReferrerCreatorCount ? (
         <p className="text-[11px] leading-relaxed text-zinc-500">
           紹介者未設定 {int(totals.referrerNoneCount)} 名のうち{" "}
@@ -1759,12 +1818,24 @@ function TapPerformanceTab({
                       >
                         {row.agencyLabel}
                       </span>
-                      {row.agencyState === "unconfirmed" ||
-                      row.agencyState === "partially_unconfirmed" ? (
-                        <span className="text-[10px] text-amber-200">
-                          {row.agencyState === "unconfirmed"
-                            ? "月別の所属が未確定です"
-                            : "一部の月が未確定です"}
+                      {/*
+                        何月を確定すればよいか分かるように、対象月のうち
+                        月別所属が無い月そのものを出す。
+                      */}
+                      {row.unconfirmedAgencyMonths.length > 0 ? (
+                        <span className="text-[10px] leading-relaxed text-amber-200">
+                          月別未確認：{row.unconfirmedAgencyMonths.length}か月
+                          <br />
+                          {row.unconfirmedAgencyMonths.join(" / ")}
+                        </span>
+                      ) : null}
+                      {/*
+                        現在所属は参考。過去月の所属の根拠にはならないので
+                        ここから確定させるボタンは置かない。
+                      */}
+                      {row.unconfirmedAgencyMonths.length > 0 ? (
+                        <span className="text-[10px] text-zinc-500">
+                          現在所属：{row.currentAgencyName ?? "（なし）"}（参考）
                         </span>
                       ) : null}
                       {/*
@@ -1774,9 +1845,15 @@ function TapPerformanceTab({
                       */}
                       <Link
                         href={`/admin/creator-assignment?creator=${encodeURIComponent(row.tiktokId)}`}
-                        className="w-fit rounded-lg border border-white/[0.14] px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-white/[0.06]"
+                        className={`w-fit rounded-lg border px-2 py-0.5 text-[10px] ${
+                          row.unconfirmedAgencyMonths.length > 0
+                            ? "border-amber-400/30 text-amber-100 hover:bg-amber-400/10"
+                            : "border-white/[0.14] text-zinc-300 hover:bg-white/[0.06]"
+                        }`}
                       >
-                        所属を確認・変更
+                        {row.unconfirmedAgencyMonths.length > 0
+                          ? "月別所属を確認・確定"
+                          : "所属を確認・変更"}
                       </Link>
                     </div>
                   </td>

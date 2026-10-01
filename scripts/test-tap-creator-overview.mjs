@@ -1212,3 +1212,166 @@ test("月別管理画面は creator 指定を受け取って絞り込む", () =>
   // 指定されて開いたことが分かる
   assert.ok(ASSIGNMENT_UI_RAW.includes("TAP実績から"));
 });
+
+// =============================================================================
+// 月別所属の未確定を見落とさない（2026-10-01 追加）
+//
+// 月別所属（creator_monthly_agency_assignments）が無いと、代理店報酬は
+// 支払対象にならない。TAP 実績が出たのに確定していないものを
+// 管理者が見落とさないよう、対象月ごとに未確定を数えて警告に出す。
+//
+// 現在所属（creators.agency_id）は過去月の所属の根拠にならない。
+// 参考表示はするが、これを月別所属へ自動コピーしてはいけない。
+// =============================================================================
+
+test("未確定の判定は TAP の対象月ごとに行う", () => {
+  /*
+    creator 単位で「月別所属が1件も無い」ではなく、対象月それぞれを見る。
+    一部の月だけ確定している creator を取りこぼさないため。
+  */
+  assert.match(
+    QUERIES,
+    /if \(agencyId === undefined\) \{\s*unconfirmedAgencyMonths\.push\(month\);\s*continue;/,
+    "対象月ごとに未確定を集めていない",
+  );
+  assert.match(QUERIES, /unconfirmedAgencyMonths: string\[\]/);
+  assert.match(QUERIES, /unconfirmedAgencyMonths,/);
+});
+
+test("月別所属がある月は未確定に入らない", () => {
+  /*
+    assignments は月 → agency_id のマップ。値が undefined のときだけ
+    未確定にする。agency_id が null（所属なしとして確定）は確定済み。
+  */
+  const assignments = new Map([
+    ["2026-05", "agency-1"],
+    ["2026-06", null],
+  ]);
+  const months = ["2026-05", "2026-06", "2026-07"];
+  const unconfirmed = months.filter((m) => assignments.get(m) === undefined);
+  assert.deepEqual(unconfirmed, ["2026-07"], "確定済みの月を未確定にしている");
+});
+
+test("現在所属があっても月別確定扱いにしない", () => {
+  // 未確定の集計に creators.agency_id を混ぜない
+  const totals = QUERIES.slice(QUERIES.indexOf("unconfirmedAgencyCreatorCount:"));
+  assert.equal(
+    /currentAgencyName/.test(totals.slice(0, 900)),
+    false,
+    "現在所属を未確定判定に使っている",
+  );
+  // 現在所属は参考表示のためだけに持つ
+  assert.match(QUERIES, /currentAgencyName: string \| null;/);
+  assert.ok(
+    UI_RAW.includes("現在所属：") && UI_RAW.includes("（参考）"),
+    "現在所属が参考表示だと分かる形になっていない",
+  );
+});
+
+test("現在所属が無くても未確定として検出する", () => {
+  // 判定は月別所属の有無だけ。agency_id の有無で除外しない
+  const block = QUERIES.slice(
+    QUERIES.indexOf("const assignments = monthlyByCreator"),
+    QUERIES.indexOf("let agencyState"),
+  );
+  assert.equal(
+    /agency_id|currentAgency/.test(block),
+    false,
+    "未確定の判定に現在所属を混ぜている",
+  );
+});
+
+test("警告の母集団は正式な対象行があるクリエイターだけ", () => {
+  /*
+    rows は isTapReferralSourceLine を通った行から作る。
+    未払い・未決済・返金済みしか無いクリエイターは rows に現れないので、
+    警告の人数にも入らない。
+  */
+  assert.match(QUERIES, /if \(\s*!isTapReferralSourceLine\(/);
+  assert.match(
+    QUERIES,
+    /const unconfirmedAgency = rows\.filter\(\s*\(row\) => row\.unconfirmedAgencyMonths\.length > 0,\s*\)/,
+    "警告の母集団を rows から作っていない",
+  );
+});
+
+test("警告から確定処理を呼ばない（自動確定しない）", () => {
+  for (const forbidden of [
+    /bulk_confirm_monthly_agency_assignments/,
+    /atomic_monthly_agency_assignment/,
+    /set_creator_monthly_agency_assignment/,
+    /confirmMonthlyAgencyAssignmentAction/,
+    /confirmMonthlyAssignments/,
+  ]) {
+    assert.equal(forbidden.test(QUERIES), false, `集計が ${forbidden} を呼んでいる`);
+    assert.equal(forbidden.test(UI), false, `画面が ${forbidden} を呼んでいる`);
+  }
+  // 現在所属を月別所属へコピーする処理を置かない
+  assert.equal(
+    /\.from\("creator_monthly_agency_assignments"\)[\s\S]{0,120}\.(insert|upsert|update)\(/.test(UI),
+    false,
+    "現在所属を月別所属へ書き込んでいる",
+  );
+  assert.equal(
+    /\.from\("creator_monthly_agency_assignments"\)[\s\S]{0,120}\.(insert|upsert|update)\(/.test(QUERIES),
+    false,
+    "集計が月別所属を書き込んでいる",
+  );
+});
+
+test("未確認だけを絞り込めて、金額順に並べられる", () => {
+  assert.match(UI_RAW, /\{ key: "agency_unconfirmed", label: "所属: 月別未確認あり" \}/);
+  assert.match(
+    UI,
+    /agencyFilter === "agency_unconfirmed" &&\s*row\.unconfirmedAgencyMonths\.length === 0/,
+    "月別未確認の絞り込みが無い",
+  );
+  // ボタンで絞り込みと並び替えを同時に切り替える
+  assert.match(UI, /setAgencyFilter\(AGENCY_UNCONFIRMED_FILTER\)/);
+  assert.match(UI, /setSortKey\("commissionBase"\)/);
+  // 金額順の選択肢がある
+  for (const key of ["commissionBase", "tapRevenue", "referralBaseAmount"]) {
+    assert.ok(UI.includes(`key: "${key}"`), `${key} で並び替えられない`);
+  }
+});
+
+test("何月が未確認か creator ごとに見える", () => {
+  assert.match(UI, /row\.unconfirmedAgencyMonths\.length > 0/);
+  assert.ok(UI_RAW.includes("月別未確認："), "未確認月の見出しが無い");
+  assert.match(UI, /row\.unconfirmedAgencyMonths\.join\(" \/ "\)/, "月を並べていない");
+});
+
+test("月別所属の確定は既存の管理画面へ渡す", () => {
+  assert.match(
+    UI_RAW,
+    /\/admin\/creator-assignment\?creator=\$\{encodeURIComponent\(row\.tiktokId\)\}/,
+  );
+  assert.ok(UI_RAW.includes("月別所属を確認・確定"));
+  assert.ok(
+    UI_RAW.includes("月別所属が確定するまで代理店報酬の支払対象にはなりません"),
+    "確定しないと支払対象外である説明が無い",
+  );
+});
+
+test("この警告は代理店報酬・紹介報酬の計算を変えない", () => {
+  // 所属解決の単一ソースは触っていない
+  const assignment = codeOnly(read("lib/agency/agency-assignment.ts"));
+  assert.match(assignment, /source: monthlyAgencyId \? "monthly" : currentAgencyId \? "current" : "none"/);
+  assert.match(assignment, /const agencyId = monthlyAgencyId \?\? currentAgencyId;/);
+
+  // 集計側は reward / payout を触らない
+  for (const table of [
+    "agency_reward_items",
+    "agency_payouts",
+    "referral_reward_items",
+    "referral_payouts",
+    "referral_month_settlements",
+    "payment_batches",
+  ]) {
+    assert.equal(
+      new RegExp(`\\.from\\("${table}"\\)[\\s\\S]{0,120}\\.(insert|update|upsert|delete)\\(`).test(QUERIES),
+      false,
+      `集計が ${table} を書き換えている`,
+    );
+  }
+});

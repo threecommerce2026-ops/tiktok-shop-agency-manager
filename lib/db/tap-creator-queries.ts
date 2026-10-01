@@ -174,6 +174,20 @@ export type TapCreatorRow = {
   agencyState: TapAgencyState;
   /** 所属の表示名。月で変わる場合は「A → B」のように並べる */
   agencyLabel: string;
+  /*
+    TAP の対象月のうち、月別所属が確定していない月。
+
+    「所属未確認」「一部未確認」だけだと何月を確定すればよいか
+    分からないので、月そのものを持たせる。
+  */
+  unconfirmedAgencyMonths: string[];
+  /*
+    現在の所属（creators.agency_id）。参考表示にだけ使う。
+
+    過去月の帰属は月別確定が正で、現在所属はその証拠にならない。
+    これを月別所属へ自動コピーしてはいけない。
+  */
+  currentAgencyName: string | null;
 };
 
 export type TapCreatorOverview = {
@@ -189,6 +203,24 @@ export type TapCreatorOverview = {
     referralRewardAmount: number;
     /** クリエイター報酬が記録されていない行数（全体） */
     creatorCommissionMissingCount: number;
+    /*
+      月別所属が未確定の分（代理店報酬の確認漏れ防止）。
+
+      TAP の対象月ごとに creator_monthly_agency_assignments を見る。
+      creator 単位で「1件も無い」ではなく、対象月それぞれで判定する。
+      月別確定が無いと代理店報酬の支払対象にならないので、
+      TAP 実績が出たのに確定していないものを見落とさないようにする。
+
+      現在所属（creators.agency_id）があっても確定済みとは数えない。
+      過去月の帰属は月別確定が正で、現在所属はその証拠にならない。
+    */
+    unconfirmedAgencyCreatorCount: number;
+    /** 未確定の creator × month の件数 */
+    unconfirmedAgencyMonthCount: number;
+    unconfirmedAgencyItemCount: number;
+    unconfirmedAgencyCommissionBase: number;
+    unconfirmedAgencyReferralBase: number;
+    unconfirmedAgencyTapRevenue: number;
     referrerAssignedCount: number;
     referrerDashCount: number;
     referrerOutOfPeriodCount: number;
@@ -220,6 +252,12 @@ const EMPTY_TOTALS: TapCreatorOverview["totals"] = {
   creatorEstimatedCommission: 0,
   referralRewardAmount: 0,
   creatorCommissionMissingCount: 0,
+  unconfirmedAgencyCreatorCount: 0,
+  unconfirmedAgencyMonthCount: 0,
+  unconfirmedAgencyItemCount: 0,
+  unconfirmedAgencyCommissionBase: 0,
+  unconfirmedAgencyReferralBase: 0,
+  unconfirmedAgencyTapRevenue: 0,
   referrerAssignedCount: 0,
   referrerDashCount: 0,
   referrerOutOfPeriodCount: 0,
@@ -352,10 +390,11 @@ export async function fetchTapCreatorOverview(
         creator_name: string | null;
         account_management_type: string | null;
         referrer_assignment_state: string | null;
+        agency_id: string | null;
       }>(
         supabase,
         "creators",
-        "id, tiktok_id, creator_name, account_management_type, referrer_assignment_state",
+        "id, tiktok_id, creator_name, account_management_type, referrer_assignment_state, agency_id",
       ),
       fetchAllFrom<ReferralRelationRow>(
         supabase,
@@ -399,6 +438,14 @@ export async function fetchTapCreatorOverview(
   if (error) return { ...empty, error };
 
   // ---- マスタ ---------------------------------------------------------------
+  const agencyById = new Map<string, { name: string; isInHouse: boolean }>();
+  for (const row of agenciesResult.data ?? []) {
+    agencyById.set(String(row.id), {
+      name: String(row.name ?? "（削除済み代理店）"),
+      isInHouse: row.is_in_house === true,
+    });
+  }
+
   const creatorById = new Map<
     string,
     {
@@ -406,6 +453,7 @@ export async function fetchTapCreatorOverview(
       creatorName: string | null;
       accountManagementType: string | null;
       referrerAssignmentState: string | null;
+      currentAgencyName: string | null;
     }
   >();
   for (const row of creatorsResult.data) {
@@ -418,14 +466,9 @@ export async function fetchTapCreatorOverview(
         row.referrer_assignment_state == null
           ? null
           : String(row.referrer_assignment_state),
-    });
-  }
-
-  const agencyById = new Map<string, { name: string; isInHouse: boolean }>();
-  for (const row of agenciesResult.data ?? []) {
-    agencyById.set(String(row.id), {
-      name: String(row.name ?? "（削除済み代理店）"),
-      isInHouse: row.is_in_house === true,
+      /* 参考表示のみ。月別所属の根拠にはしない */
+      currentAgencyName:
+        row.agency_id == null ? null : agencyById.get(String(row.agency_id))?.name ?? null,
     });
   }
 
@@ -574,11 +617,15 @@ export async function fetchTapCreatorOverview(
     // ---- 所属 ---------------------------------------------------------------
     const assignments = monthlyByCreator.get(creatorId);
     const assignedAgencies: string[] = [];
+    const unconfirmedAgencyMonths: string[] = [];
     let confirmedMonths = 0;
 
     for (const month of months) {
       const agencyId = assignments?.get(month);
-      if (agencyId === undefined) continue;
+      if (agencyId === undefined) {
+        unconfirmedAgencyMonths.push(month);
+        continue;
+      }
       confirmedMonths += 1;
       const name = agencyId == null ? "（所属なし）" : agencyById.get(agencyId)?.name ?? "（不明）";
       if (assignedAgencies[assignedAgencies.length - 1] !== name) {
@@ -638,6 +685,8 @@ export async function fetchTapCreatorOverview(
       referralPeriodLabel,
       agencyState,
       agencyLabel,
+      unconfirmedAgencyMonths,
+      currentAgencyName: creator?.currentAgencyName ?? null,
     });
   }
 
@@ -645,6 +694,11 @@ export async function fetchTapCreatorOverview(
     (a, b) =>
       b.commissionBase - a.commissionBase ||
       a.tiktokId.localeCompare(b.tiktokId, "ja"),
+  );
+
+  /** 月別所属が1か月でも未確定なクリエイター */
+  const unconfirmedAgency = rows.filter(
+    (row) => row.unconfirmedAgencyMonths.length > 0,
   );
 
   /** 紹介者の入力漏れ（報酬対象の区分なのに紹介者が未設定） */
@@ -670,6 +724,29 @@ export async function fetchTapCreatorOverview(
       creatorCommissionMissingCount: rows.reduce(
         (sum, row) => sum + row.creatorCommissionMissingCount,
         0,
+      ),
+      /*
+        警告の母集団は「正式な対象行があるクリエイター」。
+        rows 自体が isTapReferralSourceLine を通ったものだけなので、
+        未払い・返金のみのクリエイターはここに居ない。
+      */
+      unconfirmedAgencyCreatorCount: unconfirmedAgency.length,
+      unconfirmedAgencyMonthCount: unconfirmedAgency.reduce(
+        (sum, row) => sum + row.unconfirmedAgencyMonths.length,
+        0,
+      ),
+      unconfirmedAgencyItemCount: unconfirmedAgency.reduce(
+        (sum, row) => sum + row.eligibleItemCount,
+        0,
+      ),
+      unconfirmedAgencyCommissionBase: sumReferralAmounts(
+        unconfirmedAgency.map((row) => row.commissionBase),
+      ),
+      unconfirmedAgencyReferralBase: sumReferralAmounts(
+        unconfirmedAgency.map((row) => row.referralBaseAmount),
+      ),
+      unconfirmedAgencyTapRevenue: sumReferralAmounts(
+        unconfirmedAgency.map((row) => row.tapRevenue),
       ),
       referrerAssignedCount: rows.filter((row) => row.referrerState === "assigned").length,
       referrerDashCount: rows.filter((row) => row.referrerState === "dash_referrer").length,
