@@ -8,7 +8,16 @@ import {
   resolveReferralForMonth,
   type ReferralRelationRow,
 } from "@/lib/referrals/referral-period";
-import { isReferralRewardEligibleType } from "@/lib/creators/account-management-type";
+import {
+  isReferralRewardEligibleType,
+  type AccountManagementType,
+} from "@/lib/creators/account-management-type";
+import {
+  fetchMonthlyAccountTypes,
+  monthlyAccountTypeKey,
+  resolveMonthlyAccountManagementType,
+  type AccountManagementTypeSource,
+} from "@/lib/creators/monthly-account-management-type";
 import {
   normalizeAssignmentState,
   resolveAssignmentState,
@@ -127,6 +136,16 @@ export type TapAgencyState =
   | "partially_unconfirmed"
   | "unconfirmed";
 
+/** 対象月ごとに解決した区分 */
+export type TapAccountTypeMonth = {
+  targetMonth: string;
+  accountManagementType: AccountManagementType;
+  /** monthly = 月別確定 / current = 現在区分（暫定） */
+  source: AccountManagementTypeSource;
+  /** その月が紹介報酬5%の対象か */
+  referralEligible: boolean;
+};
+
 export type TapCreatorRow = {
   creatorId: string;
   tiktokId: string;
@@ -154,8 +173,27 @@ export type TapCreatorRow = {
   referralBaseAmount: number;
   /** 算定元 × 5%。まだ発生していない場合の想定額 */
   estimatedReferralReward: number;
-  /** 紹介報酬が発生しうる区分か（standard のみ true） */
+  /** 紹介報酬が発生しうる区分か（対象月のどれかが standard なら true） */
   referralEligibleType: boolean;
+  /** 対象月ごとの区分。月によって対象・対象外が変わる場合に使う */
+  typeMonths: TapAccountTypeMonth[];
+  /*
+    月別区分が未確定で、現在区分から暫定判定している月。
+
+    この月は現在区分を変えると過去の紹介報酬の判定まで変わる。
+    確定させれば以後は動かない。
+  */
+  unconfirmedTypeMonths: string[];
+  /*
+    紹介報酬の再集計が必要な月。
+
+    区分・紹介者の条件は揃っているのに referral_reward_items が
+    無い月。区分や紹介者を変更したあと sync していないと出る。
+    ここでは検出のみで、自動では再集計しない。
+  */
+  staleRewardMonths: string[];
+  /** 再集計で発生しうる額（見込み。referral_reward_items の実績ではない） */
+  staleRewardEstimatedAmount: number;
   /** 紹介者の確認状態（creators.referrer_assignment_state） */
   referrerAssignmentState: string | null;
   /*
@@ -221,6 +259,22 @@ export type TapCreatorOverview = {
     unconfirmedAgencyCommissionBase: number;
     unconfirmedAgencyReferralBase: number;
     unconfirmedAgencyTapRevenue: number;
+    /*
+      紹介報酬の再集計が必要なクリエイター。
+
+      区分も紹介者も条件を満たしているのに referral_reward_items が
+      無い月を持つもの。区分・紹介者を変更したあと sync していないと
+      ここに出る。自動では再集計しない。
+    */
+    staleRewardCreatorCount: number;
+    staleRewardMonthCount: number;
+    /** 再集計で発生しうる額（算定元 × 5%。実際の生成は sync が行う） */
+    staleRewardEstimatedAmount: number;
+    /** 再集計が必要な月の一覧（昇順・重複なし） */
+    staleRewardMonths: string[];
+    /** 月別区分が未確定で、現在区分から暫定判定している creator 数 */
+    unconfirmedTypeCreatorCount: number;
+    unconfirmedTypeMonthCount: number;
     referrerAssignedCount: number;
     referrerDashCount: number;
     referrerOutOfPeriodCount: number;
@@ -245,6 +299,12 @@ export type TapCreatorOverview = {
 };
 
 const EMPTY_TOTALS: TapCreatorOverview["totals"] = {
+  staleRewardCreatorCount: 0,
+  staleRewardMonthCount: 0,
+  staleRewardEstimatedAmount: 0,
+  staleRewardMonths: [],
+  unconfirmedTypeCreatorCount: 0,
+  unconfirmedTypeMonthCount: 0,
   creatorCount: 0,
   eligibleItemCount: 0,
   commissionBase: 0,
@@ -277,6 +337,8 @@ type Bucket = {
   tapRevenue: number[];
   /** 紹介報酬の算定元（W + X） */
   referralBase: number[];
+  /** 対象月ごとの算定元。再集計が必要な月を名指しするために持つ */
+  referralBaseByMonth: Map<string, number[]>;
   creatorCommission: number[];
   creatorCommissionMissing: number;
 };
@@ -376,6 +438,7 @@ export async function fetchTapCreatorOverview(
     monthlyResult,
     agenciesResult,
     referrersResult,
+    monthlyTypesResult,
   ] = await Promise.all([
       fetchAllFrom<TapLineRow>(
         supabase,
@@ -423,6 +486,12 @@ export async function fetchTapCreatorOverview(
       ),
       supabase.from("agencies").select("id, name, is_in_house"),
       supabase.from("referrers").select("id, name, referrer_name"),
+      /*
+        区分（通常 / 自社運用 / アカウント貸出）は対象月の値で判定する。
+        現在値を全月へ当てると、区分変更が過去月の判定まで変えてしまう。
+        優先順位は lib/creators/monthly-account-management-type.ts が単一ソース。
+      */
+      fetchMonthlyAccountTypes(supabase),
     ]);
 
   const error =
@@ -433,6 +502,7 @@ export async function fetchTapCreatorOverview(
     monthlyResult.error ??
     agenciesResult.error?.message ??
     referrersResult.error?.message ??
+    monthlyTypesResult.error ??
     null;
 
   if (error) return { ...empty, error };
@@ -491,12 +561,20 @@ export async function fetchTapCreatorOverview(
 
   // ---- 紹介報酬（実績のみ。ここで再計算しない）------------------------------
   const rewardByCreator = new Map<string, { amounts: number[]; itemCount: number }>();
+  /* 月ごとの実績件数。どの月が未生成かを名指しするために別に数える */
+  const rewardItemCountByCreatorMonth = new Map<string, number>();
   for (const item of rewardResult.data) {
     if (!item.is_reward_target) continue;
     const current = rewardByCreator.get(item.creator_id) ?? { amounts: [], itemCount: 0 };
     current.amounts.push(resolveRewardItemAmount(item));
     current.itemCount += 1;
     rewardByCreator.set(item.creator_id, current);
+
+    const key = monthlyAccountTypeKey(item.creator_id, item.target_month);
+    rewardItemCountByCreatorMonth.set(
+      key,
+      (rewardItemCountByCreatorMonth.get(key) ?? 0) + 1,
+    );
   }
 
   // ---- TAP 明細を creator 単位へ畳む ----------------------------------------
@@ -533,6 +611,7 @@ export async function fetchTapCreatorOverview(
         commissionBase: [],
         tapRevenue: [],
         referralBase: [],
+        referralBaseByMonth: new Map<string, number[]>(),
         creatorCommission: [],
         creatorCommissionMissing: 0,
       } satisfies Bucket);
@@ -548,6 +627,11 @@ export async function fetchTapCreatorOverview(
       ここで W や X から自前で足し直さない（報酬側と食い違う元になる）。
     */
     bucket.referralBase.push(referralBaseAmount(line));
+
+    /* 月ごとにも貯める（どの月の再集計が要るかを出すため） */
+    const monthBase = bucket.referralBaseByMonth.get(targetMonth) ?? [];
+    monthBase.push(referralBaseAmount(line));
+    bucket.referralBaseByMonth.set(targetMonth, monthBase);
     bucket.creatorCommission.push(creatorCommission.amount);
     if (creatorCommission.missing) bucket.creatorCommissionMissing += 1;
 
@@ -566,9 +650,86 @@ export async function fetchTapCreatorOverview(
     const periods = referralIndex.byCreator.get(creatorId);
     const reward = rewardByCreator.get(creatorId);
     const referralBase = sumReferralAmounts(bucket.referralBase);
-    const eligibleType = isReferralRewardEligibleType(
-      creator?.accountManagementType ?? null,
-    );
+
+    /*
+      区分は対象月ごとに解決する。
+
+      以前はここで creators の現在値だけを見ていたため、区分を
+      変更すると過去月の「対象 / 対象外」まで変わって見えていた。
+      月別確定がある月はその値、無い月だけ現在値へ落ちる。
+    */
+    const typeMonths: TapAccountTypeMonth[] = months.map((month) => {
+      const resolved = resolveMonthlyAccountManagementType({
+        creatorId,
+        targetMonth: month,
+        monthlyType: monthlyTypesResult.index.get(
+          monthlyAccountTypeKey(creatorId, month),
+        ),
+        currentType: creator?.accountManagementType ?? null,
+      });
+
+      return {
+        targetMonth: month,
+        accountManagementType: resolved.accountManagementType,
+        source: resolved.source,
+        referralEligible: isReferralRewardEligibleType(
+          resolved.accountManagementType,
+        ),
+      };
+    });
+
+    /*
+      1か月でも対象になる月があれば「紹介報酬が発生しうる」creator。
+      月ごとの可否は typeMonths を見る。
+    */
+    const eligibleType = typeMonths.some((month) => month.referralEligible);
+
+    /* 現在区分で暫定判定している月（区分変更の影響を受ける） */
+    const unconfirmedTypeMonths = typeMonths
+      .filter((month) => month.source === "current")
+      .map((month) => month.targetMonth);
+
+    /*
+      紹介報酬の再集計が必要な月。
+
+      その月の区分が対象で、算定元（W + X）があり、紹介関係も
+      その月を覆っているのに、referral_reward_items が 1 件も無い月。
+      区分や紹介者を変更したあと sync を実行していないと起きる。
+      ここでは検出だけで、再集計は管理者の操作に委ねる。
+    */
+    const staleRewardBases = new Map<string, number>();
+    const staleRewardMonths = typeMonths
+      .filter((month) => {
+        if (!month.referralEligible) return false;
+        const base = sumReferralAmounts(
+          bucket.referralBaseByMonth.get(month.targetMonth) ?? [],
+        );
+        if (base <= 0) return false;
+        const relation = resolveReferralForMonth(periods, month.targetMonth);
+        if (!relation.period?.referrerId) return false;
+        if (
+          (rewardItemCountByCreatorMonth.get(
+            monthlyAccountTypeKey(creatorId, month.targetMonth),
+          ) ?? 0) !== 0
+        ) {
+          return false;
+        }
+        /* 見込み額はその月の料率で出す（既定の 5% を決め打ちしない） */
+        staleRewardBases.set(
+          month.targetMonth,
+          base * relation.period.referralRate,
+        );
+        return true;
+      })
+      .map((month) => month.targetMonth);
+
+    /*
+      再集計で発生しうる額。見込みであって実績ではない。
+      実際の生成は sync が行う（この集計では作らない）。
+    */
+    const staleRewardEstimatedAmount = sumReferralAmounts([
+      ...staleRewardBases.values(),
+    ]);
 
     /*
       紹介者の状態。
@@ -676,6 +837,10 @@ export async function fetchTapCreatorOverview(
       referralBaseAmount: referralBase,
       estimatedReferralReward: sumReferralAmounts([referralBase * REFERRAL_REWARD_RATE]),
       referralEligibleType: eligibleType,
+      typeMonths,
+      unconfirmedTypeMonths,
+      staleRewardMonths,
+      staleRewardEstimatedAmount,
       referrerAssignmentState: creator?.referrerAssignmentState ?? null,
       firstEligibleMonth: firstTargetMonth,
       referralRewardAmount: sumReferralAmounts(reward?.amounts ?? []),
@@ -699,6 +864,14 @@ export async function fetchTapCreatorOverview(
   /** 月別所属が1か月でも未確定なクリエイター */
   const unconfirmedAgency = rows.filter(
     (row) => row.unconfirmedAgencyMonths.length > 0,
+  );
+
+  /** 再集計が必要（条件は揃っているのに紹介報酬が無い月を持つ） */
+  const staleReward = rows.filter((row) => row.staleRewardMonths.length > 0);
+
+  /** 月別区分が未確定で、現在区分から暫定判定している月を持つ */
+  const unconfirmedType = rows.filter(
+    (row) => row.unconfirmedTypeMonths.length > 0,
   );
 
   /** 紹介者の入力漏れ（報酬対象の区分なのに紹介者が未設定） */
@@ -747,6 +920,28 @@ export async function fetchTapCreatorOverview(
       ),
       unconfirmedAgencyTapRevenue: sumReferralAmounts(
         unconfirmedAgency.map((row) => row.tapRevenue),
+      ),
+      staleRewardCreatorCount: staleReward.length,
+      staleRewardMonthCount: staleReward.reduce(
+        (sum, row) => sum + row.staleRewardMonths.length,
+        0,
+      ),
+      /*
+        再集計で発生しうる額。
+
+        対象月の算定元に率を掛けた見込みで、referral_reward_items の
+        実績ではない。実際の生成は sync が行う（ここでは作らない）。
+      */
+      staleRewardEstimatedAmount: sumReferralAmounts(
+        staleReward.map((row) => row.staleRewardEstimatedAmount),
+      ),
+      staleRewardMonths: [
+        ...new Set(staleReward.flatMap((row) => row.staleRewardMonths)),
+      ].sort(),
+      unconfirmedTypeCreatorCount: unconfirmedType.length,
+      unconfirmedTypeMonthCount: unconfirmedType.reduce(
+        (sum, row) => sum + row.unconfirmedTypeMonths.length,
+        0,
       ),
       referrerAssignedCount: rows.filter((row) => row.referrerState === "assigned").length,
       referrerDashCount: rows.filter((row) => row.referrerState === "dash_referrer").length,

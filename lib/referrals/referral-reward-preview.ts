@@ -9,6 +9,11 @@ import {
   sumReferralAmounts,
   type ReferralOrderLine,
 } from "@/lib/referrals/referral-reward-engine";
+import {
+  fetchMonthlyAccountTypes,
+  monthlyAccountTypeKey,
+  resolveMonthlyAccountManagementType,
+} from "@/lib/creators/monthly-account-management-type";
 
 /*
   紹介者報酬の再計算プレビュー（DBへは書き込まない）。
@@ -94,8 +99,13 @@ export async function previewReferralRewards(
 
   if (months.length === 0) return empty;
 
-  const [creatorsResult, referrersResult, referralsResult, ordersResult] =
-    await Promise.all([
+  const [
+    creatorsResult,
+    referrersResult,
+    referralsResult,
+    ordersResult,
+    monthlyTypesResult,
+  ] = await Promise.all([
       supabase
         .from("creators")
         .select(
@@ -107,6 +117,12 @@ export async function previewReferralRewards(
         .select("creator_id, referrer_id, referral_rate")
         .eq("is_active", true),
       fetchOrderLinesForMonths(supabase, months),
+      /*
+        dry-run も本番 sync と同じ区分判定を使う。
+        ここだけ現在値のままにすると、差分確認で見た金額と
+        実行結果が食い違う。
+      */
+      fetchMonthlyAccountTypes(supabase),
     ]);
 
   const error =
@@ -114,6 +130,7 @@ export async function previewReferralRewards(
     referrersResult.error?.message ??
     referralsResult.error?.message ??
     ordersResult.error ??
+    monthlyTypesResult.error ??
     null;
 
   if (error) {
@@ -169,12 +186,23 @@ export async function previewReferralRewards(
     const creator = creatorById.get(creatorId);
     if (!creator) continue;
 
+    /* 区分はその明細の対象月で引く（現在値をそのまま使わない） */
+    const lineMonth = String(line.target_month ?? "");
+    const resolvedType = resolveMonthlyAccountManagementType({
+      creatorId,
+      targetMonth: lineMonth,
+      monthlyType: monthlyTypesResult.index.get(
+        monthlyAccountTypeKey(creatorId, lineMonth),
+      ),
+      currentType: creator.accountManagementType,
+    });
+
     const computed = computeReferralReward(
       line,
       {
         creatorId,
         referrerId: creator.referrerId,
-        accountManagementType: creator.accountManagementType,
+        accountManagementType: resolvedType.accountManagementType,
       },
       rateByCreator.get(creatorId) ?? REFERRAL_REWARD_RATE,
     );

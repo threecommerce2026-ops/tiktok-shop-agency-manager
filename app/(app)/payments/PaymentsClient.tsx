@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { accountManagementTypeLabel } from "@/lib/creators/account-management-type";
 import { MonthlyAssignmentLauncher } from "@/components/agency/MonthlyAssignmentLauncher";
+import { MonthlyAccountTypeLauncher } from "@/components/creators/MonthlyAccountTypeLauncher";
 import {
   EARLIEST_CUTOFF_MONTH,
   MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
@@ -1644,6 +1645,72 @@ function TapPerformanceTab({
         </div>
       ) : null}
 
+      {/*
+        紹介報酬が古いままになっている月を名指しで出す。
+
+        区分や紹介者を変更しても紹介報酬は自動では再計算されない
+        （区分変更 → dry-run → 差分確認 → 承認 → sync の順序を保つため）。
+        変更したあと sync を忘れると、条件は揃っているのに報酬が
+        発生しないまま残る。それをこの画面で気づけるようにする。
+      */}
+      {totals.staleRewardCreatorCount > 0 ? (
+        <div className="rounded-xl border border-red-400/25 bg-red-400/5 p-4">
+          <p className="text-xs font-semibold text-red-200">
+            ⚠ 紹介報酬の再集計が必要です
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-red-100/90">
+            区分・紹介者の条件は満たしているのに紹介報酬が生成されていない
+            クリエイターが{" "}
+            <span className="font-mono font-semibold">
+              {int(totals.staleRewardCreatorCount)} 名
+            </span>{" "}
+            います。区分や紹介者を変更したあと再集計していない状態です。
+            <br />
+            対象月：
+            <span className="font-mono">
+              {totals.staleRewardMonths.join(" / ")}
+            </span>
+            {" （"}
+            <span className="font-mono">
+              {int(totals.staleRewardMonthCount)} creator×month
+            </span>
+            {"）"}
+            <br />
+            再集計で発生しうる額（見込み）：
+            <span className="font-mono font-semibold">
+              {yen(totals.staleRewardEstimatedAmount)}
+            </span>
+            <br />
+            <span className="font-semibold">
+              この画面では再集計しません。
+            </span>
+            「売上・報酬 › 紹介報酬」で差分を確認し、承認のうえ再集計を
+            実行してください。支払済み・確定済みの月は再集計の対象外です。
+          </p>
+        </div>
+      ) : null}
+
+      {/*
+        月別区分が未確定の月は現在区分で暫定判定している。
+        その月は現在区分を変えると過去の紹介報酬の判定まで変わるので、
+        確定を促す。
+      */}
+      {totals.unconfirmedTypeCreatorCount > 0 ? (
+        <p className="text-[11px] leading-relaxed text-zinc-500">
+          月別区分が未確定のクリエイターが{" "}
+          <span className="font-mono">
+            {int(totals.unconfirmedTypeCreatorCount)} 名
+          </span>
+          （
+          <span className="font-mono">
+            {int(totals.unconfirmedTypeMonthCount)} creator×month
+          </span>
+          ）います。この月は現在区分で暫定判定しているため、区分を変更すると
+          過去月の紹介報酬の判定も変わります。区分列の「月別区分を確認・確定」
+          から確定すると、以後は現在区分の変更に影響されません。
+        </p>
+      ) : null}
+
       {totals.unconfirmedAgencyCreatorCount > 0 ? (
         <div className="rounded-xl border border-amber-400/25 bg-amber-400/5 p-4">
           <p className="text-xs font-semibold text-amber-200">
@@ -1812,6 +1879,32 @@ function TapPerformanceTab({
                     <span className="block text-[10px] text-zinc-600">
                       {row.accountManagementType ?? "-"}
                     </span>
+                    {/*
+                      区分は紹介報酬の発生可否を決めるので、所属と同じように
+                      月別で確定できる。現在区分を変えても、確定済の月は動かない。
+                    */}
+                    {row.unconfirmedTypeMonths.length > 0 ? (
+                      <span className="mt-0.5 block text-[10px] leading-relaxed text-amber-200">
+                        月別未確定：{row.unconfirmedTypeMonths.length}か月
+                        （現在区分で暫定判定）
+                      </span>
+                    ) : null}
+                    <div className="mt-1">
+                      <MonthlyAccountTypeLauncher
+                        creatorId={row.creatorId}
+                        label={
+                          row.unconfirmedTypeMonths.length > 0
+                            ? "月別区分を確認・確定"
+                            : "月別区分を確認"
+                        }
+                        className={`w-fit rounded-lg border px-2 py-0.5 text-[10px] ${
+                          row.unconfirmedTypeMonths.length > 0
+                            ? "border-amber-400/30 text-amber-100 hover:bg-amber-400/10"
+                            : "border-white/[0.14] text-zinc-300 hover:bg-white/[0.06]"
+                        }`}
+                        onSaved={load}
+                      />
+                    </div>
                   </td>
                   <td className={`${td} whitespace-normal`}>
                     <div className="flex flex-col gap-0.5">

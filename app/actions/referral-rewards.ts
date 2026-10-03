@@ -7,6 +7,10 @@ import { isInHouseReferrer } from "@/lib/referrals/in-house-referrer";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { mapSupabaseErrorToJa } from "@/lib/supabase/error-ja";
 import {
+  fetchFinalizedReferralMonths,
+  splitSyncableMonths,
+} from "@/lib/referrals/settlement-sync-guard";
+import {
   markReferralPayoutPaid,
   markReferralPayoutUnpaid,
   syncReferralRewardsForMonth,
@@ -73,12 +77,34 @@ export async function syncReferralRewardsAction(
     months = [currentMonthKey()];
   }
 
+  /*
+    月次確定済みの月は再集計しない。
+
+    明細単位のガード（is_paid / payout_id / payment_batch_id）は
+    その明細だけを守るので、確定済みの月に未支払明細が残っていると
+    総額が動いてしまう。月次確定は「この金額で締めた」という宣言なので、
+    締めた後に総額が変わってはいけない。
+  */
+  const finalized = await fetchFinalizedReferralMonths(auth.supabase);
+  if (finalized.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(finalized.error) };
+  }
+
+  const { syncable, blocked } = splitSyncableMonths(months, finalized.months);
+
+  if (syncable.length === 0) {
+    return {
+      ok: false,
+      error: `${blocked.join(", ")} は月次確定済みのため再集計できません。先に確定を解除してください。`,
+    };
+  }
+
   let upserted = 0;
   let deleted = 0;
   let skippedPaid = 0;
   const amounts: number[] = [];
 
-  for (const targetMonth of months) {
+  for (const targetMonth of syncable) {
     const result = await syncReferralRewardsForMonth(auth.supabase, targetMonth);
     if (result.error) {
       // migration 未適用のときは原因が分かるように案内する
@@ -99,11 +125,17 @@ export async function syncReferralRewardsAction(
 
   revalidateReferralViews();
 
+  /* 確定済みでスキップした月は黙って飲み込まず、必ず伝える */
+  const blockedNote =
+    blocked.length > 0
+      ? `（${blocked.join(", ")} は月次確定済みのためスキップ）`
+      : "";
+
   return {
     ok: true,
-    message: `${months[0]}〜${months[months.length - 1]} の紹介者報酬を再集計しました（明細 ${upserted} 件 / 対象外削除 ${deleted} 件 / 支払済据置 ${skippedPaid} 件 / 発生額 ${formatAmount(
+    message: `${syncable[0]}〜${syncable[syncable.length - 1]} の紹介者報酬を再集計しました（明細 ${upserted} 件 / 対象外削除 ${deleted} 件 / 支払済据置 ${skippedPaid} 件 / 発生額 ${formatAmount(
       sumReferralAmounts(amounts),
-    )} 円）`,
+    )} 円）${blockedNote}`,
   };
 }
 

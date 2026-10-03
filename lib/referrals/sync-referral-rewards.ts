@@ -1,6 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { fetchAllFrom } from "@/lib/db/paged-select";
+import {
+  fetchMonthlyAccountTypes,
+  monthlyAccountTypeKey,
+  resolveMonthlyAccountManagementType,
+} from "@/lib/creators/monthly-account-management-type";
 import { collectInHouseReferrerIds } from "@/lib/referrals/in-house-referrer";
 import { applyReferralRewardCap, pairReferralKey } from "@/lib/referrals/cap";
 import {
@@ -132,8 +137,14 @@ export async function syncReferralRewardsForMonth(
     error: null,
   };
 
-  const [creatorsResult, referralsResult, ordersResult, existingResult, otherUnpaidResult] =
-    await Promise.all([
+  const [
+    creatorsResult,
+    referralsResult,
+    ordersResult,
+    existingResult,
+    otherUnpaidResult,
+    monthlyTypesResult,
+  ] = await Promise.all([
       supabase
         .from("creators")
         .select("id, referred_by_referrer_id, account_management_type"),
@@ -192,6 +203,19 @@ export async function syncReferralRewardsForMonth(
             .eq("is_paid", false)
             .neq("target_month", targetMonth),
       ),
+      /*
+        区分（通常 / 自社運用 / アカウント貸出）は対象月の値で判定する。
+
+        以前は creators.account_management_type の現在値を全対象月へ
+        適用していた。区分を変更すると過去月の紹介報酬まで判定が変わり、
+        実例では kanya_land（2026-03〜08 に W+X 759,181円・紹介者あり）が
+        2026-09-30 の self_operated 変更だけで 6 か月分すべて対象外に
+        なっていた。
+
+        優先順位は lib/creators/monthly-account-management-type.ts が
+        単一ソース。ここで判定を書き直さないこと。
+      */
+      fetchMonthlyAccountTypes(supabase, { targetMonth }),
     ]);
 
   const loadError =
@@ -200,6 +224,7 @@ export async function syncReferralRewardsForMonth(
     ordersResult.error ??
     existingResult.error ??
     otherUnpaidResult.error ??
+    monthlyTypesResult.error ??
     null;
 
   if (loadError) {
@@ -312,12 +337,26 @@ export async function syncReferralRewardsForMonth(
     const referrerId = referral.referrerId;
     if (!referrerId) continue;
 
+    /*
+      区分は「この対象月の区分」を使う。現在値をそのまま渡さない。
+      月別確定が無い月だけ現在値へ落ちる（fallback 仕様は
+      monthly-account-management-type.ts に書いてある）。
+    */
+    const resolvedType = resolveMonthlyAccountManagementType({
+      creatorId,
+      targetMonth,
+      monthlyType: monthlyTypesResult.index.get(
+        monthlyAccountTypeKey(creatorId, targetMonth),
+      ),
+      currentType: config.accountManagementType,
+    });
+
     const computed = computeReferralReward(
       line,
       {
         creatorId,
         referrerId,
-        accountManagementType: config.accountManagementType,
+        accountManagementType: resolvedType.accountManagementType,
       },
       referral.referralRate,
     );
