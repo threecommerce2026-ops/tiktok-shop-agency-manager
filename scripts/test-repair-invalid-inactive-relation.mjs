@@ -43,6 +43,7 @@ const UI = read("components/referrer/RelationRepairPanel.tsx");
 const PAGE = read("app/(app)/admin/creator-referrals/page.tsx");
 const CREATORS_PAGE = read("app/(app)/creators/page.tsx");
 const NAV = read("lib/nav/app-nav.ts");
+const EDITOR_PAGE = read("app/(app)/admin/creator-master-editor/page.tsx");
 
 const KABU3 = "r-kabu3";
 const DASH = "r-dash";
@@ -457,6 +458,69 @@ test("パネルを置いた画面はすべて admin 限定", () => {
   assert.match(
     codeOnly(CREATORS_PAGE),
     /isAdmin \? <RelationRepairPanel/,
+    "/creators で admin 限定になっていない",
+  );
+});
+
+// --- 到達できる画面を取り違えないための固定 ------------------------------------
+
+test("クリエイター系の管理画面すべてからパネルへ到達できる", () => {
+  /*
+    2026-10-03: /admin/creator-referrals → /creators と順に置いたが、
+    実際に見られていたのは /admin/creator-master-editor だった。
+    「どの画面を見ているか」の取り違えで二度手間になったので、
+    クリエイターマスタ系の3画面すべてに置いて固定する。
+  */
+  for (const [name, source] of [
+    ["/admin/creator-referrals", PAGE],
+    ["/creators", CREATORS_PAGE],
+    ["/admin/creator-master-editor", EDITOR_PAGE],
+  ]) {
+    assert.match(
+      codeOnly(source),
+      /<RelationRepairPanel/,
+      `${name} にパネルが無い`,
+    );
+  }
+});
+
+test("見ている画面とビルドを管理者が判別できる", () => {
+  /*
+    「push した / デプロイ success」と「実ブラウザがその版を見ている」は別。
+    ページ名と commit を画面へ出して、取り違えを一目で分かるようにする。
+  */
+  for (const [name, source] of [
+    ["/admin/creator-referrals", PAGE],
+    ["/creators", CREATORS_PAGE],
+    ["/admin/creator-master-editor", EDITOR_PAGE],
+  ]) {
+    assert.match(codeOnly(source), /<BuildMarker page="/, `${name} にビルド表示が無い`);
+  }
+
+  /* 表示だけ。DB も外部も触らない */
+  const marker = codeOnly(read("components/app/BuildMarker.tsx"));
+  const ref = codeOnly(read("lib/app/build-ref.ts"));
+  for (const forbidden of [/\.from\(/, /\.rpc\(/, /fetch\(/, /supabase/i]) {
+    assert.ok(!forbidden.test(marker + ref), `ビルド表示が ${forbidden} に触っている`);
+  }
+  assert.match(ref, /VERCEL_GIT_COMMIT_SHA/, "commit を読んでいない");
+});
+
+test("パネルを置いた画面はいずれも非管理者に見えない", () => {
+  /* ページ全体が admin ガードされているもの */
+  for (const [name, source] of [
+    ["/admin/creator-referrals", PAGE],
+    ["/admin/creator-master-editor", EDITOR_PAGE],
+  ]) {
+    const code = codeOnly(source);
+    assert.match(code, /isAdminRole\(appUser\.data\.role\)/, `${name} に admin 判定が無い`);
+    assert.match(code, /redirect\("\/dashboard"\)/, `${name} が非 admin を弾いていない`);
+  }
+
+  /* /creators は代理店も開けるので条件付き描画 */
+  assert.match(
+    codeOnly(CREATORS_PAGE),
+    /isAdmin \? <RelationRepairPanel \/> : null/,
     "/creators で admin 限定になっていない",
   );
 });

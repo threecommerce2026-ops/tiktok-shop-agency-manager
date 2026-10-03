@@ -2,6 +2,7 @@ import { CreatorMasterClient } from "@/app/(app)/creators/CreatorMasterClient";
 import { fetchCreatorMasterRows } from "@/lib/db/creator-master-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { RelationRepairPanel } from "@/components/referrer/RelationRepairPanel";
+import { BuildMarker } from "@/components/app/BuildMarker";
 import { createClient } from "@/lib/supabase/server";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import Link from "next/link";
@@ -90,6 +91,9 @@ export default async function CreatorsPage() {
         代理店ユーザーには出さない。
       */}
       {isAdmin ? <RelationRepairPanel /> : null}
+
+      {/* いま見ているページとビルドを管理者が判別できるようにする */}
+      {isAdmin ? <BuildMarker page="/creators" /> : null}
     </div>
   );
 }

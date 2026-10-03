@@ -3,6 +3,7 @@ import { fetchCreatorReferralAdminRows, fetchInHouseCreatorOptions } from "@/lib
 import { fetchReferrerOptions } from "@/lib/db/referrer-admin-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { RelationRepairPanel } from "@/components/referrer/RelationRepairPanel";
+import { BuildMarker } from "@/components/app/BuildMarker";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { createClient } from "@/lib/supabase/server";
 import Link from "next/link";
@@ -67,6 +68,8 @@ export default async function CreatorReferralsAdminPage() {
         対象の一覧も修復もこのパネルの中で完結させる。
       */}
       <RelationRepairPanel />
+
+      <BuildMarker page="/admin/creator-referrals" />
 
       <div className="flex justify-center">
         <Link href="/dashboard" className="text-sm font-medium text-[var(--accent-cyan)] hover:underline">

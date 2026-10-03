@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { RelationRepairPanel } from "@/components/referrer/RelationRepairPanel";
+import { BuildMarker } from "@/components/app/BuildMarker";
 import { redirect } from "next/navigation";
 
 import { CreatorMasterEditorClient } from "./CreatorMasterEditorClient";
@@ -67,6 +69,16 @@ export default async function CreatorMasterEditorPage() {
         <CreatorMasterEditorClient data={data} />
       )}
 
+      {/*
+        紹介者の付け替えで「終了月 < 開始月」になった関係を直すパネル。
+
+        この画面はクリエイターマスタの整理をする場所で、
+        紹介者の異常に気づくのもここなので同じ画面から直せるようにする。
+        2026-10-03: /creators と /admin/creator-referrals だけに置いていて
+        気づけなかった。
+      */}
+      <RelationRepairPanel />
+
       <div className="flex flex-wrap justify-center gap-4">
         <Link
           href="/creators"
@@ -93,6 +105,9 @@ export default async function CreatorMasterEditorPage() {
           代理店報酬
         </Link>
       </div>
+
+      {/* いま見ているページとビルドを管理者が判別できるようにする */}
+      <BuildMarker page="/admin/creator-master-editor" />
     </div>
   );
 }
