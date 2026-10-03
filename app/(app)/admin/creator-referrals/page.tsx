@@ -2,6 +2,7 @@ import { CreatorReferralsAdminClient } from "@/app/(app)/admin/creator-referrals
 import { fetchCreatorReferralAdminRows, fetchInHouseCreatorOptions } from "@/lib/db/creator-referral-admin-queries";
 import { fetchReferrerOptions } from "@/lib/db/referrer-admin-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
+import { RelationRepairPanel } from "@/components/referrer/RelationRepairPanel";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { createClient } from "@/lib/supabase/server";
 import Link from "next/link";
@@ -58,6 +59,14 @@ export default async function CreatorReferralsAdminPage() {
         creators={creatorsResult.data}
         referrers={referrersResult.data}
       />
+
+      {/*
+        紹介者の付け替えで「終了月 < 開始月」になった関係を直す。
+        この形が残っていると、本来正しい関係まで有効期間なしと
+        判定され紹介報酬が発生しない（2026-10-03 odebu888）。
+        対象の一覧も修復もこのパネルの中で完結させる。
+      */}
+      <RelationRepairPanel />
 
       <div className="flex justify-center">
         <Link href="/dashboard" className="text-sm font-medium text-[var(--accent-cyan)] hover:underline">
