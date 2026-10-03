@@ -1,6 +1,7 @@
 import { CreatorMasterClient } from "@/app/(app)/creators/CreatorMasterClient";
 import { fetchCreatorMasterRows } from "@/lib/db/creator-master-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
+import { RelationRepairPanel } from "@/components/referrer/RelationRepairPanel";
 import { createClient } from "@/lib/supabase/server";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import Link from "next/link";
@@ -77,6 +78,18 @@ export default async function CreatorsPage() {
         month={data.month}
         isAdmin={isAdmin}
       />
+
+      {/*
+        紹介者の付け替えで「終了月 < 開始月」になった関係を直すパネル。
+
+        紹介者はこの画面で日々設定するので、修復もここから届くようにする。
+        /admin/creator-referrals にも置いてあるが、そちらはサイドバーから
+        辿れず（設定の「紹介者紐付け（旧画面）」経由のみ）、
+        気づけないまま異常が残っていた（2026-10-03 odebu888）。
+
+        代理店ユーザーには出さない。
+      */}
+      {isAdmin ? <RelationRepairPanel /> : null}
     </div>
   );
 }

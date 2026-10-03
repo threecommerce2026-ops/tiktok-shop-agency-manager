@@ -41,6 +41,8 @@ const MIGRATION = read(
 );
 const UI = read("components/referrer/RelationRepairPanel.tsx");
 const PAGE = read("app/(app)/admin/creator-referrals/page.tsx");
+const CREATORS_PAGE = read("app/(app)/creators/page.tsx");
+const NAV = read("lib/nav/app-nav.ts");
 
 const KABU3 = "r-kabu3";
 const DASH = "r-dash";
@@ -418,4 +420,43 @@ test("画面は一括修復のボタンを持たない", () => {
   for (const forbidden of [/すべて修復/, /一括/, /repairAll/, /rows\.map[\s\S]{0,200}apply\(/]) {
     assert.ok(!forbidden.test(ui), `一括修復の経路がある: ${forbidden}`);
   }
+});
+
+// --- 到達できること -------------------------------------------------------------
+
+test("サイドバーの遷移先（/creators）からパネルへ到達できる", () => {
+  /*
+    サイドバー「クリエイター」の href は /creators。
+    /admin/creator-referrals は highlight 用の alias にすぎず、
+    クリックしても開かれない。パネルをそこだけに置くと
+    気づけないまま異常が残る（2026-10-03）。
+  */
+  const nav = codeOnly(NAV);
+  assert.match(nav, /href: "\/creators"/, "サイドバーの遷移先が変わっている");
+
+  const page = codeOnly(CREATORS_PAGE);
+  assert.match(page, /<RelationRepairPanel \/>/, "/creators にパネルが無い");
+  assert.match(
+    page,
+    /isAdmin \? <RelationRepairPanel \/> : null/,
+    "代理店ユーザーにも出てしまう",
+  );
+});
+
+test("パネルを置いた画面はすべて admin 限定", () => {
+  for (const [name, source] of [
+    ["/admin/creator-referrals", PAGE],
+    ["/creators", CREATORS_PAGE],
+  ]) {
+    const code = codeOnly(source);
+    assert.match(code, /isAdminRole\(/, `${name} に admin 判定が無い`);
+    assert.match(code, /<RelationRepairPanel/, `${name} にパネルが無い`);
+  }
+
+  /* /creators は代理店も開ける画面なので isAdmin で囲む必要がある */
+  assert.match(
+    codeOnly(CREATORS_PAGE),
+    /isAdmin \? <RelationRepairPanel/,
+    "/creators で admin 限定になっていない",
+  );
 });
