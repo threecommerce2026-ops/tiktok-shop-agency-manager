@@ -35,6 +35,7 @@ export const APP_NAV: readonly NavItem[] = [
       "/admin/creator-assignment",
       "/admin/creator-referrals",
       "/admin/monthly-agency-assignments",
+      "/admin/monthly-account-management-types",
       "/admin/creator-assignment-logs",
       "/admin/creator-commission-rate-logs",
     ],

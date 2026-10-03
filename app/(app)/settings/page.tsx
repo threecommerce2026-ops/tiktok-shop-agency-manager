@@ -17,6 +17,7 @@ const ADMIN_INTERNAL_LINKS = [
   { href: "/admin/creator-assignment", label: "クリエイター振り分け（旧画面）" },
   { href: "/admin/creator-referrals", label: "紹介者紐付け（旧画面）" },
   { href: "/admin/monthly-agency-assignments", label: "月別所属 一括確認・確定" },
+  { href: "/admin/monthly-account-management-types", label: "月別クリエイター区分" },
   { href: "/admin/creator-assignment-logs", label: "振り分け履歴" },
   { href: "/admin/creator-commission-rate-logs", label: "分配率履歴" },
   { href: "/admin/referral-payouts", label: "紹介者報酬支払い（旧画面）" },

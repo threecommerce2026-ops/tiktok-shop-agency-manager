@@ -29,6 +29,7 @@ export type MonthlyAccountTypeActionResult =
   | { ok: false; error: string };
 
 function revalidateTypeViews() {
+  revalidatePath("/admin/monthly-account-management-types");
   revalidatePath("/payments");
   revalidatePath("/creators");
   revalidatePath("/revenue");
@@ -154,6 +155,80 @@ export async function resetCreatorMonthlyAccountTypeAction(
   return {
     ok: true,
     message: `${targetMonth} の月別区分を解除しました（現在区分での暫定判定に戻ります）`,
+  };
+}
+
+/**
+ * 一括での月別区分確定（クリエイター × 月 × 区分の組を複数まとめて）。
+ *
+ * 保存処理は個別パネルと同じ confirmMonthlyAccountTypes を再利用する。
+ * creators.account_management_type（現在区分）は変更しない。
+ * 紹介報酬（referral_reward_items）も自動では再計算しない。
+ */
+export async function bulkConfirmMonthlyAccountTypesAction(
+  _prev: MonthlyAccountTypeActionResult | null,
+  formData: FormData,
+): Promise<MonthlyAccountTypeActionResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  /*
+    entries は "creatorId|targetMonth|accountManagementType" で受け取る。
+    画面でチェックされた行だけが送られてくる。
+  */
+  const entries = formData
+    .getAll("entries")
+    .map((value) => String(value).split("|"))
+    .filter((parts) => parts.length === 3)
+    .map(([creatorId, targetMonth, accountManagementType]) => ({
+      creatorId: creatorId.trim(),
+      targetMonth: targetMonth.trim(),
+      accountManagementType: accountManagementType.trim(),
+    }))
+    .filter(
+      (entry) =>
+        entry.creatorId && entry.targetMonth && entry.accountManagementType,
+    );
+
+  if (entries.length === 0) {
+    return { ok: false, error: "確定する行を1つ以上選択してください" };
+  }
+
+  const result = await confirmMonthlyAccountTypes(
+    auth.supabase,
+    getSupabaseAdmin(),
+    entries,
+  );
+
+  if (result.error) {
+    return { ok: false, error: mapSupabaseErrorToJa(result.error) };
+  }
+
+  if (result.confirmedCount === 0) {
+    return {
+      ok: false,
+      error:
+        "支払済み（または支払予定中）の紹介報酬があるため、選択した行はすべて変更できませんでした",
+    };
+  }
+
+  revalidateTypeViews();
+
+  /*
+    ブロックされた行は黙って飲み込まず、どの creator×month かを返す。
+    「残りだけ確定して成功」と見せると、確定できていない月に
+    気づけないまま再集計へ進んでしまう。
+  */
+  const blockedNote =
+    result.blocked.length > 0
+      ? `（支払済みのため ${result.blocked.length} 件をスキップ: ${result.blocked
+          .map((entry) => entry.targetMonth)
+          .join(", ")}）`
+      : "";
+
+  return {
+    ok: true,
+    message: `${result.confirmedCount} 件の月別区分を確定しました（クリエイター ${result.creatorCount} 名 / 対象月 ${result.months.join(", ")}）${blockedNote}。紹介報酬は再計算していません。`,
   };
 }
 
