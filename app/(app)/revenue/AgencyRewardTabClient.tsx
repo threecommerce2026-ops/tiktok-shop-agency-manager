@@ -14,6 +14,7 @@ import type {
   AgencyAnnualSummaryRow,
   AgencyPaymentState,
 } from "@/lib/db/agency-annual-queries";
+import type { AgencyRewardKind } from "@/lib/agency/agency-reward-engine";
 import { AssignmentStateBadge } from "@/components/agency/MonthlyAssignmentPanel";
 import { MonthlyAssignmentLauncher } from "@/components/agency/MonthlyAssignmentLauncher";
 import { formatYen, formatYenPrecise } from "@/lib/revenue/calc";
@@ -71,6 +72,49 @@ function StateBadge({ state }: { state: AgencyPaymentState }) {
   );
 }
 
+/*
+  報酬の種類の区別。
+
+  通常の代理店報酬      AP を100%
+  端末貸し出し（貸出）  AP × 分配率。適用した率も出す
+
+  紹介料5%はこの画面（代理店報酬タブ）には入らない別制度。
+*/
+function RewardKindBadge({
+  kind,
+  splitRate,
+}: {
+  kind: AgencyRewardKind;
+  splitRate: number | null;
+}) {
+  if (kind !== "account_lending") {
+    return (
+      <span className="rounded-full border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 text-[11px] text-zinc-400">
+        通常
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="rounded-full border border-violet-400/25 bg-violet-400/10 px-2 py-0.5 text-[11px] text-violet-200"
+      title="区分がアカウント貸出のクリエイター。AP × 分配率を貸し出し先へ支払います"
+    >
+      端末貸し出し
+      {splitRate == null
+        ? "（分配率 混在）"
+        : `（${formatSplitRate(splitRate)}）`}
+    </span>
+  );
+}
+
+/** 0.8 → 「80%」。端数のある率も落とさずに出す */
+function formatSplitRate(rate: number): string {
+  const percent = rate * 100;
+  const rounded = Math.round(percent * 100) / 100;
+  return `${rounded}%`;
+}
+
 /** 代理店の月別 → クリエイター別内訳（同じ画面内で展開する） */
 function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
   const [openMonth, setOpenMonth] = useState<string | null>(
@@ -106,6 +150,12 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
                 <th className={`${thBase} text-right`}>AD Commission Base</th>
                 <th className={`${thBase} text-right`}>AJ 分配前クリエイター収益</th>
                 <th className={`${thBase} text-right`}>AP 代理店報酬</th>
+                <th
+                  className={`${thBase} text-right`}
+                  title="区分がアカウント貸出のクリエイターの分（AP × 分配率）。残りは通常の代理店報酬です"
+                >
+                  うち端末貸し出し
+                </th>
                 <th className={`${thBase} text-right`}>支払済</th>
                 <th className={`${thBase} text-right`}>未払</th>
                 <th className={`${thBase} text-right`}>明細</th>
@@ -138,6 +188,17 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
                     <td className={`${td} text-right font-mono text-zinc-100`}>
                       {formatYenPrecise(month.rewardAmount)}
                     </td>
+                    <td
+                      className={`${td} text-right font-mono ${
+                        month.lendingRewardAmount > 0
+                          ? "text-violet-200"
+                          : "text-zinc-600"
+                      }`}
+                    >
+                      {month.lendingRewardAmount > 0
+                        ? `${formatYenPrecise(month.lendingRewardAmount)}（${month.lendingItemCount}件）`
+                        : "—"}
+                    </td>
                     <td className={`${td} text-right font-mono text-zinc-500`}>
                       {formatYenPrecise(month.paidAmount)}
                     </td>
@@ -160,7 +221,9 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
 
       <div>
         <p className="mb-2 text-[11px] text-zinc-500">
-          代理店報酬は AP「エージェンシーの収益総額」と同額です（AK は掛けません）。
+          通常の代理店報酬は AP「エージェンシーの収益総額」と同額です（AK は掛けません）。
+          区分がアカウント貸出のクリエイターは AP × 分配率（既定 80%）を貸し出し先へ支払い、
+          残りが自社の取り分になります。紹介料5%とは別制度です。
         </p>
         <h3 className="mb-2 text-xs font-semibold text-zinc-300">
           クリエイター別内訳
@@ -180,6 +243,7 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
                 </th>
                 <th className={`${thBase} text-right`}>AP エージェンシー収益総額</th>
                 <th className={`${thBase} text-right`}>代理店報酬</th>
+                <th className={thBase}>報酬の種類</th>
                 <th className={`${thBase} text-right`}>明細</th>
                 <th className={thBase}>所属状態</th>
                 <th className={thBase}>支払状態</th>
@@ -213,6 +277,12 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
                   </td>
                   <td className={`${td} text-right font-mono text-zinc-100`}>
                     {formatYenPrecise(creator.rewardAmount)}
+                  </td>
+                  <td className={td}>
+                    <RewardKindBadge
+                      kind={creator.rewardKind}
+                      splitRate={creator.lendingSplitRate}
+                    />
                   </td>
                   <td className={`${td} text-right font-mono text-zinc-500`}>
                     {creator.itemCount}
@@ -514,6 +584,14 @@ export function AgencyRewardTabClient({
                         <span className="ml-2 text-[11px] text-zinc-600">
                           CR {row.creatorCount} / 明細 {row.itemCount}
                         </span>
+                        {row.hasAccountLending ? (
+                          <span
+                            className="ml-2 rounded-full border border-violet-400/25 bg-violet-400/10 px-2 py-0.5 text-[10px] text-violet-200"
+                            title={`端末貸し出し報酬 ${formatYenPrecise(row.annualLendingRewardAmount)} / ${row.lendingItemCount} 件を含みます`}
+                          >
+                            端末貸し出し {formatYenPrecise(row.annualLendingRewardAmount)}
+                          </span>
+                        ) : null}
                         {row.hasUnconfirmedAssignment ? (
                           <span className="ml-2 rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200">
                             △ 所属未確定 {row.provisionalCreatorCount} 名
@@ -528,7 +606,14 @@ export function AgencyRewardTabClient({
                           </span>
                         )}
                       </td>
-                      <td className={`${td} text-right font-mono text-zinc-200`}>
+                      <td
+                        className={`${td} text-right font-mono text-zinc-200`}
+                        title={
+                          row.hasAccountLending
+                            ? `通常の代理店報酬 ${formatYenPrecise(row.annualRewardAmount - row.annualLendingRewardAmount)} / 端末貸し出し報酬 ${formatYenPrecise(row.annualLendingRewardAmount)}`
+                            : undefined
+                        }
+                      >
                         {formatYenPrecise(row.annualRewardAmount)}
                       </td>
                       <td className={`${td} text-right font-mono text-zinc-400`}>

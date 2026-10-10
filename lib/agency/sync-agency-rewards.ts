@@ -14,6 +14,16 @@ import {
   sumAgencyAmounts,
   type AgencyOrderLine,
 } from "@/lib/agency/agency-reward-engine";
+import {
+  fetchMonthlyAccountTypes,
+  monthlyAccountTypeKey,
+  resolveMonthlyAccountManagementType,
+} from "@/lib/creators/monthly-account-management-type";
+import {
+  fetchMonthlyLendingSplitRates,
+  isLendingSplitRateColumnMissing,
+  lendingSplitRateKey,
+} from "@/lib/agency/lending-split-rate";
 import { isAgencyPayoutEligibleOrderLine } from "@/lib/revenue/order-line-status";
 
 /*
@@ -69,6 +79,10 @@ export type SyncAgencyRewardsResult = {
   deletedCount: number;
   skippedPaidCount: number;
   monthRewardAmount: number;
+  /** うち端末貸し出し報酬の明細件数 */
+  lendingLineCount: number;
+  /** うち端末貸し出し報酬の金額 */
+  lendingRewardAmount: number;
   payoutCount: number;
   warnings: AgencyRewardWarning[];
   error: string | null;
@@ -89,13 +103,22 @@ export async function syncAgencyRewardsForMonth(
     deletedCount: 0,
     skippedPaidCount: 0,
     monthRewardAmount: 0,
+    lendingLineCount: 0,
+    lendingRewardAmount: 0,
     payoutCount: 0,
     warnings: [],
     error: null,
     errorCode: null,
   };
 
-  const [assignmentsResult, ordersResult, existingResult] = await Promise.all([
+  const [
+    assignmentsResult,
+    ordersResult,
+    existingResult,
+    creatorsResult,
+    monthlyTypesResult,
+    lendingRatesResult,
+  ] = await Promise.all([
     resolveAgencyAssignments(supabase, targetMonth),
     fetchAllFrom<AgencyOrderLine>(
       supabase,
@@ -114,10 +137,34 @@ export async function syncAgencyRewardsForMonth(
       "id, source_row_key, is_paid, payout_id, payment_batch_id",
       (query) => query.eq("target_month", targetMonth),
     ),
+    /*
+      区分の現在値。月別確定が無い月のフォールバックに使う。
+      優先順位の判定は lib/creators/monthly-account-management-type.ts が
+      単一ソースなので、ここで書き直さないこと。
+    */
+    fetchAllFrom<{ id: string; account_management_type: string | null }>(
+      supabase,
+      "creators",
+      "id, account_management_type",
+    ),
+    /*
+      区分（通常 / 自社運用 / アカウント貸出）は対象月の値で判定する。
+      区分を変更しても過去月の報酬判定が変わらないようにするため、
+      creators の現在値だけで判定してはいけない。
+    */
+    fetchMonthlyAccountTypes(supabase, { targetMonth }),
+    /* 端末貸し出しの分配率の個別設定（未設定なら既定 80%） */
+    fetchMonthlyLendingSplitRates(supabase, { targetMonth }),
   ]);
 
   const loadError =
-    assignmentsResult.error ?? ordersResult.error ?? existingResult.error ?? null;
+    assignmentsResult.error ??
+    ordersResult.error ??
+    existingResult.error ??
+    creatorsResult.error ??
+    monthlyTypesResult.error ??
+    lendingRatesResult.error ??
+    null;
 
   if (loadError) {
     return {
@@ -127,8 +174,14 @@ export async function syncAgencyRewardsForMonth(
         assignmentsResult.errorCode ??
         ordersResult.errorCode ??
         existingResult.errorCode ??
+        creatorsResult.errorCode ??
         null,
     };
+  }
+
+  const currentTypeByCreator = new Map<string, string | null>();
+  for (const creator of creatorsResult.data) {
+    currentTypeByCreator.set(creator.id, creator.account_management_type ?? null);
   }
 
   /*
@@ -151,6 +204,8 @@ export async function syncAgencyRewardsForMonth(
   const upserts: Array<Record<string, unknown>> = [];
   const monthAmounts: number[] = [];
   const warningByCreator = new Map<string, AgencyRewardWarning>();
+  const lendingAmounts: number[] = [];
+  let lendingLineCount = 0;
 
   for (const line of ordersResult.data) {
     const creatorId = line.creator_id;
@@ -192,8 +247,33 @@ export async function syncAgencyRewardsForMonth(
 
     if (paidSourceKeys.has(sourceRowKey)) continue;
 
-    const computed = computeAgencyReward(line, assignment);
+    /*
+      対象月の区分で報酬の種類を決める。
+      standard は従来どおり AP を100%、account_lending は AP × 分配率。
+    */
+    const resolvedType = resolveMonthlyAccountManagementType({
+      creatorId,
+      targetMonth,
+      monthlyType: monthlyTypesResult.index.get(
+        monthlyAccountTypeKey(creatorId, targetMonth),
+      ),
+      currentType: currentTypeByCreator.get(creatorId) ?? null,
+    });
+
+    const computed = computeAgencyReward(line, assignment, {
+      accountManagementType: resolvedType.accountManagementType,
+      lendingSplitRate:
+        lendingRatesResult.index.get(
+          lendingSplitRateKey(creatorId, targetMonth),
+        ) ?? null,
+    });
+
     if (!computed) continue;
+
+    if (computed.rewardKind === "account_lending") {
+      lendingLineCount += 1;
+      lendingAmounts.push(computed.rewardAmount);
+    }
 
     monthAmounts.push(computed.rewardAmount);
 
@@ -216,7 +296,50 @@ export async function syncAgencyRewardsForMonth(
       is_reward_target: true,
       is_paid: false,
       updated_at: nowIso,
+      reward_kind: computed.rewardKind,
+      lending_split_rate: computed.lendingSplitRate,
     });
+  }
+
+  /*
+    --- reward_kind / lending_split_rate 列の有無を確かめる -------------------
+
+    列が無い環境（migration 適用前）で端末貸し出しの明細を書くと、
+    区別も適用率も残らないまま「80% に減った通常の代理店報酬」として
+    保存されてしまう。金額の根拠が追えなくなるので書かずに止める。
+
+    端末貸し出しの明細が1件も無い月は、従来どおり同期を続ける
+    （既存の代理店報酬を列の有無で止めてはいけない）。
+  */
+  const schema = await detectRewardKindColumns(supabase);
+
+  if (schema.error) {
+    return {
+      ...empty,
+      skippedPaidCount: paidSourceKeys.size,
+      warnings: [...warningByCreator.values()],
+      error: schema.error,
+    };
+  }
+
+  if (!schema.hasRewardKind) {
+    if (lendingLineCount > 0) {
+      return {
+        ...empty,
+        skippedPaidCount: paidSourceKeys.size,
+        warnings: [...warningByCreator.values()],
+        error:
+          "端末貸し出し報酬を保存できません。" +
+          "agency_reward_items に reward_kind / lending_split_rate 列がありません" +
+          "（20261009120000_account_lending_reward_kind.sql が未適用）。" +
+          "区別と適用した分配率を残せないため、同期を中止しました。",
+      };
+    }
+
+    for (const row of upserts) {
+      delete row.reward_kind;
+      delete row.lending_split_rate;
+    }
   }
 
   let upsertedCount = 0;
@@ -267,6 +390,8 @@ export async function syncAgencyRewardsForMonth(
     deletedCount: cleanup.deletedCount,
     skippedPaidCount: paidSourceKeys.size,
     monthRewardAmount: sumAgencyAmounts(monthAmounts),
+    lendingLineCount,
+    lendingRewardAmount: sumAgencyAmounts(lendingAmounts),
     payoutCount: payoutResult.payoutCount,
     warnings: [...warningByCreator.values()],
     error: payoutResult.error,
@@ -274,6 +399,30 @@ export async function syncAgencyRewardsForMonth(
   };
 }
 
+
+/**
+ * reward_kind / lending_split_rate 列が存在するかを確かめる。
+ *
+ * 列が無いことと、読み取りに失敗したことを区別する。
+ * 読み取りに失敗した場合は列の有無が不明なので error を返し、
+ * 「無い」とみなして先へ進めない（fail-closed）。
+ */
+async function detectRewardKindColumns(
+  supabase: SupabaseClient,
+): Promise<{ hasRewardKind: boolean; error: string | null }> {
+  const { error } = await supabase
+    .from("agency_reward_items")
+    .select("reward_kind, lending_split_rate")
+    .limit(1);
+
+  if (!error) return { hasRewardKind: true, error: null };
+
+  if (isLendingSplitRateColumnMissing(error.message)) {
+    return { hasRewardKind: false, error: null };
+  }
+
+  return { hasRewardKind: false, error: error.message };
+}
 
 /**
  * 対象月のうち、現在のルール・マスタでは報酬対象でなくなった明細を削除する。

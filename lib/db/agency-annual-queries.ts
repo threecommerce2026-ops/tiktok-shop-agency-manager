@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { fetchAllFrom } from "@/lib/db/paged-select";
+import { isLendingSplitRateColumnMissing } from "@/lib/agency/lending-split-rate";
 import { toAmount } from "@/lib/revenue/amount";
 import { isAgencyPayoutEligibleOrderLine } from "@/lib/revenue/order-line-status";
 import type { AgencyAssignmentState } from "@/lib/agency/agency-assignment";
@@ -9,6 +10,7 @@ import {
   resolveAgencyRewardItemAmount,
   roundAgencyAmount,
   sumAgencyAmounts,
+  type AgencyRewardKind,
 } from "@/lib/agency/agency-reward-engine";
 
 /*
@@ -35,10 +37,22 @@ type AgencyRewardItemRow = {
   is_paid: boolean;
   paid_at: string | null;
   payout_id: string | null;
+  /** agency = 通常の代理店報酬 / account_lending = 端末貸し出し報酬 */
+  reward_kind?: string | null;
+  /** 端末貸し出しで適用した分配率。通常報酬では null */
+  lending_split_rate?: number | string | null;
 };
 
-const ITEM_COLUMNS =
+const BASE_ITEM_COLUMNS =
   "target_month, agency_id, creator_id, agency_source, commission_base, commission_gmv, creator_revenue_before_split, agency_split_rate, reward_amount, is_reward_target, is_paid, paid_at, payout_id";
+
+/*
+  端末貸し出しの区別に使う列。
+  migration 20261009120000 の適用前は存在しないため、
+  列が無いときは BASE_ITEM_COLUMNS だけで読み直す。
+  その場合はすべて通常の代理店報酬として表示する（金額は変わらない）。
+*/
+const ITEM_COLUMNS = `${BASE_ITEM_COLUMNS}, reward_kind, lending_split_rate`;
 
 export type AgencyPaymentState = "paid" | "partial" | "unpaid";
 
@@ -58,6 +72,10 @@ export type AgencyMonthlyBreakdownRow = {
   /** AJ 収益分配前のクリエイター収益 */
   creatorRevenueBeforeSplit: number;
   rewardAmount: number;
+  /** うち端末貸し出し報酬（AP × 分配率）。通常の代理店報酬は差額 */
+  lendingRewardAmount: number;
+  /** うち端末貸し出しの明細件数 */
+  lendingItemCount: number;
   paidAmount: number;
   unpaidAmount: number;
   itemCount: number;
@@ -83,12 +101,24 @@ export type AgencyCreatorBreakdownRow = {
   /** monthly = 月別確定 / current = 現在所属（暫定） / none = 未確定 */
   assignmentState: AgencyAssignmentState;
   paymentState: AgencyPaymentState;
+  /** agency = 通常の代理店報酬 / account_lending = 端末貸し出し報酬 */
+  rewardKind: AgencyRewardKind;
+  /** 端末貸し出しで適用した分配率（0〜1）。通常報酬では null */
+  lendingSplitRate: number | null;
+  /** うち端末貸し出し報酬 */
+  lendingRewardAmount: number;
 };
 
 export type AgencyAnnualSummaryRow = {
   agencyId: string;
   agencyName: string;
   annualRewardAmount: number;
+  /** うち端末貸し出し報酬の年間額 */
+  annualLendingRewardAmount: number;
+  /** うち端末貸し出しの明細件数 */
+  lendingItemCount: number;
+  /** 端末貸し出しの明細を含むか（画面の区別表示に使う） */
+  hasAccountLending: boolean;
   annualCommissionBase: number;
   paidAmount: number;
   unpaidAmount: number;
@@ -166,6 +196,11 @@ type Bucket = {
   creators: Set<string>;
   splitRates: Set<number>;
   sources: Set<string>;
+  /* 端末貸し出し（account_lending）の内訳。通常の代理店報酬と区別して出す */
+  lendingEarned: number[];
+  lendingItemCount: number;
+  lendingSplitRates: Set<number>;
+  rewardKinds: Set<string>;
 };
 
 function createBucket(): Bucket {
@@ -178,7 +213,20 @@ function createBucket(): Bucket {
     creators: new Set<string>(),
     splitRates: new Set<number>(),
     sources: new Set<string>(),
+    lendingEarned: [],
+    lendingItemCount: 0,
+    lendingSplitRates: new Set<number>(),
+    rewardKinds: new Set<string>(),
   };
+}
+
+/*
+  報酬の種類。列が無い環境（migration 未適用）では null が入るので、
+  その場合は通常の代理店報酬として扱う。
+  判定は agency-reward-engine の種類定義に合わせる。
+*/
+function resolveRewardKind(item: AgencyRewardItemRow): AgencyRewardKind {
+  return item.reward_kind === "account_lending" ? "account_lending" : "agency";
 }
 
 function addToBucket(bucket: Bucket, item: AgencyRewardItemRow, value: number) {
@@ -190,6 +238,16 @@ function addToBucket(bucket: Bucket, item: AgencyRewardItemRow, value: number) {
   bucket.creators.add(item.creator_id);
   bucket.splitRates.add(toAmount(item.agency_split_rate));
   if (item.agency_source) bucket.sources.add(item.agency_source);
+
+  const kind = resolveRewardKind(item);
+  bucket.rewardKinds.add(kind);
+
+  if (kind === "account_lending") {
+    bucket.lendingEarned.push(value);
+    bucket.lendingItemCount += 1;
+    const rate = toAmount(item.lending_split_rate);
+    if (rate > 0) bucket.lendingSplitRates.add(rate);
+  }
 }
 
 export async function fetchAgencyAnnualSummary(
@@ -218,19 +276,40 @@ export async function fetchAgencyAnnualSummary(
     error: null,
   };
 
-  const [itemsResult, agenciesResult, payoutsResult, reviewResult] = await Promise.all([
-    fetchAllFrom<AgencyRewardItemRow>(
+  const applyItemScope: NonNullable<Parameters<typeof fetchAllFrom>[3]> = (query) => {
+    const scoped = query
+      .gte("target_month", `${year}-01`)
+      .lte("target_month", `${year}-12`)
+      .order("target_month", { ascending: true });
+    return scopedAgencyId ? scoped.eq("agency_id", scopedAgencyId) : scoped;
+  };
+
+  const fetchItems = async () => {
+    const withKind = await fetchAllFrom<AgencyRewardItemRow>(
       supabase,
       "agency_reward_items",
       ITEM_COLUMNS,
-      (query) => {
-        const scoped = query
-          .gte("target_month", `${year}-01`)
-          .lte("target_month", `${year}-12`)
-          .order("target_month", { ascending: true });
-        return scopedAgencyId ? scoped.eq("agency_id", scopedAgencyId) : scoped;
-      },
-    ),
+      applyItemScope,
+    );
+
+    if (!withKind.error) return withKind;
+    if (!isLendingSplitRateColumnMissing(withKind.error)) return withKind;
+
+    /*
+      migration 未適用の環境。区別列なしで読み直す。
+      金額（reward_amount）は同じものを読むので表示金額は変わらない。
+      すべて通常の代理店報酬として扱われる。
+    */
+    return fetchAllFrom<AgencyRewardItemRow>(
+      supabase,
+      "agency_reward_items",
+      BASE_ITEM_COLUMNS,
+      applyItemScope,
+    );
+  };
+
+  const [itemsResult, agenciesResult, payoutsResult, reviewResult] = await Promise.all([
+    fetchItems(),
     supabase.from("agencies").select("id, name"),
     supabase
       .from("agency_payouts")
@@ -390,6 +469,8 @@ export async function fetchAgencyAnnualSummary(
           commissionBase: roundAgencyAmount(bucket.base),
           creatorRevenueBeforeSplit: roundAgencyAmount(bucket.beforeSplit),
           rewardAmount,
+          lendingRewardAmount: sumAgencyAmounts(bucket.lendingEarned),
+          lendingItemCount: bucket.lendingItemCount,
           paidAmount: monthPaid,
           unpaidAmount: roundAgencyAmount(rewardAmount - monthPaid),
           itemCount: bucket.itemCount,
@@ -408,6 +489,8 @@ export async function fetchAgencyAnnualSummary(
         const pairPaid = sumAgencyAmounts(bucket.paid);
         const meta = creatorById.get(creatorId);
         const rates = [...bucket.splitRates];
+        const lendingRates = [...bucket.lendingSplitRates];
+        const isLending = bucket.lendingItemCount > 0;
 
         return {
           creatorId,
@@ -423,6 +506,15 @@ export async function fetchAgencyAnnualSummary(
           itemCount: bucket.itemCount,
           assignmentState: ([...bucket.sources][0] as AgencyAssignmentState) ?? "none",
           paymentState: resolvePaymentState(rewardAmount, pairPaid),
+          rewardKind: isLending
+            ? ("account_lending" as AgencyRewardKind)
+            : ("agency" as AgencyRewardKind),
+          /*
+            分配率が月内で混在した場合は表示を 1 値に丸めない。
+            複数あれば null にして「混在」を画面側で出せるようにする。
+          */
+          lendingSplitRate: lendingRates.length === 1 ? lendingRates[0] : null,
+          lendingRewardAmount: sumAgencyAmounts(bucket.lendingEarned),
         };
       })
       .sort(
@@ -434,6 +526,9 @@ export async function fetchAgencyAnnualSummary(
       agencyId,
       agencyName: agencyNameById.get(agencyId) ?? "（削除済み代理店）",
       annualRewardAmount,
+      annualLendingRewardAmount: sumAgencyAmounts(acc.total.lendingEarned),
+      lendingItemCount: acc.total.lendingItemCount,
+      hasAccountLending: acc.total.lendingItemCount > 0,
       annualCommissionBase: roundAgencyAmount(acc.total.base),
       paidAmount,
       unpaidAmount: state.unpaidAmount,
