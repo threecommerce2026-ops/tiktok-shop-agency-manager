@@ -2,7 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 
-import { AGENCY_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
+import {
+  AGENCY_PAYOUT_THRESHOLD_YEN,
+  CREATOR_LENDING_PAYOUT_THRESHOLD_YEN,
+} from "@/lib/payments/minimum-payout";
 import {
   EARLIEST_CUTOFF_MONTH,
   formatCutoffLabel,
@@ -168,6 +171,12 @@ function validateCutoff(
   代理店の判定額に紹介制度報酬は含まれない（代理店へは支払わないため）。
 */
 function thresholdFor(payeeKind: PayeeKind): number {
+  /*
+    端末貸し出し報酬（クリエイター本人）の最低振込額は 1,000円（2026-10-11 確定）。
+    値は代理店・紹介者と同じだが、別制度なので定数を分けている。
+    判定対象は「未払明細の合計 + 繰越残高」で、claim RPC 側が同じ基準で判定する。
+  */
+  if (payeeKind === "creator") return CREATOR_LENDING_PAYOUT_THRESHOLD_YEN;
   return payeeKind === "referrer"
     ? REFERRAL_PAYOUT_THRESHOLD_YEN
     : AGENCY_PAYOUT_THRESHOLD_YEN;
@@ -647,6 +656,28 @@ export async function createPaymentBatchAction(
 
   const cutoffError = validateCutoff(cutoffMonth, startMonth, payeeKind);
   if (cutoffError) return { ok: false, error: cutoffError };
+
+  /*
+    クリエイター本人（端末貸し出し報酬）の支払明細は、支払経路が
+    creator に対応した環境でしか作らせない。
+
+    画面はボタンを無効にしているが、この Server Action を直接呼べば
+    通ってしまうためサーバー側でも確認する。DB 側も未対応なら claim を
+    拒否する（多層防御）。関数が無い環境では「未対応」として扱う。
+  */
+  if (payeeKind === "creator") {
+    const { data: supported, error: supportError } = await auth.supabase.rpc(
+      "payment_batch_supports_creator",
+    );
+
+    if (supportError || supported !== true) {
+      return {
+        ok: false,
+        error:
+          "支払経路がクリエイター本人に未対応です。supabase/migrations/20261010120000・20261010130000・20261010170000 を適用してください。",
+      };
+    }
+  }
 
   const { data, error } = await auth.supabase.rpc("claim_payment_batch_items", {
     p_payee_kind: payeeKind,

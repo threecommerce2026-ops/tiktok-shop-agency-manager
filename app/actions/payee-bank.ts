@@ -66,6 +66,20 @@ export async function savePayeeBankAccountAction(
     };
   }
 
+  /*
+    クリエイター本人の振込先はここでは扱わない。
+    口座は creator_bank_accounts（本人専用テーブル）にあり、
+    登録・変更は /revenue の端末貸し出しタブから行う
+    （本人を代理店マスタへ登録しないため、agencies / referrers には書かない）。
+  */
+  if (payeeKind === "creator") {
+    return {
+      ok: false,
+      error:
+        "クリエイター本人の振込先はここでは変更できません。「売上・報酬」→「端末貸し出し」タブから登録・変更してください。",
+    };
+  }
+
   const admin = getSupabaseAdmin();
   const table = payeeKind === "agency" ? "agencies" : "referrers";
 

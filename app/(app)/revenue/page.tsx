@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { SalesTab } from "@/app/(app)/revenue/SalesTab";
 import { AgencyRewardTab } from "@/app/(app)/revenue/AgencyRewardTab";
 import { ReferralRewardTab } from "@/app/(app)/revenue/ReferralRewardTab";
+import { LendingRewardTab } from "@/app/(app)/revenue/LendingRewardTab";
 import { currentMonthKey } from "@/lib/db/dashboard-queries";
 import { isAdminRole, resolveAppUserContext } from "@/lib/db/user-context";
 import { createClient } from "@/lib/supabase/server";
@@ -15,9 +16,13 @@ const TABS = [
   { key: "sales", label: "売上" },
   { key: "agency", label: "代理店報酬" },
   { key: "referral", label: "紹介者報酬" },
+  { key: "lending", label: "端末貸し出し" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
+
+/** 管理者だけに見せるタブ */
+const ADMIN_ONLY_TABS = new Set<TabKey>(["referral", "lending"]);
 
 function resolveTab(value: string | undefined): TabKey {
   return TABS.some((tab) => tab.key === value) ? (value as TabKey) : "sales";
@@ -55,9 +60,14 @@ export default async function RevenuePage({
   }
 
   const params = await searchParams;
-  // 紹介者報酬タブは管理者のみ
+  /*
+    紹介者報酬・端末貸し出しタブは管理者のみ。
+    端末貸し出しはクリエイター本人への支払（口座情報を含む）を扱うため、
+    代理店ログインには出さない。
+  */
   const requestedTab = resolveTab(params.tab);
-  const tab: TabKey = !isAdmin && requestedTab === "referral" ? "sales" : requestedTab;
+  const tab: TabKey =
+    !isAdmin && ADMIN_ONLY_TABS.has(requestedTab) ? "sales" : requestedTab;
 
   const targetMonth =
     params.month && /^\d{4}-\d{2}$/.test(params.month)
@@ -69,7 +79,7 @@ export default async function RevenuePage({
       ? params.year
       : rewardYearOf(targetMonth);
 
-  const visibleTabs = TABS.filter((item) => isAdmin || item.key !== "referral");
+  const visibleTabs = TABS.filter((item) => isAdmin || !ADMIN_ONLY_TABS.has(item.key));
 
   return (
     <div className="space-y-6">
@@ -81,7 +91,7 @@ export default async function RevenuePage({
           売上・報酬
         </h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-500">
-          売上（affiliate_order_lines）・代理店報酬・紹介者報酬をこの画面に集約しています。
+          売上（affiliate_order_lines）・代理店報酬・紹介者報酬・端末貸し出し報酬をこの画面に集約しています。
         </p>
       </div>
 
@@ -136,6 +146,8 @@ export default async function RevenuePage({
           selectedReferrerId={params.referrerId?.trim() || null}
         />
       ) : null}
+
+      {tab === "lending" && isAdmin ? <LendingRewardTab year={year} /> : null}
     </div>
   );
 }

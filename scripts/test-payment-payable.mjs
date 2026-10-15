@@ -332,9 +332,14 @@ test("セラー請求は支払予定総額に混ざらない", () => {
   assert.equal(sellerTotal, 6968670);
   assert.notEqual(scheduledTotal, scheduledTotal + sellerTotal);
 
-  // 支払先の種別にセラーは存在しない
-  assert.deepEqual([...payable.PAYEE_KINDS], ["agency", "referrer"]);
+  /*
+    支払先の種別にセラーは存在しない。
+    creator は端末貸し出し報酬の受取人（クリエイター本人）として
+    2026-10-10 に追加した第3の受取種別。
+  */
+  assert.deepEqual([...payable.PAYEE_KINDS], ["agency", "referrer", "creator"]);
   assert.equal(payable.isPayeeKind("seller"), false);
+  assert.equal(payable.isPayeeKind("creator"), true);
 });
 
 // =============================================================================

@@ -57,6 +57,7 @@ import type {
   PaymentOverview,
   PaymentUnpaidRow,
 } from "@/lib/db/payment-queries";
+import { BANK_ACCOUNT_STATE_LABEL } from "@/lib/payments/bank-account";
 import {
   PAYEE_KIND_LABEL,
   PAYMENT_HOLD_REASON_HINT,
@@ -110,6 +111,7 @@ const TABS = [
   { key: "all", label: "すべて" },
   { key: "agency", label: "代理店" },
   { key: "referrer", label: "紹介者" },
+  { key: "creator", label: "クリエイター" },
   { key: "hold", label: "振込保留" },
   { key: "history", label: "支払履歴" },
   { key: "tap", label: "TAP実績" },
@@ -2274,6 +2276,8 @@ export function PaymentsClient({
       if (row.unpaidAmount <= 0 && row.claimedAmount <= 0) return false;
       if (tab === "agency" && row.payeeKind !== "agency") return false;
       if (tab === "referrer" && row.payeeKind !== "referrer") return false;
+      /* 端末貸し出し報酬の受取人（クリエイター本人） */
+      if (tab === "creator" && row.payeeKind !== "creator") return false;
       if (tab === "hold" && !(row.unpaidAmount > 0 && row.holdReasons.length > 0)) {
         return false;
       }
@@ -2414,6 +2418,42 @@ export function PaymentsClient({
         </p>
       ) : null}
 
+      {/*
+        端末貸し出し報酬のテーブルが未作成の環境では、クリエイター本人の
+        支払候補が出ない。代理店・紹介者の支払いには影響しないが、
+        「0円」と見分けられるよう明示する。
+      */}
+      {/*
+        支払経路が creator 未対応のときの案内（M-6）。
+        代理店・紹介者の支払いには影響しない。
+      */}
+      {!overview.lendingTableMissing && !overview.supportsCreatorPayee ? (
+        <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+          支払経路がクリエイター本人（端末貸し出し報酬）に未対応です。
+          supabase/migrations/20261010120000・20261010130000・20261010170000
+          を適用するまで、クリエイターの支払明細は作成できません。
+          代理店・紹介者の支払いには影響しません。
+        </p>
+      ) : null}
+
+      {/* 振込ルール（最低振込額 1,000円 / 1円単位 / 端数繰越）の注記 */}
+      {overview.supportsCreatorPayee &&
+      overview.rows.some((row) => row.payeeKind === "creator") ? (
+        <p className="rounded-xl border border-white/[0.08] bg-surface-1/50 px-4 py-2.5 text-[11px] text-zinc-500">
+          {overview.carryoverNote}
+          {overview.totals.creatorCarryoverAmount > 0
+            ? ` 現在の繰越残高の合計 ${yen(overview.totals.creatorCarryoverAmount)}。`
+            : ""}
+        </p>
+      ) : null}
+
+      {overview.lendingTableMissing ? (
+        <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+          端末貸し出し報酬のテーブルが未作成のため、クリエイター本人の支払候補は表示されていません。
+          代理店・紹介者の支払いには影響しません。
+        </p>
+      ) : null}
+
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <Kpi
           label={`締め対象（${formatCutoffLabel(cutoffMonth)}まで）`}
@@ -2436,6 +2476,21 @@ export function PaymentsClient({
           label="紹介報酬 支払可能"
           value={yen(overview.totals.referrerUnpaidAmount)}
           hint="紹介者本人へ支払います。代理店の支払額には含まれません"
+        />
+        <Kpi
+          label="端末貸し出し報酬 支払可能"
+          value={yen(overview.totals.creatorTransferAmount)}
+          hint={`1円単位の振込額。明細 ${yen(
+            overview.totals.creatorUnpaidAmount,
+          )} / 繰越 ${yen(overview.totals.creatorCarryoverAmount)} / 自社取り分 ${yen(
+            overview.totals.creatorSelfShareAmount,
+          )} は振込対象外`}
+        />
+        <Kpi
+          label="端末貸し出し 最低振込額未達"
+          value={yen(overview.totals.creatorCarryForwardAmount)}
+          hint={`${overview.totals.creatorBelowMinimumCount} 名。振り込まず全額を翌月以降へ繰り越します`}
+          tone="muted"
         />
         <Kpi
           label="紹介報酬 今回は支払わない"
@@ -2492,6 +2547,12 @@ export function PaymentsClient({
           className="min-h-[40px] rounded-lg border border-white/[0.1] px-4 py-2 text-sm font-medium text-zinc-400 hover:bg-white/[0.06]"
         >
           紹介者報酬の再集計
+        </Link>
+        <Link
+          href="/revenue?tab=lending"
+          className="min-h-[40px] rounded-lg border border-white/[0.1] px-4 py-2 text-sm font-medium text-zinc-400 hover:bg-white/[0.06]"
+        >
+          端末貸し出し報酬の再集計
         </Link>
       </div>
 
@@ -2834,7 +2895,8 @@ export function PaymentsClient({
                     <th className={`${th} text-right`}>発生額</th>
                     <th className={`${th} text-right`}>過去支払済</th>
                     <th className={`${th} text-right`}>支払予定中</th>
-                    <th className={`${th} text-right`}>代理店分配報酬</th>
+                    {/* 代理店行は代理店分配報酬、クリエイター行は端末貸し出し報酬（本人ぶん） */}
+                    <th className={`${th} text-right`}>報酬の内訳</th>
                     <th className={`${th} text-right`}>今回は支払わない</th>
                     <th className={`${th} text-right`}>未払残高</th>
                     <th className={`${th} text-right`}>今回支払額</th>
@@ -2874,14 +2936,36 @@ export function PaymentsClient({
                               代理店に所属していても紹介報酬は本人へ支払うため、
                               所属を理由に一覧から外さない（参考情報として出すだけ）。
                             */}
-                            <div className="mt-2 max-w-md">
-                              <PayeeBankForm
-                                payeeKind={row.payeeKind}
-                                payeeId={row.payeeId}
-                                payeeName={row.payeeName}
-                                bank={row.bank}
-                              />
-                            </div>
+                            {/*
+                              クリエイター本人の振込先は creator_bank_accounts で
+                              管理しており、代理店マスタには無い。
+                              ここでは編集させず、専用画面へ誘導する。
+                            */}
+                            {row.payeeKind === "creator" ? (
+                              <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                                振込先:{" "}
+                                <span
+                                  className={
+                                    row.bank.state === "registered"
+                                      ? "text-emerald-300"
+                                      : "text-red-200"
+                                  }
+                                >
+                                  {BANK_ACCOUNT_STATE_LABEL[row.bank.state]}
+                                </span>
+                                {" / "}
+                                登録・変更は「売上・報酬」→「端末貸し出し」タブ
+                              </p>
+                            ) : (
+                              <div className="mt-2 max-w-md">
+                                <PayeeBankForm
+                                  payeeKind={row.payeeKind}
+                                  payeeId={row.payeeId}
+                                  payeeName={row.payeeName}
+                                  bank={row.bank}
+                                />
+                              </div>
+                            )}
                             {row.payeeKind === "referrer" ? (
                               <>
                                 <ReferralCreators creators={row.creators} />
@@ -2915,9 +2999,30 @@ export function PaymentsClient({
                           <td className={`${td} text-right font-mono text-indigo-200`}>
                             {row.claimedAmount > 0 ? yen(row.claimedAmount) : "—"}
                           </td>
-                          {/* 代理店へ支払うのは代理店分配報酬だけ */}
+                          {/*
+                            代理店へ支払うのは代理店分配報酬だけ。
+                            クリエイター行は端末貸し出し報酬の本人ぶんを出す
+                            （自社取り分は支払対象ではないので金額に入れない）。
+                          */}
                           <td className={`${td} text-right font-mono text-zinc-300`}>
-                            {row.agencyRewardAmount > 0 ? yen(row.agencyRewardAmount) : "—"}
+                            {row.payeeKind === "creator" ? (
+                              row.lendingRewardAmount > 0 ? (
+                                <span
+                                  className="text-emerald-200"
+                                  title={`端末貸し出し報酬（本人ぶん） / 自社取り分 ${yen(
+                                    row.lendingSelfShareAmount,
+                                  )} は振込対象外`}
+                                >
+                                  {yen(row.lendingRewardAmount)}
+                                </span>
+                              ) : (
+                                "—"
+                              )
+                            ) : row.agencyRewardAmount > 0 ? (
+                              yen(row.agencyRewardAmount)
+                            ) : (
+                              "—"
+                            )}
                           </td>
                           {/*
                             「今回は支払わない」分。発生額には含まれるが
@@ -2936,7 +3041,36 @@ export function PaymentsClient({
                             {yen(row.unpaidAmount)}
                           </td>
                           <td className={`${td} text-right`}>
-                            {row.isPayable ? (
+                            {/*
+                              クリエイター行は、支払経路が creator に対応した
+                              環境でなければ作成させない（M-6）。
+                              DB 側も未対応なら claim を拒否する（fail-closed）。
+                            */}
+                            {row.payeeKind === "creator" && !overview.supportsCreatorPayee ? (
+                              <span
+                                className="text-[11px] text-amber-200"
+                                title="supabase/migrations/20261010120000・130000・170000 を適用すると作成できます"
+                              >
+                                支払経路が未対応
+                              </span>
+                            ) : row.payeeKind === "creator" && row.belowMinimumTransfer ? (
+                              /*
+                                最低振込額（1,000円）に達していない本人。
+                                振り込まず、未払いは全額を翌月以降へ繰り越す。
+                              */
+                              <div className="inline-flex flex-col items-end gap-0.5">
+                                <span className="text-[11px] font-semibold text-amber-200">
+                                  最低振込額未達
+                                </span>
+                                <span className="text-[10px] leading-tight text-zinc-500">
+                                  支払可能 {yen(row.payableAmount)} / 最低{" "}
+                                  {yen(row.thresholdAmount)}（あと {yen(row.shortfallAmount)}）
+                                </span>
+                                <span className="text-[10px] leading-tight text-zinc-400">
+                                  次回繰越額 {yen(row.carryForwardAmount)}
+                                </span>
+                              </div>
+                            ) : row.isPayable ? (
                               <form action={createAction} className="inline-flex flex-col items-end gap-1">
                                 <input type="hidden" name="payee_kind" value={row.payeeKind} />
                                 <input type="hidden" name="payee_id" value={row.payeeId} />
@@ -2955,9 +3089,24 @@ export function PaymentsClient({
                                   name="start_month"
                                   value={row.periodStartMonth ?? EARLIEST_CUTOFF_MONTH}
                                 />
+                                {/*
+                                  クリエイターは1円単位へ切り捨てた額を振り込み、
+                                  端数は繰越残高として次回へ回す。
+                                */}
                                 <span className="font-mono font-semibold text-emerald-300">
-                                  {yen(row.unpaidAmount)}
+                                  {yen(row.transferAmount)}
                                 </span>
+                                {row.payeeKind === "creator" ? (
+                                  <span className="text-[10px] leading-tight text-zinc-500">
+                                    支払可能 {yen(row.payableAmount)}
+                                    {row.carryoverBalance > 0
+                                      ? `（うち繰越 ${yen(row.carryoverBalance)}）`
+                                      : ""}
+                                    {row.carryForwardAmount > 0
+                                      ? ` / 次回繰越額 ${yen(row.carryForwardAmount)}`
+                                      : ""}
+                                  </span>
+                                ) : null}
                                 <button
                                   type="submit"
                                   disabled={createPending}

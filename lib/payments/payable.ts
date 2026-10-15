@@ -20,18 +20,41 @@ import type { BankAccountState } from "@/lib/payments/bank-account";
   保留し、翌月以降へ繰り越す。明細は消さない。判定は単月ではなく
   「締め月までの未払い累積」に対して行う。
 
+  ■ 端末貸し出し報酬の受取人はクリエイター本人
+  管理区分がアカウント貸し出しのクリエイターは、所属（THREE.inc）と
+  AK 100% を変えずに AP を本人と自社で分ける。本人ぶん
+  （creator_lending_reward_items）は本人へ直接振り込むため、
+  代理店・紹介者とは別の受取種別として扱う。
+
+  最低振込額は 1,000円（2026-10-11 確定）。判定対象は
+  「未払明細の合計 + 繰越残高」で、達しない月は振り込まず
+  未払いのまま翌月以降へ繰り越す（below_threshold で保留表示）。
+
   ■ 支払先は代理店に一本化する
   紹介者は独立した支払先ではない。紹介者報酬は referrers.agency_id が指す
   代理店へ合算して支払う。代理店が決まっていない紹介者は
   referrer_agency_unassigned として保留する。名前などから推測はしない。
 */
 
-export const PAYEE_KINDS = ["agency", "referrer"] as const;
+/*
+  受取種別。
+
+    agency    既存の代理店
+    referrer  既存の紹介者
+    creator   端末貸し出し報酬を受け取るクリエイター本人
+
+  creator は代理店マスタを使わない独立した受取種別。
+  本人を代理店として登録したり、THREE.inc の代理店 ID で代用したりしない。
+  金額の source は creator_lending_reward_items.reward_amount、
+  振込先は creator_bank_accounts。
+*/
+export const PAYEE_KINDS = ["agency", "referrer", "creator"] as const;
 export type PayeeKind = (typeof PAYEE_KINDS)[number];
 
 export const PAYEE_KIND_LABEL: Record<PayeeKind, string> = {
   agency: "代理店",
   referrer: "紹介者",
+  creator: "クリエイター",
 };
 
 export function isPayeeKind(value: unknown): value is PayeeKind {

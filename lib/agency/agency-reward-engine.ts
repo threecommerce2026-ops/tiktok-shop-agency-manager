@@ -31,26 +31,26 @@
     かつ 代理店が特定できる（THREE.inc 所属・代理店未設定は対象外）
     かつ AP の金額が存在する
 
-  ■ 端末貸し出し（アカウント貸出）報酬（2026-10-09 確定）
-  区分 account_management_type = 'account_lending' のクリエイターは、
-  TikTok 側で AK = 100% になっており AP の全額がいったん自社へ入る。
-  この AP に分配率を掛けたものを貸し出し先へ支払う。
+  ■ 端末貸し出し（アカウント貸出）はここでは計算しない（2026-10-10 最終確定）
+  区分 account_management_type = 'account_lending' の報酬は
+  クリエイター本人が受け取る。代理店ではない。
 
-      貸し出し先 = AP × 分配率（既定 80%）
-      自社       = AP − 貸し出し先
+      対象   所属が自社（THREE.inc）／AK 100%／区分がアカウント貸し出し
+      本人   AP × 分配率（既定 80%）
+      自社   AP − 本人報酬
 
-  計算元（AP）・対象注文判定・丸め・月次集計・支払経路は
-  通常の代理店報酬とまったく同じものを使う。
-  違うのは「分配率を掛けるかどうか」だけで、別エンジンは作らない。
+  本人ぶんは creator_lending_reward_items（受取人 = creator_id）で管理し、
+  計算は lib/creators/lending-reward-engine.ts が単一ソース。
+  このエンジンは account_lending では報酬を作らない（null を返す）。
 
-  分配率はクリエイターごと・月ごとに
-  creator_monthly_agency_assignments.lending_split_rate で上書きできる。
-  未設定なら ACCOUNT_LENDING_SPLIT_RATE。
-  0 < rate <= 1 に収まらない値は報酬を作らない（既定値へ丸めない）。
+  以前は「貸し出し先の代理店へ AP × 80%」として agency_reward_items に
+  保存する設計だったが、受取人が本人に確定したため取りやめた。
+  agency_reward_items.agency_id は支払先なので、本人への支払いを
+  表現できない（本人を代理店マスタへ架空登録しない）。
 
-  貸し出し先が月別確定されていない月は計算しない。
-  暫定の現在所属で支払予定を作ると、分配先を間違えたまま
-  振込まで進む可能性があるため。
+  reward_kind / lending_split_rate 列（20261009120000）はそのまま残す。
+  20261010110000 のガードが「agency_reward_items に account_lending を
+  入れさせない」検知に使う。
 
   紹介者報酬5%とは完全に別制度。account_lending は従来どおり
   5%の対象外（lib/creators/account-management-type.ts）。
@@ -68,7 +68,6 @@
 
 import { THREE_INC_AGENCY_NAME } from "@/lib/revenue/in-house-creator";
 import {
-  isConfirmedAssignment,
   type AgencyAssignment,
 } from "@/lib/agency/agency-assignment";
 import { normalizeAccountManagementType } from "@/lib/creators/account-management-type";
@@ -303,29 +302,31 @@ export function computeAgencyReward(
 
   if (accountType === "self_operated") return null;
 
-  let rewardKind: AgencyRewardKind = "agency";
-  let lendingSplitRate: number | null = null;
-  let rewardAmount = apAmount;
+  const rewardKind: AgencyRewardKind = "agency";
+  const lendingSplitRate: number | null = null;
+  const rewardAmount = apAmount;
 
-  if (accountType === "account_lending") {
-    /*
-      未確定の貸し出し先へ自動で支払予定を作らない（2026-10-09 確定）。
+  /*
+    --- 端末貸し出し（アカウント貸出）は代理店報酬として作らない -------------
 
-      通常の代理店報酬は creators.agency_id への暫定フォールバック（current）
-      でも計算するが、端末貸し出しは「どこへ分配するか」が収益の帰属そのもの
-      なので、対象月の所属が月別確定（monthly）されているときだけ計算する。
-    */
-    if (!isConfirmedAssignment(assignment.source)) return null;
+    2026-10-10 に業務ルールが確定した。端末貸し出し報酬の受取人は
+    クリエイター本人であって、代理店ではない。
+      対象   所属が自社（THREE.inc）／AK 100%／管理区分がアカウント貸し出し
+      本人   AP × 分配率（既定 80%）
+      自社   AP − 本人報酬
 
-    const rate = resolveLendingSplitRate(options.lendingSplitRate);
-    if (rate == null) return null;
+    本人ぶんは creator_lending_reward_items（受取人 = creator_id）で管理する。
+    計算は lib/creators/lending-reward-engine.ts が単一ソース。
 
-    rewardKind = "account_lending";
-    lendingSplitRate = rate;
-    rewardAmount = roundAgencyAmount(apAmount * rate);
-
-    if (rewardAmount <= 0) return null;
-  }
+    ここで代理店報酬の明細を作ってはいけない理由:
+      ・agency_reward_items.agency_id は支払先なので、本人への支払いを
+        表現できない（本人を代理店マスタへ架空登録しない）
+      ・外部代理店を支払先にすると、本人へ渡すべき 80% が代理店へ流れる
+    どちらも金額の行き先を誤るため、報酬を作らず null を返す（fail-closed）。
+    DB 側にも同じ制約がある（20261010110000 のガードが
+    agency_reward_items への account_lending 投入を拒否する）。
+  */
+  if (accountType === "account_lending") return null;
 
   return {
     sourceRowKey,

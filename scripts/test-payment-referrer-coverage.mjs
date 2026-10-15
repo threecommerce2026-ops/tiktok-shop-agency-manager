@@ -360,7 +360,9 @@ test("coverage が PaymentUnpaidRow へ混入しない", () => {
 
 test("payment candidate / claim / CSV の判定を変えていない", () => {
   assert.match(PAYMENT_QUERIES, /targetMonth <= MAX_REFERRAL_PAYMENT_CUTOFF_MONTH/);
-  assert.match(PAYMENT_QUERIES, /isPayable: isPayable\(payableInput\)/);
+  /* 紹介者の支払可否は従来どおり isPayable(payableInput) だけで決まる */
+  assert.match(PAYMENT_QUERIES, /const payable = isPayable\(payableInput\);/);
+  assert.match(PAYMENT_QUERIES, /settlement == null \? payable :/);
   assert.match(PAYMENT_QUERIES, /REFERRAL_PAYOUT_THRESHOLD_YEN/);
   // coverage 側は PaymentUnpaidRow を作らない
   const coverage = QUERIES.slice(QUERIES.indexOf("export function buildReferrerCoverage"));

@@ -90,15 +90,38 @@ test("支払明細の取得で TAP データを読んでいない", () => {
   assert.match(CLIENT, /TAP収益はどちらにも含まれません/);
 });
 
-test("明細の取得元は agency_reward_items と referral_reward_items だけ", () => {
+/*
+  2026-10-10: 端末貸し出し報酬（受取人はクリエイター本人）を追加した。
+  本人ぶんは creator_lending_reward_items にあり、支払明細の根拠として読む。
+  代理店・紹介者の取得元は変わっていない。
+*/
+test("明細の取得元は報酬3テーブルと注文行だけ", () => {
   const detail = QUERIES.slice(QUERIES.indexOf("export async function fetchPaymentBatchDetail"));
   const tables = [...detail.matchAll(/"(\w+)",\s*\n\s*"id,/g)].map((m) => m[1]);
   for (const t of tables) {
     assert.ok(
-      ["agency_reward_items", "referral_reward_items", "affiliate_order_lines"].includes(t),
+      [
+        "agency_reward_items",
+        "referral_reward_items",
+        "creator_lending_reward_items",
+        "affiliate_order_lines",
+      ].includes(t),
       `想定外のテーブル: ${t}`,
     );
   }
+});
+
+test("端末貸し出し報酬の明細も payment_batch_id だけで絞る", () => {
+  const detail = QUERIES.slice(QUERIES.indexOf("export async function fetchPaymentBatchDetail"));
+  const lending = detail.slice(detail.indexOf('"creator_lending_reward_items"'));
+  /* 本人ぶんも占有キーだけで引く。target_month で拾い直さない */
+  assert.match(lending, /query\.eq\("payment_batch_id", batchId\)/);
+  /* 自社取り分は支払額に混ぜない（本人ぶんだけを支払う） */
+  assert.match(QUERIES, /lendingRewardAmount/);
+  assert.doesNotMatch(
+    QUERIES,
+    /rewardAmount: toAmount\(row\.self_share_amount\)/,
+  );
 });
 
 test("source_row_key の .in() を使っていない（414対策）", () => {
@@ -108,9 +131,10 @@ test("source_row_key の .in() を使っていない（414対策）", () => {
 // =============================================================================
 // 4. 表記
 // =============================================================================
-test("表記は代理店分配報酬 / 紹介制度報酬", () => {
+test("表記は代理店分配報酬 / 紹介制度報酬 / 端末貸し出し報酬", () => {
   assert.equal(q.REWARD_KIND_LABEL.agency, "代理店分配報酬");
   assert.equal(q.REWARD_KIND_LABEL.referral, "紹介制度報酬");
+  assert.equal(q.REWARD_KIND_LABEL.lending, "端末貸し出し報酬");
 });
 
 test("GMVは参考値として表示される", () => {
@@ -192,5 +216,6 @@ test("締め対象月より後の明細は取得対象にならない（batch占
   const detail = QUERIES.slice(QUERIES.indexOf("export async function fetchPaymentBatchDetail"));
   // 明細は payment_batch_id でのみ絞る。target_month の条件で拾い直さない
   assert.match(detail, /query\.eq\("payment_batch_id", batchId\)/);
-  assert.equal((detail.match(/query\.eq\("payment_batch_id", batchId\)/g) ?? []).length, 2);
+  /* 代理店 / 紹介者 / 端末貸し出し（本人）の3テーブル */
+  assert.equal((detail.match(/query\.eq\("payment_batch_id", batchId\)/g) ?? []).length, 3);
 });

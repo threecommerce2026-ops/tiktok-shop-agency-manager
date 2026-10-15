@@ -182,7 +182,15 @@ test("6. manual_hold の判定が残っている", () => {
 
 test("7. payable の判定が残っている", () => {
   assert.match(QUERIES, /holdReasons: resolvePaymentHoldReasons\(payableInput\)/);
-  assert.match(QUERIES, /isPayable: isPayable\(payableInput\)/);
+  /*
+    2026-10-10: 端末貸し出し（creator）だけ「振込額が1円以上」という
+    条件が増えた。代理店・紹介者は従来どおり isPayable(payableInput) だけで決まる。
+  */
+  assert.match(QUERIES, /const payable = isPayable\(payableInput\);/);
+  assert.match(
+    QUERIES,
+    /const payableWithCarryover = settlement == null \? payable : payable && settlement\.payable;/,
+  );
   assert.match(
     QUERIES,
     /isInHouse: payeeKind === "agency" && meta\?\.isInHouse === true/,

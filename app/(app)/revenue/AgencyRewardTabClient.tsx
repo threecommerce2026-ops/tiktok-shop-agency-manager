@@ -222,8 +222,8 @@ function AgencyDetail({ row }: { row: AgencyAnnualSummaryRow }) {
       <div>
         <p className="mb-2 text-[11px] text-zinc-500">
           通常の代理店報酬は AP「エージェンシーの収益総額」と同額です（AK は掛けません）。
-          区分がアカウント貸出のクリエイターは AP × 分配率（既定 80%）を貸し出し先へ支払い、
-          残りが自社の取り分になります。紹介料5%とは別制度です。
+          区分がアカウント貸出のクリエイターの報酬は、代理店ではなく本人が受け取ります。
+          この一覧には出ません（「端末貸し出し」タブで確認してください）。紹介料5%とは別制度です。
         </p>
         <h3 className="mb-2 text-xs font-semibold text-zinc-300">
           クリエイター別内訳

@@ -22,6 +22,15 @@ import {
   type PaymentHoldReason,
 } from "@/lib/payments/payable";
 import {
+  fetchCreatorLendingPayeeSource,
+  type CreatorLendingItemRow,
+} from "@/lib/payments/creator-lending-payee";
+import {
+  resolveCarryoverSettlement,
+  CARRYOVER_PROVISIONAL_NOTE,
+} from "@/lib/payments/creator-lending-rounding";
+import { CREATOR_LENDING_PAYOUT_THRESHOLD_YEN } from "@/lib/payments/minimum-payout";
+import {
   EARLIEST_CUTOFF_MONTH,
   MAX_REFERRAL_PAYMENT_CUTOFF_MONTH,
 } from "@/lib/payments/cutoff-month";
@@ -35,8 +44,15 @@ import {
   支払管理のデータソース。
 
   ■ 金額の正式source
-    代理店   agency_reward_items.reward_amount
-    紹介者   referral_reward_items.coalesce(adjusted_reward_amount, reward_amount)
+    代理店        agency_reward_items.reward_amount
+    紹介者        referral_reward_items.coalesce(adjusted_reward_amount, reward_amount)
+    クリエイター  creator_lending_reward_items.reward_amount（端末貸し出しの本人ぶん）
+
+  ■ 端末貸し出し報酬はクリエイター本人へ支払う
+  管理区分がアカウント貸し出しのクリエイターは、所属（THREE.inc）と AK 100% を
+  変えずに AP を本人と自社で分ける。本人ぶんは代理店ではなく本人へ振り込むため、
+  第3の受取種別 creator として扱う。代理店マスタへの登録はしない。
+  自社取り分（self_share_amount）は支払対象ではないので金額に足さない。
 
   agency_payouts / referral_payouts の total_reward_amount は
   「対象月時点の年初来累積スナップショット」で行をまたいで重複するため、
@@ -65,6 +81,29 @@ const AGENCY_ITEM_COLUMNS =
 
 const REFERRAL_ITEM_COLUMNS =
   "id, target_month, referrer_id, creator_id, base_amount, reward_amount, adjusted_reward_amount, is_reward_target, is_paid, payout_id, payment_batch_id, payment_hold_reason";
+
+/*
+  支払明細の列。
+
+  payee_creator_id は 20261010120000 の migration で追加する列で、
+  適用前の環境には存在しない。列つき → 列なし の順に select して、
+  既存の代理店・紹介者の支払管理が落ちないようにする
+  （紹介者の is_payout_excluded と同じ方式）。
+*/
+function batchColumns(withCreator: boolean): string {
+  return withCreator ? `${BATCH_COLUMNS}, payee_creator_id` : BATCH_COLUMNS;
+}
+
+/* 列が無いことを示すエラーか（Postgres 42703 / PostgREST のスキーマキャッシュ） */
+function isMissingCreatorPayeeColumn(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes("42703") ||
+    text.includes("payee_creator_id") ||
+    (text.includes("column") && text.includes("does not exist")) ||
+    text.includes("could not find the")
+  );
+}
 
 const BATCH_COLUMNS =
   "id, payee_kind, agency_id, referrer_id, cutoff_month, period_start_month, period_end_month, item_count, gross_amount, payment_amount, status, memo, failure_reason, created_at, approved_at, paid_at, paid_on, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_holder";
@@ -149,6 +188,44 @@ export type PaymentUnpaidRow = {
   agencyRewardAmount: number;
   /** 内訳: 紹介者報酬ぶんの未払残高（紹介者行は自分の支払可能額） */
   referralRewardAmount: number;
+  /** 内訳: 端末貸し出し報酬（本人ぶん）の未払残高。creator 行のみ */
+  lendingRewardAmount: number;
+  /**
+   * 端末貸し出しの自社取り分（参考値）。支払対象ではないので
+   * 未払残高・支払予定額には一切入らない。
+   */
+  lendingSelfShareAmount: number;
+  /**
+   * 振込端数の繰越残高（creator 行のみ）。
+   * 今回の振込に足される。
+   */
+  carryoverBalance: number;
+  /**
+   * 実際に振り込める額（1円単位）。creator 行のみ。
+   * = floor(未払残高 + 繰越残高)
+   * 代理店・紹介者行では未払残高と同じ値を入れる。
+   */
+  transferAmount: number;
+  /** 今回振込後に残る端数（creator 行のみ） */
+  carryoverAfter: number;
+  /**
+   * 次回へ繰り越す総額（creator 行のみ）。
+   *
+   * 振り込める月   1円未満の端数だけ
+   * 未達の月       未払残高 + 繰越残高の全額（失効させない）
+   */
+  carryForwardAmount: number;
+  /**
+   * いま支払える額。最低振込額の判定に使う値。
+   *
+   * creator          未払残高 + 繰越残高（端数まで含めて判定する）
+   * 代理店・紹介者    未払残高そのまま（従来と同じ）
+   */
+  payableAmount: number;
+  /** 最低振込額に達していないか（creator 行のみ） */
+  belowMinimumTransfer: boolean;
+  /** 最低振込額までの不足額（creator 行のみ） */
+  shortfallAmount: number;
   /**
    * 「今回は支払わない」にした額（紹介者行のみ）。
    * payment_hold_reason = 'manual_hold'。unpaidAmount には含まれない。
@@ -192,6 +269,18 @@ export type PaymentOverview = {
   rows: PaymentUnpaidRow[];
   batches: PaymentBatchSummary[];
   sellerInvoices: SellerInvoiceTabRow[];
+  /**
+   * 端末貸し出し報酬のテーブルが未作成か（migration 適用前）。
+   * true のときクリエイター行は出ない。代理店・紹介者の支払いは通常どおり。
+   */
+  lendingTableMissing: boolean;
+  /**
+   * 支払経路が creator 受取種別に対応しているか（20261010120000/130000/170000）。
+   * false のあいだ画面はクリエイターの支払明細作成を無効にする（M-6）。
+   */
+  supportsCreatorPayee: boolean;
+  /** 振込ルール（最低振込額・端数繰越）の注記 */
+  carryoverNote: string;
   totals: {
     /** 今回支払予定総額（draft / approved / processing の合計） */
     scheduledAmount: number;
@@ -205,6 +294,17 @@ export type PaymentOverview = {
     referrerUnpaidAmount: number;
     /** 「今回は支払わない」にした紹介報酬の合計 */
     referrerManualHoldAmount: number;
+    /** 端末貸し出し報酬（本人ぶん）の支払可能額 */
+    creatorUnpaidAmount: number;
+    /** 端末貸し出しの自社取り分（参考値。支払総額には入らない） */
+    creatorSelfShareAmount: number;
+    /** 端末貸し出しの振込額（1円単位の合計） */
+    creatorTransferAmount: number;
+    /** 端末貸し出しの繰越残高の合計 */
+    creatorCarryoverAmount: number;
+    /** 最低振込額に達していない本人の数と、その繰越総額 */
+    creatorBelowMinimumCount: number;
+    creatorCarryForwardAmount: number;
     holdAmount: number;
     holdCount: number;
     payeeCount: number;
@@ -221,6 +321,12 @@ const EMPTY_TOTALS: PaymentOverview["totals"] = {
   agencyUnpaidAmount: 0,
   referrerUnpaidAmount: 0,
   referrerManualHoldAmount: 0,
+  creatorUnpaidAmount: 0,
+  creatorSelfShareAmount: 0,
+  creatorTransferAmount: 0,
+  creatorCarryoverAmount: 0,
+  creatorBelowMinimumCount: 0,
+  creatorCarryForwardAmount: 0,
   holdAmount: 0,
   holdCount: 0,
   payeeCount: 0,
@@ -237,6 +343,10 @@ type PayeeAccumulator = {
   agencyClaimable: number[];
   /** 内訳: 合算した紹介者報酬ぶんの未払い */
   referralClaimable: number[];
+  /** 内訳: 端末貸し出し報酬（本人ぶん）の未払い */
+  lendingClaimable: number[];
+  /** 端末貸し出しの自社取り分（参考値。支払額には入れない） */
+  lendingSelfShare: number[];
   /** 合算した紹介者（代理店行のみ） */
   referrers: Set<string>;
   itemCount: number;
@@ -268,6 +378,8 @@ function createAccumulator(): PayeeAccumulator {
     claimable: [],
     agencyClaimable: [],
     referralClaimable: [],
+    lendingClaimable: [],
+    lendingSelfShare: [],
     referrers: new Set<string>(),
     itemCount: 0,
     creators: new Set<string>(),
@@ -338,6 +450,38 @@ function isManualHeld(item: {
   );
 }
 
+/**
+ * 支払明細を select する。payee_creator_id の有無を吸収する。
+ *
+ * 列つきで取れたらそれを使い、列が無いエラーなら列を外して取り直す。
+ * 列が無い環境では creator の支払明細そのものが存在しないため、
+ * 受取人 ID が空になることはない。
+ */
+async function selectPaymentBatches(
+  supabase: SupabaseClient,
+  applyFilters: (query: ReturnType<ReturnType<SupabaseClient["from"]>["select"]>) => unknown,
+): Promise<{ data: Array<Record<string, unknown>> | null; error: { message: string } | null }> {
+  const withCreator = (await applyFilters(
+    supabase.from("payment_batches").select(batchColumns(true)),
+  )) as { data: Array<Record<string, unknown>> | null; error: { message: string } | null };
+
+  if (!withCreator.error) return withCreator;
+
+  if (!isMissingCreatorPayeeColumn(withCreator.error.message)) return withCreator;
+
+  return (await applyFilters(
+    supabase.from("payment_batches").select(batchColumns(false)),
+  )) as { data: Array<Record<string, unknown>> | null; error: { message: string } | null };
+}
+
+/** 支払明細の受取人 ID。受取種別ごとに列が違う */
+function resolveBatchPayeeId(row: Record<string, unknown>): string {
+  const payeeKind = String(row.payee_kind);
+  if (payeeKind === "agency") return String(row.agency_id ?? "");
+  if (payeeKind === "creator") return String(row.payee_creator_id ?? "");
+  return String(row.referrer_id ?? "");
+}
+
 function mapBatchRow(
   row: Record<string, unknown>,
   payeeName: string,
@@ -350,9 +494,7 @@ function mapBatchRow(
   return {
     id: String(row.id),
     payeeKind,
-    payeeId: String(
-      (payeeKind === "agency" ? row.agency_id : row.referrer_id) ?? "",
-    ),
+    payeeId: resolveBatchPayeeId(row),
     payeeName,
     cutoffMonth: String(row.cutoff_month ?? row.period_end_month ?? ""),
     periodStartMonth: String(row.period_start_month ?? ""),
@@ -423,6 +565,9 @@ export async function fetchPaymentOverview(
     rows: [],
     batches: [],
     sellerInvoices: [],
+    lendingTableMissing: false,
+    supportsCreatorPayee: false,
+    carryoverNote: CARRYOVER_PROVISIONAL_NOTE,
     totals: { ...EMPTY_TOTALS },
     error: null,
   };
@@ -435,6 +580,7 @@ export async function fetchPaymentOverview(
     referrersResult,
     batchesResult,
     invoicesResult,
+    lendingSource,
   ] = await Promise.all([
     fetchAllFrom<AgencyItemRow>(supabase, "agency_reward_items", AGENCY_ITEM_COLUMNS),
     fetchAllFrom<ReferralItemRow>(
@@ -464,16 +610,21 @@ export async function fetchPaymentOverview(
       .select(
         "id, name, referrer_name, is_in_house, agency_id, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
       ),
-    supabase
-      .from("payment_batches")
-      .select(BATCH_COLUMNS)
-      .order("created_at", { ascending: false }),
+    selectPaymentBatches(supabase, (query) =>
+      query.order("created_at", { ascending: false }),
+    ),
     supabase
       .from("seller_invoices")
       .select(
         "id, invoice_number, seller_id, target_month, billing_gmv_amount, tsp_rate, invoice_amount, status, issued_at, due_date, paid_at, sellers ( seller_name )",
       )
       .order("target_month", { ascending: false }),
+    /*
+      端末貸し出し報酬（本人受取）。
+      migration 適用前の環境ではテーブルが無く、その場合は
+      クリエイター行が出ないだけで代理店・紹介者の支払いは止めない。
+    */
+    fetchCreatorLendingPayeeSource(supabase),
   ]);
 
   const error =
@@ -484,6 +635,11 @@ export async function fetchPaymentOverview(
     referrersResult.error?.message ??
     batchesResult.error?.message ??
     invoicesResult.error?.message ??
+    /*
+      テーブル未作成は error にしない（tableMissing で表す）。
+      権限・接続など本当の失敗だけを error として返す。
+    */
+    lendingSource.error ??
     null;
 
   if (error) return { ...empty, error };
@@ -525,6 +681,27 @@ export async function fetchPaymentOverview(
       isInHouse: row.is_in_house === true,
       bank: bankAccountFromRow(row as Record<string, unknown>),
       agencyId: row.agency_id == null ? null : String(row.agency_id),
+    });
+  }
+
+  /*
+    クリエイター本人（端末貸し出し報酬の受取人）。
+
+    代理店マスタは使わない。名前は creators、振込先は creator_bank_accounts。
+    isInHouse は false にする。所属は THREE.inc のままだが、
+    受取人は本人であって自社ではないため、自社を理由に支払対象から外さない。
+  */
+  const creatorPayeeById = new Map<string, PayeeMeta>();
+  for (const [creatorId, meta] of creatorMetaById) {
+    creatorPayeeById.set(creatorId, {
+      name:
+        (meta.creatorName && meta.creatorName.trim()) ||
+        (meta.tiktokId ? `@${meta.tiktokId}` : "（削除済みクリエイター）"),
+      isInHouse: false,
+      bank:
+        lendingSource.bankByCreator.get(creatorId) ??
+        bankAccountFromRow({} as Record<string, unknown>),
+      agencyId: null,
     });
   }
 
@@ -621,15 +798,56 @@ export async function fetchPaymentOverview(
 
   referralReferenceAmount = sumReferralAmounts([referralReferenceAmount]);
 
+  /*
+    端末貸し出し報酬（本人ぶん）。
+
+    支払対象は reward_amount だけ。self_share_amount（自社取り分）は
+    THREE.inc の内部計上であって振込対象ではないので、
+    発生額・未払残高・支払予定額のいずれにも足さない（参考値として別に出す）。
+
+    claim できる条件は claim_payment_batch_items の creator 分岐と同じ4条件
+    （is_reward_target / is_paid / payout_id / payment_batch_id）。
+    手動保留はこの制度には無い（列も持たない）。
+  */
+  const creatorAcc = new Map<string, PayeeAccumulator>();
+
+  for (const item of lendingSource.items as CreatorLendingItemRow[]) {
+    const acc = creatorAcc.get(item.creator_id) ?? createAccumulator();
+    const value = toAmount(item.reward_amount);
+    const selfShare = toAmount(item.self_share_amount);
+
+    if (item.is_reward_target) {
+      acc.gross.push(value);
+      acc.lendingSelfShare.push(selfShare);
+      if (item.is_paid) acc.paid.push(value);
+      else if (item.payment_batch_id != null) acc.claimed.push(value);
+    }
+
+    if (isClaimable(item) && inClaimRange(item.target_month)) {
+      acc.claimable.push(value);
+      acc.lendingClaimable.push(value);
+      acc.itemCount += 1;
+      /* 受取人が本人なので、クリエイター内訳は本人1人だけになる */
+      acc.creators.add(item.creator_id);
+      trackMonth(acc, item.target_month);
+      /* 金額が確定していない明細（本来ありえない）は支払対象にしない */
+      if (!(value > 0)) acc.hasUnconfirmedReward = true;
+    }
+
+    creatorAcc.set(item.creator_id, acc);
+  }
+
   // ---- 支払明細 -------------------------------------------------------------
   const batches: PaymentBatchSummary[] = (batchesResult.data ?? []).map((row) => {
     const record = row as Record<string, unknown>;
     const kind = String(record.payee_kind);
-    const payeeId = String(
-      (kind === "agency" ? record.agency_id : record.referrer_id) ?? "",
-    );
+    const payeeId = resolveBatchPayeeId(record);
     const meta =
-      kind === "agency" ? agencyById.get(payeeId) : referrerById.get(payeeId);
+      kind === "agency"
+        ? agencyById.get(payeeId)
+        : kind === "creator"
+          ? creatorPayeeById.get(payeeId)
+          : referrerById.get(payeeId);
     return mapBatchRow(record, meta?.name ?? "（不明な支払先）");
   });
 
@@ -653,9 +871,33 @@ export async function fetchPaymentOverview(
     sum: (values: number[]) => number,
     thresholdAmount: number,
   ): PaymentUnpaidRow => {
+    /*
+      振込額の丸めと繰越（creator だけ）。
+
+      代理店・紹介者は従来どおり未払残高をそのまま振込額として扱う。
+      クリエイター本人は銭が出るため、繰越残高を足して1円単位へ切り捨てる。
+      判定は claim RPC と同じ式（lib/payments/creator-lending-rounding.ts）。
+    */
+    const carryoverBalance =
+      payeeKind === "creator" ? lendingSource.carryoverByCreator.get(payeeId) ?? 0 : 0;
     const bankView = toBankAccountView(meta?.bank);
     const unpaidAmount = sum(acc.claimable);
     const manualHoldAmount = sum(acc.manualHeld);
+
+    /*
+      creator は「未払残高 + 繰越残高」で最低振込額を判定する。
+      繰越残高は1円未満の端数なので、境界では含めないと判定を誤る
+      （例: 明細 999.80 + 繰越 0.30 = 1,000.10 → 支払対象）。
+      claim RPC と同じ式・同じ下限を使う。
+    */
+    const settlement =
+      payeeKind === "creator"
+        ? resolveCarryoverSettlement({
+            itemsAmount: unpaidAmount,
+            carryoverIn: carryoverBalance,
+            minimumAmount: thresholdAmount,
+          })
+        : null;
 
     /*
       紹介元クリエイターの内訳。金額の大きい順に並べる。
@@ -685,7 +927,14 @@ export async function fetchPaymentOverview(
       */
       isInHouse: payeeKind === "agency" && meta?.isInHouse === true,
       bankState: bankView.state,
-      unpaidAmount,
+      /*
+        最低振込額の判定に使う額。
+
+        creator は繰越残高を足した「いま支払える額」で判定する
+        （below_threshold の境界を claim RPC と一致させる）。
+        代理店・紹介者は従来どおり未払残高そのまま。
+      */
+      unpaidAmount: settlement ? settlement.grossAmount : unpaidAmount,
       thresholdAmount,
       hasUnconfirmedAssignment: acc.hasUnconfirmedAssignment,
       hasUnconfirmedReward: acc.hasUnconfirmedReward,
@@ -697,12 +946,26 @@ export async function fetchPaymentOverview(
       isFullyManualHeld: unpaidAmount <= 0 && manualHoldAmount > 0,
     };
 
+    /*
+      支払可否の判定は従来どおり isPayable(payableInput)。
+      代理店・紹介者はこれだけで決まる（挙動を変えていない）。
+
+      creator だけ条件を1つ足す。振込額が1円未満だと claim RPC が
+      拒否するので、画面の判定も同じにする（端数は繰越残高に残る）。
+    */
+    const payable = isPayable(payableInput);
+    const payableWithCarryover = settlement == null ? payable : payable && settlement.payable;
+
     return {
       payeeKind,
       payeeId,
       payeeName:
         meta?.name ??
-        (payeeKind === "agency" ? "（削除済み代理店）" : "（削除済み紹介者）"),
+        (payeeKind === "agency"
+          ? "（削除済み代理店）"
+          : payeeKind === "creator"
+            ? "（削除済みクリエイター）"
+            : "（削除済み紹介者）"),
       isInHouse: meta?.isInHouse === true,
       periodStartMonth: acc.minMonth,
       periodEndMonth: acc.maxMonth,
@@ -716,6 +979,18 @@ export async function fetchPaymentOverview(
         紹介者行では自分の支払可能額をそのまま入れる。
       */
       referralRewardAmount: sum(acc.referralClaimable),
+      /* creator 行のみ。代理店・紹介者行では常に 0 */
+      lendingRewardAmount: sum(acc.lendingClaimable),
+      /* 自社取り分は参考値。支払額には入らない */
+      lendingSelfShareAmount: sum(acc.lendingSelfShare),
+      carryoverBalance,
+      /* creator は1円単位。それ以外は未払残高そのまま */
+      transferAmount: settlement ? settlement.transferAmount : unpaidAmount,
+      carryoverAfter: settlement ? settlement.carryoverOut : 0,
+      payableAmount: settlement ? settlement.grossAmount : unpaidAmount,
+      carryForwardAmount: settlement ? settlement.carryForwardAmount : 0,
+      belowMinimumTransfer: settlement ? settlement.belowMinimum : false,
+      shortfallAmount: settlement ? settlement.shortfallAmount : 0,
       manualHoldAmount,
       manualHoldItemCount: acc.manualHeldItemCount,
       creators,
@@ -725,7 +1000,7 @@ export async function fetchPaymentOverview(
       thresholdAmount,
       bank: bankView,
       holdReasons: resolvePaymentHoldReasons(payableInput),
-      isPayable: isPayable(payableInput),
+      isPayable: payableWithCarryover,
       openBatches: openBatchesByPayee.get(`${payeeKind}:${payeeId}`) ?? [],
     };
   };
@@ -778,6 +1053,29 @@ export async function fetchPaymentOverview(
   }
 
 
+  /*
+    クリエイター本人の行（端末貸し出し報酬）。
+
+    最低振込額は 1,000円（2026-10-11 確定）。判定は「未払残高 + 繰越残高」で行い、
+    達しない月は below_threshold で保留して未払いのまま翌月以降へ繰り越す。
+    振込先が未登録なら bank_missing で保留になり、
+    claim RPC 側でも口座未登録は拒否される。
+  */
+  for (const [creatorId, acc] of creatorAcc) {
+    if (acc.gross.length === 0 && acc.claimable.length === 0) continue;
+
+    rows.push(
+      buildRow(
+        "creator",
+        creatorId,
+        acc,
+        creatorPayeeById.get(creatorId),
+        sumAgencyAmounts,
+        CREATOR_LENDING_PAYOUT_THRESHOLD_YEN,
+      ),
+    );
+  }
+
   rows.sort(
     (a, b) =>
       b.unpaidAmount - a.unpaidAmount ||
@@ -823,6 +1121,9 @@ export async function fetchPaymentOverview(
     rows,
     batches,
     sellerInvoices,
+    lendingTableMissing: lendingSource.tableMissing,
+    supportsCreatorPayee: lendingSource.supportsCreatorPayee,
+    carryoverNote: CARRYOVER_PROVISIONAL_NOTE,
     totals: {
       scheduledAmount: sumAgencyAmounts(
         scheduledBatches.map((batch) => batch.paymentAmount),
@@ -840,6 +1141,33 @@ export async function fetchPaymentOverview(
       /** 「今回は支払わない」にした紹介報酬の合計（支払予定額には入らない） */
       referrerManualHoldAmount: sumReferralAmounts(
         rows.map((row) => row.manualHoldAmount),
+      ),
+      /* 端末貸し出し報酬（本人ぶん）の支払可能額 */
+      creatorUnpaidAmount: sumAgencyAmounts(
+        rows.map((row) => row.lendingRewardAmount),
+      ),
+      /*
+        自社取り分。THREE.inc の内部計上で振込対象ではないため、
+        支払予定総額・支払可能額・振込保留額には一切入れない。
+      */
+      creatorSelfShareAmount: sumAgencyAmounts(
+        rows.map((row) => row.lendingSelfShareAmount),
+      ),
+      /* 実際に振り込める額（1円単位）と、繰り越す端数 */
+      creatorTransferAmount: sumAgencyAmounts(
+        rows.filter((row) => row.payeeKind === "creator").map((row) => row.transferAmount),
+      ),
+      creatorCarryoverAmount: sumAgencyAmounts(
+        rows.filter((row) => row.payeeKind === "creator").map((row) => row.carryoverBalance),
+      ),
+      /* 最低振込額に達していない本人（未払いは翌月以降へ繰り越す） */
+      creatorBelowMinimumCount: rows.filter(
+        (row) => row.payeeKind === "creator" && row.belowMinimumTransfer,
+      ).length,
+      creatorCarryForwardAmount: sumAgencyAmounts(
+        rows
+          .filter((row) => row.payeeKind === "creator" && row.belowMinimumTransfer)
+          .map((row) => row.carryForwardAmount),
       ),
       holdAmount: sumAgencyAmounts(holdRows.map((row) => row.unpaidAmount)),
       holdCount: holdRows.length,
@@ -870,7 +1198,7 @@ export async function fetchPaymentOverview(
   会計上の報酬種別。支払先は代理店へ統合するが、明細では必ず
   どちらの報酬なのかを判別できるようにする。
 */
-export const REWARD_KINDS = ["agency", "referral"] as const;
+export const REWARD_KINDS = ["agency", "referral", "lending"] as const;
 export type RewardKind = (typeof REWARD_KINDS)[number];
 
 /*
@@ -882,6 +1210,8 @@ export type RewardKind = (typeof REWARD_KINDS)[number];
 export const REWARD_KIND_LABEL: Record<RewardKind, string> = {
   agency: "代理店分配報酬",
   referral: "紹介制度報酬",
+  /* AP をクリエイター本人と自社で分けた、本人ぶん */
+  lending: "端末貸し出し報酬",
 };
 
 export type PaymentBatchItemRow = {
@@ -982,10 +1312,14 @@ export type PaymentBatchDetail = {
   agencyRewardAmount: number;
   /** 内訳: 紹介制度報酬ぶんの合計 */
   referralRewardAmount: number;
+  /** 内訳: 端末貸し出し報酬（本人ぶん）の合計 */
+  lendingRewardAmount: number;
   /** 代理店分配報酬の根拠（creator別 → 月別） */
   agencyBreakdown: PaymentRewardBreakdown;
   /** 紹介制度報酬の根拠（紹介者×creator別 → 月別） */
   referralBreakdown: PaymentRewardBreakdown;
+  /** 端末貸し出し報酬の根拠（本人 → 月別。基準額は AP、率は本人の分配率） */
+  lendingBreakdown: PaymentRewardBreakdown;
   /**
    * 画面合計と支払明細スナップショットが一致しているか。
    * false のときは画面に金額を出さずエラーとして扱う。
@@ -1012,47 +1346,59 @@ export async function fetchPaymentBatchDetail(
     itemsTotalAmount: 0,
     agencyRewardAmount: 0,
     referralRewardAmount: 0,
+    lendingRewardAmount: 0,
     agencyBreakdown: emptyBreakdown("agency"),
     referralBreakdown: emptyBreakdown("referral"),
+    lendingBreakdown: emptyBreakdown("lending"),
     totalsMatchBatch: true,
     error: null,
   };
 
-  const { data: batchRow, error: batchError } = await supabase
-    .from("payment_batches")
-    .select(BATCH_COLUMNS)
-    .eq("id", batchId)
-    .maybeSingle();
+  const batchResult = await selectPaymentBatches(supabase, (query) =>
+    query.eq("id", batchId).limit(1),
+  );
 
-  if (batchError) return { ...empty, error: batchError.message };
+  if (batchResult.error) return { ...empty, error: batchResult.error.message };
+
+  const batchRow = (batchResult.data ?? [])[0] ?? null;
   if (!batchRow) return empty;
 
   const record = batchRow as Record<string, unknown>;
   const payeeKind = String(record.payee_kind) as PayeeKind;
-  const payeeId = String(
-    (payeeKind === "agency" ? record.agency_id : record.referrer_id) ?? "",
-  );
+  const payeeId = resolveBatchPayeeId(record);
 
+  /* 受取人の表示名。creator は代理店マスタではなく creators から引く */
   const payeeResult =
     payeeKind === "agency"
       ? await supabase.from("agencies").select("id, name").eq("id", payeeId).maybeSingle()
-      : await supabase
-          .from("referrers")
-          .select("id, name, referrer_name")
-          .eq("id", payeeId)
-          .maybeSingle();
+      : payeeKind === "creator"
+        ? await supabase
+            .from("creators")
+            .select("id, creator_name, tiktok_id")
+            .eq("id", payeeId)
+            .maybeSingle()
+        : await supabase
+            .from("referrers")
+            .select("id, name, referrer_name")
+            .eq("id", payeeId)
+            .maybeSingle();
 
   if (payeeResult.error) return { ...empty, error: payeeResult.error.message };
 
+  const payeeRecord = payeeResult.data as Record<string, unknown> | null;
+
   const payeeName =
     payeeKind === "agency"
-      ? String(payeeResult.data?.name ?? "（削除済み代理店）")
-      : String(
-          (payeeResult.data as { referrer_name?: string; name?: string } | null)
-            ?.referrer_name ??
-            (payeeResult.data as { name?: string } | null)?.name ??
-            "（削除済み紹介者）",
-        );
+      ? String(payeeRecord?.name ?? "（削除済み代理店）")
+      : payeeKind === "creator"
+        ? String(
+            payeeRecord?.creator_name ??
+              (payeeRecord?.tiktok_id ? `@${payeeRecord.tiktok_id}` : null) ??
+              "（削除済みクリエイター）",
+          )
+        : String(
+            payeeRecord?.referrer_name ?? payeeRecord?.name ?? "（削除済み紹介者）",
+          );
 
   const batch = mapBatchRow(record, payeeName);
 
@@ -1060,7 +1406,8 @@ export async function fetchPaymentBatchDetail(
     代理店の支払明細には、帰属する紹介者の紹介報酬も組み入れている。
     どちらの報酬かはテーブルの由来で判別する（種別を失わない）。
   */
-  const [agencyItemsResult, referralItemsResult, auditResult] = await Promise.all([
+  const [agencyItemsResult, referralItemsResult, lendingItemsResult, auditResult] =
+    await Promise.all([
     payeeKind === "agency"
       ? fetchAllFrom<Record<string, unknown>>(
           supabase,
@@ -1079,6 +1426,23 @@ export async function fetchPaymentBatchDetail(
       "id, target_month, creator_id, referrer_id, source_row_key, base_amount, reward_rate, reward_amount, adjusted_reward_amount, is_paid",
       (query) => query.eq("payment_batch_id", batchId),
     ),
+    /*
+      端末貸し出し報酬（本人ぶん）。creator の支払明細だけが持つ。
+      テーブルが無い環境（migration 適用前）では creator の支払明細も
+      存在しないので、取得そのものを行わない。
+    */
+    payeeKind === "creator"
+      ? fetchAllFrom<Record<string, unknown>>(
+          supabase,
+          "creator_lending_reward_items",
+          "id, target_month, creator_id, commission_gmv, agency_revenue, split_rate, reward_amount, self_share_amount, is_paid",
+          (query) => query.eq("payment_batch_id", batchId),
+        )
+      : Promise.resolve({
+          data: [] as Array<Record<string, unknown>>,
+          error: null,
+          errorCode: null,
+        }),
     supabase
       .from("payment_batch_audit_logs")
       .select(
@@ -1094,15 +1458,20 @@ export async function fetchPaymentBatchDetail(
   if (referralItemsResult.error) {
     return { ...empty, batch, error: referralItemsResult.error };
   }
+  if (lendingItemsResult.error) {
+    return { ...empty, batch, error: lendingItemsResult.error };
+  }
   if (auditResult.error) {
     return { ...empty, batch, error: auditResult.error.message };
   }
 
   const creatorIds = [
     ...new Set(
-      [...agencyItemsResult.data, ...referralItemsResult.data].map((item) =>
-        String(item.creator_id),
-      ),
+      [
+        ...agencyItemsResult.data,
+        ...referralItemsResult.data,
+        ...lendingItemsResult.data,
+      ].map((item) => String(item.creator_id)),
     ),
   ];
 
@@ -1204,23 +1573,47 @@ export async function fetchPaymentBatchDetail(
     rewardKind: RewardKind,
   ): PaymentBatchItemRow => {
     const creator = creatorById.get(String(row.creator_id));
-    const isAgency = rewardKind === "agency";
+
+    /*
+      報酬種別ごとに基準額・率・金額の列が違う。
+        agency   基準額 commission_base  率 agency_split_rate(%)  金額 reward_amount
+        referral 基準額 base_amount      率 reward_rate(0.05)     金額 adjusted または reward
+        lending  基準額 agency_revenue(AP) 率 split_rate(0.8)     金額 reward_amount（本人ぶん）
+      金額はいずれも保存済みの snapshot をそのまま出す（掛け直さない）。
+    */
+    const base =
+      rewardKind === "agency"
+        ? toAmount(row.commission_base)
+        : rewardKind === "lending"
+          ? toAmount(row.agency_revenue)
+          : toAmount(row.base_amount);
+
+    const ratePct =
+      rewardKind === "agency"
+        ? toAmount(row.agency_split_rate)
+        : rewardKind === "lending"
+          ? toAmount(row.split_rate) * 100
+          : toAmount(row.reward_rate) * 100;
+
+    const rewardAmount =
+      rewardKind === "referral"
+        ? resolveRewardItemAmount(row)
+        : toAmount(row.reward_amount);
 
     return {
       id: String(row.id),
       rewardKind,
-      referrerName: isAgency
-        ? null
-        : referrerNameById.get(String(row.referrer_id)) ?? "（不明な紹介者）",
+      referrerName:
+        rewardKind === "referral"
+          ? referrerNameById.get(String(row.referrer_id)) ?? "（不明な紹介者）"
+          : null,
       targetMonth: String(row.target_month ?? ""),
       creatorId: String(row.creator_id ?? ""),
       creatorName: creator?.creatorName ?? "—",
       tiktokId: creator?.tiktokId ?? "",
-      baseAmount: toAmount(isAgency ? row.commission_base : row.base_amount),
-      ratePct: isAgency
-        ? toAmount(row.agency_split_rate)
-        : toAmount(row.reward_rate) * 100,
-      rewardAmount: isAgency ? toAmount(row.reward_amount) : resolveRewardItemAmount(row),
+      baseAmount: base,
+      ratePct,
+      rewardAmount,
       isPaid: row.is_paid === true,
     };
   };
@@ -1228,6 +1621,7 @@ export async function fetchPaymentBatchDetail(
   const items: PaymentBatchItemRow[] = [
     ...agencyItemsResult.data.map((row) => buildItem(row, "agency")),
     ...referralItemsResult.data.map((row) => buildItem(row, "referral")),
+    ...lendingItemsResult.data.map((row) => buildItem(row, "lending")),
   ];
 
   /*
@@ -1297,17 +1691,45 @@ export async function fetchPaymentBatchDetail(
     sumReferralAmounts,
   );
 
+  /*
+    端末貸し出し報酬の根拠。
+    基準額は AP（agency_revenue）、率は本人の分配率（split_rate → %）、
+    金額は本人ぶん（reward_amount）。自社取り分は支払対象ではないので出さない。
+    GMV は参考値（commission_gmv）。
+  */
+  const lendingBreakdown = buildRewardBreakdown(
+    "lending",
+    lendingItemsResult.data.map((row) => {
+      const creator = creatorById.get(String(row.creator_id));
+      return {
+        creatorId: String(row.creator_id ?? ""),
+        creatorName: creator?.creatorName ?? "—",
+        tiktokId: creator?.tiktokId ?? "",
+        referrerName: null,
+        targetMonth: String(row.target_month ?? ""),
+        gmv: toAmount(row.commission_gmv),
+        baseAmount: toAmount(row.agency_revenue),
+        ratePct: toAmount(row.split_rate) * 100,
+        rewardAmount: toAmount(row.reward_amount),
+      };
+    }),
+    sumAgencyAmounts,
+  );
+
   const itemsTotalAmount = sum(items.map((item) => item.rewardAmount));
   const agencyRewardAmount = agencyBreakdown.totalAmount;
   const referralRewardAmount = referralBreakdown.totalAmount;
+  const lendingRewardAmount = lendingBreakdown.totalAmount;
 
   /*
     画面合計と支払明細スナップショットの突き合わせ。
     ずれているときは画面に金額を出さずエラーとして扱う。
   */
   const totalsMatchBatch =
-    Math.abs(sum([agencyRewardAmount, referralRewardAmount]) - batch.paymentAmount) <=
-    0.005;
+    Math.abs(
+      sum([agencyRewardAmount, referralRewardAmount, lendingRewardAmount]) -
+        batch.paymentAmount,
+    ) <= 0.005;
 
   return {
     batch,
@@ -1326,8 +1748,10 @@ export async function fetchPaymentBatchDetail(
     itemsTotalAmount,
     agencyRewardAmount,
     referralRewardAmount,
+    lendingRewardAmount,
     agencyBreakdown,
     referralBreakdown,
+    lendingBreakdown,
     totalsMatchBatch,
     error: null,
   };
@@ -1487,17 +1911,32 @@ export async function fetchPaymentBatchCsvSources(
 ): Promise<{ data: PaymentBatchCsvSource[]; error: string | null }> {
   if (batchIds.length === 0) return { data: [], error: null };
 
-  const { data, error } = await supabase
+  const CSV_BANK_COLUMNS =
+    "cutoff_month, period_start_month, period_end_month, payment_amount, status, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder";
+
+  /*
+    payee_creator_id の有無を吸収する（列つき → 列なし）。
+    振込先は支払明細に複写されたスナップショットなので、
+    受取種別によらずこの行から読む（マスタを引き直さない）。
+  */
+  const withCreator = await supabase
     .from("payment_batches")
-    .select(
-      "id, payee_kind, agency_id, referrer_id, cutoff_month, period_start_month, period_end_month, payment_amount, status, bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder",
-    )
+    .select(`id, payee_kind, agency_id, referrer_id, payee_creator_id, ${CSV_BANK_COLUMNS}`)
     .in("id", batchIds)
     .order("created_at", { ascending: true });
 
-  if (error) return { data: [], error: error.message };
+  const result =
+    withCreator.error && isMissingCreatorPayeeColumn(withCreator.error.message)
+      ? await supabase
+          .from("payment_batches")
+          .select(`id, payee_kind, agency_id, referrer_id, ${CSV_BANK_COLUMNS}`)
+          .in("id", batchIds)
+          .order("created_at", { ascending: true })
+      : withCreator;
 
-  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  if (result.error) return { data: [], error: result.error.message };
+
+  const rows = (result.data ?? []) as Array<Record<string, unknown>>;
 
   const agencyIds = rows
     .filter((row) => row.payee_kind === "agency")
@@ -1505,8 +1944,12 @@ export async function fetchPaymentBatchCsvSources(
   const referrerIds = rows
     .filter((row) => row.payee_kind === "referrer")
     .map((row) => String(row.referrer_id));
+  const lendingCreatorIds = rows
+    .filter((row) => row.payee_kind === "creator")
+    .map((row) => resolveBatchPayeeId(row))
+    .filter((value) => value.length > 0);
 
-  const [agenciesResult, referrersResult] = await Promise.all([
+  const [agenciesResult, referrersResult, csvCreatorsResult] = await Promise.all([
     agencyIds.length > 0
       ? supabase.from("agencies").select("id, name").in("id", agencyIds)
       : Promise.resolve({ data: [], error: null }),
@@ -1516,10 +1959,20 @@ export async function fetchPaymentBatchCsvSources(
           .select("id, name, referrer_name")
           .in("id", referrerIds)
       : Promise.resolve({ data: [], error: null }),
+    /* 本人の表示名は creators から引く（代理店マスタには存在しない） */
+    lendingCreatorIds.length > 0
+      ? supabase
+          .from("creators")
+          .select("id, creator_name, tiktok_id")
+          .in("id", lendingCreatorIds)
+      : Promise.resolve({ data: [], error: null }),
   ]);
 
   if (agenciesResult.error) return { data: [], error: agenciesResult.error.message };
   if (referrersResult.error) return { data: [], error: referrersResult.error.message };
+  if (csvCreatorsResult.error) {
+    return { data: [], error: csvCreatorsResult.error.message };
+  }
 
   const nameById = new Map<string, string>();
   for (const row of agenciesResult.data ?? []) {
@@ -1531,13 +1984,18 @@ export async function fetchPaymentBatchCsvSources(
       String(row.referrer_name ?? row.name ?? ""),
     );
   }
+  for (const row of csvCreatorsResult.data ?? []) {
+    const record = row as Record<string, unknown>;
+    nameById.set(
+      `creator:${String(record.id)}`,
+      String(record.creator_name ?? (record.tiktok_id ? `@${record.tiktok_id}` : "")),
+    );
+  }
 
   return {
     data: rows.map((row) => {
       const payeeKind = String(row.payee_kind) as PayeeKind;
-      const payeeId = String(
-        (payeeKind === "agency" ? row.agency_id : row.referrer_id) ?? "",
-      );
+      const payeeId = resolveBatchPayeeId(row);
       return {
         id: String(row.id),
         payeeKind,
@@ -1572,6 +2030,58 @@ export async function fetchPayeeBankAccounts(
 ): Promise<{ data: PayeeBankRow[]; error: string | null }> {
   const bankColumns =
     "bank_name, bank_code, bank_branch_name, bank_branch_code, bank_account_type, bank_account_number, bank_account_holder";
+
+  /*
+    クリエイター本人の振込先は creator_bank_accounts にある。
+    端末貸し出し報酬の明細があるクリエイターだけを対象にする
+    （全クリエイターを並べると支払先一覧の意味が無くなる）。
+    編集は /revenue の端末貸し出しタブで行う。
+  */
+  if (payeeKind === "creator") {
+    const lending = await fetchCreatorLendingPayeeSource(supabase);
+
+    if (lending.error) return { data: [], error: lending.error };
+    if (lending.tableMissing) return { data: [], error: null };
+
+    const targetCreatorIds = [
+      ...new Set(
+        lending.items
+          .filter((item) => item.is_reward_target)
+          .map((item) => item.creator_id),
+      ),
+    ];
+
+    if (targetCreatorIds.length === 0) return { data: [], error: null };
+
+    const creatorsResult = await fetchAllFrom<{
+      id: string;
+      creator_name: string | null;
+      tiktok_id: string | null;
+    }>(supabase, "creators", "id, creator_name, tiktok_id");
+
+    if (creatorsResult.error) return { data: [], error: creatorsResult.error };
+
+    const nameById = new Map(
+      creatorsResult.data.map((row) => [
+        row.id,
+        String(row.creator_name ?? (row.tiktok_id ? `@${row.tiktok_id}` : "")),
+      ]),
+    );
+
+    const rows: PayeeBankRow[] = targetCreatorIds.map((creatorId) => ({
+      payeeKind,
+      payeeId: creatorId,
+      payeeName: nameById.get(creatorId) ?? "（削除済みクリエイター）",
+      /* 受取人は本人。所属が自社であっても自社扱いにはしない */
+      isInHouse: false,
+      // 画面へ渡すのはマスク済みの形だけ
+      bank: toBankAccountView(lending.bankByCreator.get(creatorId)),
+    }));
+
+    rows.sort((a, b) => a.payeeName.localeCompare(b.payeeName, "ja"));
+
+    return { data: rows, error: null };
+  }
 
   const result =
     payeeKind === "agency"
