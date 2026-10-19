@@ -136,9 +136,15 @@ export function MonthlyAccountTypeBoardClient({
     setStage("edit");
   }
 
-  /** 未確定月を現在区分で埋める。DB へは書き込まない */
+  /**
+   * 未確定月を現在区分で埋める。DB へは書き込まない。
+   *
+   * 対象は「いま絞り込まれている行」だけ。data.rows 全件を渡すと、
+   * 1か月だけ確定したいときに他の月まで選択され、
+   * 対象外の人月へ一度に書き込まれる（2026年の未確定は 54 人月あった）。
+   */
   function fillUnconfirmed() {
-    setSelection(selectUnconfirmedRows(data.rows));
+    setSelection(selectUnconfirmedRows(rows));
     setStage("edit");
   }
 

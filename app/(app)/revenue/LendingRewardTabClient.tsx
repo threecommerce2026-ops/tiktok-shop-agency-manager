@@ -3,11 +3,24 @@
 import { Fragment, useActionState, useState } from "react";
 
 import {
+  bulkSetCreatorLendingTermsAction,
   saveCreatorBankAccountAction,
   setCreatorLendingTermAction,
   syncCreatorLendingRewardsAction,
+  type BulkLendingTermResult,
   type LendingActionResult,
 } from "@/app/actions/creator-lending-rewards";
+import {
+  buildLendingTermChanges,
+  collectLendingTermCandidates,
+  INITIAL_LENDING_SETTLEMENT,
+  INITIAL_LENDING_SETTLEMENT_EXPECTED,
+  LENDING_TERM_BLOCK_LABEL,
+  lendingTermRowKey,
+  selectLendingTermCandidates,
+  summarizeLendingTermPlan,
+  type LendingTermSelection,
+} from "@/lib/creators/lending-term-bulk-draft";
 import type {
   CreatorBankAccountStatus,
   LendingCreatorRow,
@@ -57,7 +70,11 @@ function Kpi({ label, value, hint }: { label: string; value: string; hint?: stri
   );
 }
 
-function ResultBanner({ state }: { state: LendingActionResult | null }) {
+function ResultBanner({
+  state,
+}: {
+  state: LendingActionResult | BulkLendingTermResult | null;
+}) {
   if (!state) return null;
   return (
     <p
@@ -410,6 +427,279 @@ function CreatorDetail({
   );
 }
 
+/*
+  一括有効化パネル。
+
+  ■ なぜ別パネルなのか
+  クリエイター詳細（CreatorDetail）は開いた1名しか描画しないので、
+  人月をまたいだ選択ができない。ここはクリエイター横断で
+  人月を平らに並べ、選択した人月だけをまとめて有効化する。
+
+  ■ 対象の決定はこの画面でやらない
+  どの人月に書くかは lib/creators/lending-term-bulk-draft.ts が決める。
+  画面はその結果を表示して送るだけ。サーバー側でも同じ関数で
+  組み直して突き合わせるので、画面の値だけでは書き込めない。
+
+  ■ 初期精算と通常運用を分ける
+  初期精算（2026-02〜2026-07）は一度きりの過去分精算で、
+  範囲外の人月は候補にも出さない。通常運用は範囲の限定なし。
+*/
+function BulkActivatePanel({
+  rows,
+  year,
+}: {
+  rows: LendingCreatorRow[];
+  year: string;
+}) {
+  const [state, action, pending] = useActionState(
+    bulkSetCreatorLendingTermsAction,
+    null,
+  );
+  const [scopeMode, setScopeMode] = useState<"initial_settlement" | "all">(
+    "initial_settlement",
+  );
+  const [splitRate, setSplitRate] = useState("");
+  const [note, setNote] = useState("");
+  const [selection, setSelection] = useState<LendingTermSelection>(new Set());
+
+  const scope = scopeMode === "all" ? null : INITIAL_LENDING_SETTLEMENT;
+  const candidates = collectLendingTermCandidates(rows, scope);
+  const selectable = candidates.filter((candidate) => candidate.selectable);
+
+  /* 入力中の率が不正なら確認表示を出さない（送信してもサーバーが拒否する） */
+  const parsedRate = splitRate.trim() === "" ? null : Number(splitRate);
+  const rateInvalid =
+    splitRate.trim() !== "" &&
+    (!Number.isFinite(parsedRate) || (parsedRate as number) <= 0 || (parsedRate as number) > 1);
+
+  const plan = buildLendingTermChanges(rows, selection, {
+    splitRate: rateInvalid ? null : parsedRate,
+    scope,
+  });
+  const planSummary = summarizeLendingTermPlan(plan);
+
+  const toggle = (key: string) => {
+    setSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  return (
+    <form action={action} className="space-y-3 rounded-2xl border border-white/[0.07] p-4">
+      <input type="hidden" name="year" value={year} />
+      <input type="hidden" name="scope" value={scopeMode} />
+      {[...selection].map((key) => (
+        <input key={key} type="hidden" name="entries" value={key} />
+      ))}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold text-zinc-300">対象月の一括有効化</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-zinc-600">
+            選んだ人月だけを有効化します。分配率を空欄にすると既定の 80% が適用されます。
+            有効化しただけでは金額は変わりません（再集計で反映されます）。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className={labelClass} htmlFor="bulk-scope">
+            作業の種類
+          </label>
+          <select
+            id="bulk-scope"
+            value={scopeMode}
+            onChange={(event) => {
+              setScopeMode(event.target.value as "initial_settlement" | "all");
+              /* 範囲が変われば選択は作り直す（対象外が残らないように） */
+              setSelection(new Set());
+            }}
+            className={inputClass}
+          >
+            <option value="initial_settlement">{INITIAL_LENDING_SETTLEMENT.label}</option>
+            <option value="all">通常運用（期間の限定なし）</option>
+          </select>
+        </div>
+      </div>
+
+      {scopeMode === "initial_settlement" ? (
+        <p className="rounded-lg border border-white/[0.08] bg-surface-1/40 px-3 py-2 text-[11px] leading-relaxed text-zinc-500">
+          初期精算モードでは {INITIAL_LENDING_SETTLEMENT.fromMonth} 〜{" "}
+          {INITIAL_LENDING_SETTLEMENT.toMonth} 以外の人月は候補に出ません。
+          想定は {INITIAL_LENDING_SETTLEMENT_EXPECTED.creatorCount} 名 /{" "}
+          {INITIAL_LENDING_SETTLEMENT_EXPECTED.personMonthCount} 人月です。
+        </p>
+      ) : null}
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="space-y-1">
+          <span className={labelClass}>分配率（空欄=既定80%）</span>
+          <input
+            type="text"
+            name="split_rate"
+            inputMode="decimal"
+            placeholder="0.8"
+            value={splitRate}
+            onChange={(event) => setSplitRate(event.target.value)}
+            className={inputClass}
+          />
+          {rateInvalid ? (
+            <span className="text-[11px] text-red-300">
+              0 より大きく 1 以下の小数で入力してください（80% なら 0.8）
+            </span>
+          ) : null}
+        </label>
+        <label className="space-y-1 sm:col-span-2">
+          <span className={labelClass}>備考（監査ログに残ります）</span>
+          <input
+            type="text"
+            name="note"
+            maxLength={500}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            className={inputClass}
+          />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setSelection(selectLendingTermCandidates(candidates))}
+          className={buttonClass}
+        >
+          候補をすべて選択（{selectable.length} 人月）
+        </button>
+        <button type="button" onClick={() => setSelection(new Set())} className={buttonClass}>
+          選択を解除
+        </button>
+      </div>
+
+      {/* 実行前の確認。件数はここで数えず draft の集計を出す */}
+      <div className="rounded-xl border border-white/[0.08] bg-surface-1/40 p-3 text-[11px] leading-relaxed text-zinc-400">
+        {planSummary.personMonthCount === 0 ? (
+          <span className="text-zinc-600">有効化する人月を選択してください。</span>
+        ) : (
+          <>
+            <span className="font-semibold text-zinc-200">
+              クリエイター {planSummary.creatorCount} 名 / {planSummary.personMonthCount} 人月
+            </span>
+            {" を有効化します。"}
+            <br />
+            対象月: <span className="font-mono">{planSummary.months.join(", ")}</span>
+            <br />
+            分配率:{" "}
+            {planSummary.splitRate == null
+              ? "既定 80%（split_rate = null）"
+              : `${(planSummary.splitRate * 100).toLocaleString("ja-JP", {
+                  maximumFractionDigits: 2,
+                })}%`}
+            <br />
+            計上される見込み: {planSummary.pendingLineCount} 明細 / AP{" "}
+            {formatYenPrecise(planSummary.pendingAgencyRevenue)}
+            {planSummary.skippedCount > 0 ? (
+              <>
+                <br />
+                <span className="text-amber-200">
+                  選択のうち {planSummary.skippedCount} 件は対象外として書き込みません
+                </span>
+              </>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="submit"
+          disabled={pending || planSummary.personMonthCount === 0}
+          className={buttonClass}
+        >
+          {pending ? "有効化中..." : `選択した ${planSummary.personMonthCount} 人月を有効化`}
+        </button>
+        {state?.ok ? (
+          <span className="text-[11px] text-emerald-200">
+            成功 {state.succeededCount} / 未変更 {state.unchangedCount} / 対象外{" "}
+            {state.rejectedCount} / 失敗 {state.failedCount} / 監査ログ {state.logCount} 行
+          </span>
+        ) : null}
+      </div>
+
+      <ResultBanner state={state} />
+
+      {/* 候補の一覧（選択できない行も理由つきで出す） */}
+      <div className="overflow-x-auto rounded-xl border border-white/[0.07]">
+        <table className="w-full min-w-[820px] border-collapse">
+          <thead>
+            <tr>
+              <th className={thBase}>選択</th>
+              <th className={thBase}>対象月</th>
+              <th className={thBase}>クリエイター</th>
+              <th className={`${thBase} text-right`}>未計上明細</th>
+              <th className={`${thBase} text-right`}>未計上 AP</th>
+              <th className={`${thBase} text-right`}>適用予定率</th>
+              <th className={thBase}>状態</th>
+            </tr>
+          </thead>
+          <tbody>
+            {candidates.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-3 py-6 text-center text-xs text-zinc-600">
+                  対象の人月がありません。
+                </td>
+              </tr>
+            ) : (
+              candidates.map((candidate) => {
+                const key = lendingTermRowKey(candidate);
+
+                return (
+                  <tr key={key} className="border-b border-zinc-900/80">
+                    <td className={td}>
+                      <input
+                        type="checkbox"
+                        checked={selection.has(key)}
+                        disabled={!candidate.selectable}
+                        onChange={() => toggle(key)}
+                        aria-label={`${candidate.tiktokId} ${candidate.targetMonth} を選択`}
+                      />
+                    </td>
+                    <td className={`${td} font-mono text-zinc-300`}>{candidate.targetMonth}</td>
+                    <td className={`${td} text-zinc-300`}>
+                      {candidate.creatorName}
+                      <span className="ml-1 text-zinc-600">({candidate.tiktokId})</span>
+                    </td>
+                    <td className={`${td} text-right font-mono text-zinc-400`}>
+                      {candidate.pendingLineCount} 件
+                    </td>
+                    <td className={`${td} text-right font-mono text-zinc-300`}>
+                      {formatYenPrecise(candidate.pendingAgencyRevenue)}
+                    </td>
+                    <td className={`${td} text-right font-mono text-zinc-400`}>
+                      {candidate.effectiveSplitRate == null
+                        ? "設定不正"
+                        : formatRate(candidate.effectiveSplitRate)}
+                    </td>
+                    <td className={`${td} text-[11px]`}>
+                      {candidate.selectable ? (
+                        <span className="text-emerald-200">有効化できます</span>
+                      ) : (
+                        <span className="text-zinc-500">
+                          {LENDING_TERM_BLOCK_LABEL[candidate.blockReason!]}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </form>
+  );
+}
+
 export function LendingRewardTabClient({
   summary,
   bankStatuses,
@@ -428,6 +718,8 @@ export function LendingRewardTabClient({
     null,
   );
   const [openCreatorId, setOpenCreatorId] = useState<string | null>(null);
+  /* 再集計の範囲。初期精算を既定にして、誤って全月を流さないようにする */
+  const [syncScope, setSyncScope] = useState<string>("initial_settlement");
 
   const bankByCreator = new Map(bankStatuses.map((item) => [item.creatorId, item]));
 
@@ -520,6 +812,11 @@ export function LendingRewardTabClient({
         />
       </div>
 
+      {/* 一括有効化（人月を選んでまとめて有効化する） */}
+      {summary.tableMissing ? null : (
+        <BulkActivatePanel rows={summary.rows} year={year} />
+      )}
+
       {/* 再集計 */}
       <form
         action={syncAction}
@@ -527,24 +824,54 @@ export function LendingRewardTabClient({
       >
         <input type="hidden" name="year" value={year} />
         <label className="space-y-1">
-          <span className={labelClass}>対象月</span>
-          <input
-            type="month"
-            name="target_month"
-            defaultValue={defaultMonth}
-            className={inputClass}
-          />
-        </label>
-        <label className="space-y-1">
           <span className={labelClass}>範囲</span>
-          <select name="scope" defaultValue="month" className={inputClass}>
+          <select
+            name="scope"
+            value={syncScope}
+            onChange={(event) => setSyncScope(event.target.value)}
+            className={inputClass}
+          >
+            <option value="initial_settlement">{INITIAL_LENDING_SETTLEMENT.label}</option>
             <option value="month">指定した月だけ</option>
+            <option value="range">開始月〜終了月</option>
             <option value="year">{year} 年の全月</option>
           </select>
         </label>
+
+        {syncScope === "month" ? (
+          <label className="space-y-1">
+            <span className={labelClass}>対象月</span>
+            <input
+              type="month"
+              name="target_month"
+              defaultValue={defaultMonth}
+              className={inputClass}
+            />
+          </label>
+        ) : null}
+
+        {syncScope === "range" ? (
+          <>
+            <label className="space-y-1">
+              <span className={labelClass}>開始月</span>
+              <input type="month" name="from_month" className={inputClass} />
+            </label>
+            <label className="space-y-1">
+              <span className={labelClass}>終了月</span>
+              <input type="month" name="to_month" className={inputClass} />
+            </label>
+          </>
+        ) : null}
+
         <button type="submit" disabled={syncPending} className={buttonClass}>
           {syncPending ? "再集計中..." : "報酬を再集計"}
         </button>
+
+        <p className="w-full text-[11px] leading-relaxed text-zinc-600">
+          {syncScope === "initial_settlement"
+            ? `${INITIAL_LENDING_SETTLEMENT.fromMonth} 〜 ${INITIAL_LENDING_SETTLEMENT.toMonth} の 6 か月だけを再集計します（範囲は変更できません）。`
+            : "当月より後の月は再集計しません。支払済み・支払明細に占有済みの明細は書き換えません。"}
+        </p>
         <ResultBanner state={syncState} />
       </form>
 

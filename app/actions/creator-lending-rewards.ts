@@ -22,7 +22,17 @@ import {
   sumLendingAmounts,
 } from "@/lib/creators/lending-reward-engine";
 import { syncCreatorLendingRewardsForMonth } from "@/lib/creators/sync-lending-rewards";
-import { expandMonthRange } from "@/lib/referrals/referral-reward-preview";
+import {
+  buildLendingTermChanges,
+  collectLendingTermCandidates,
+  INITIAL_LENDING_SETTLEMENT,
+  isValidMonthKey,
+  LENDING_TERM_BLOCK_LABEL,
+  lendingTermRowKey,
+  resolveLendingSyncMonths,
+  summarizeLendingTermPlan,
+} from "@/lib/creators/lending-term-bulk-draft";
+import { fetchCreatorLendingSummary } from "@/lib/db/creator-lending-queries";
 
 /*
   端末貸し出し報酬（受取人はクリエイター本人）の管理操作。
@@ -103,25 +113,27 @@ export async function syncCreatorLendingRewardsAction(
   const auth = await requireAdminAction();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  const scope = readText(formData, "scope");
-  const year = readText(formData, "year");
-  const month = readText(formData, "target_month");
+  /*
+    対象月の決定は lib/creators/lending-term-bulk-draft.ts の
+    resolveLendingSyncMonths が単一ソース（純関数なのでテストできる）。
 
-  let months: string[];
+    scope=initial_settlement  承認済みの固定範囲（2026-02〜2026-07）だけ
+    scope=range               通常運用の期間指定（締め月を固定しない）
+    scope=year / month        従来どおり
+    いずれも当月より後の月は落とす。
+  */
+  const resolved = resolveLendingSyncMonths({
+    scope: readText(formData, "scope"),
+    month: readText(formData, "target_month"),
+    year: readText(formData, "year"),
+    fromMonth: readText(formData, "from_month"),
+    toMonth: readText(formData, "to_month"),
+    currentMonth: currentMonthKey(),
+  });
 
-  if (scope === "year" && isValidRewardYear(year)) {
-    months = expandMonthRange(`${year}-01`, `${year}-12`).filter(
-      (m) => m <= currentMonthKey(),
-    );
-  } else if (isValidTargetMonth(month)) {
-    months = [month];
-  } else {
-    months = [currentMonthKey()];
-  }
+  if (!resolved.ok) return { ok: false, error: resolved.error };
 
-  if (months.length === 0) {
-    return { ok: false, error: "再集計する対象月がありません" };
-  }
+  const months = resolved.months;
 
   const writeClient = getSupabaseAdmin();
 
@@ -159,6 +171,103 @@ export async function syncCreatorLendingRewardsAction(
     message: `${months[0]}〜${months[months.length - 1]} の端末貸し出し報酬を再集計しました（明細 ${upserted} 件 / 削除 ${deleted} 件 / 支払済据置 ${skippedPaid} 件 / 本人報酬 ${formatAmount(
       sumLendingAmounts(rewardAmounts),
     )} 円 / 自社取り分 ${formatAmount(sumLendingAmounts(selfAmounts))} 円${skipNote}）`,
+  };
+}
+
+type LendingTermEntry = {
+  creatorId: string;
+  targetMonth: string;
+  /** null なら既定 80%（エンジン側で解決する） */
+  splitRate: number | null;
+  isActive: boolean;
+  note: string | null;
+};
+
+type ApplyLendingTermResult =
+  | {
+      ok: true;
+      entryCount: number;
+      /** 実際に保存できた人月の数 */
+      applied: number;
+      /** 変更が無かった人月の数（再実行したときはここに入る） */
+      unchanged: number;
+      /** 実際に保存できた監査ログの行数（書こうとした数ではない） */
+      logCount: number;
+    }
+  | { ok: false; error: string };
+
+export const LENDING_TERMS_RPC = "set_creator_lending_terms" as const;
+
+const RPC_MISSING_HINT =
+  "分配条件を保存する関数（set_creator_lending_terms）がありません。" +
+  "supabase/migrations/20261019100000_creator_lending_terms_rpc.sql を適用してください。";
+
+/* 関数が無いことを示すコードだけを migration 未適用として扱う */
+function isMissingFunction(code: string | null | undefined, message: string): boolean {
+  if (code === "42883" || code === "PGRST202") return true;
+  return /could not find the function|does not exist/i.test(message) &&
+    message.includes(LENDING_TERMS_RPC);
+}
+
+/**
+ * 分配条件を保存する（書き込み経路はここだけ）。
+ *
+ * ■ 監査ログと同一トランザクション
+ * terms の upsert と creator_lending_term_logs の追記を
+ * RPC set_creator_lending_terms の中で行う。supabase-js は
+ * PostgREST 越しで複数リクエストをまたぐトランザクションを張れないため、
+ * アプリ層で2回に分けると片方だけ成立し得る（履歴の欠落）。
+ *
+ * ■ 全件成功または全件ロールバック
+ * 複数件を1回の呼び出しで渡す。RPC は1件でも検証に失敗したら例外を投げ、
+ * 関数呼び出し全体がロールバックされる。部分適用は起きない。
+ *
+ * ■ ユーザーセッションで呼ぶ
+ * service role では auth.uid() が null で RPC が拒否する。
+ * 実行者は DB 側が auth.uid() から記録するので、アプリが入れた値を
+ * 信用しない作りになっている。
+ *
+ * ■ 冪等
+ * 分配率と有効化が変更前と同じ人月は RPC 側で unchanged として扱い、
+ * terms も監査ログも増やさない。
+ */
+async function applyLendingTerms(
+  userClient: Awaited<ReturnType<typeof requireAdminAction>>["supabase"],
+  entries: readonly LendingTermEntry[],
+  scope: { fromMonth: string; toMonth: string } | null,
+): Promise<ApplyLendingTermResult> {
+  if (entries.length === 0) {
+    return { ok: false, error: "対象の人月が指定されていません" };
+  }
+
+  const { data, error } = await userClient.rpc(LENDING_TERMS_RPC, {
+    p_entries: entries.map((entry) => ({
+      creator_id: entry.creatorId,
+      target_month: entry.targetMonth,
+      split_rate: entry.splitRate,
+      is_active: entry.isActive,
+      note: entry.note,
+    })),
+    p_from_month: scope?.fromMonth ?? null,
+    p_to_month: scope?.toMonth ?? null,
+  });
+
+  if (error) {
+    if (isMissingFunction(error.code, error.message)) {
+      return { ok: false, error: RPC_MISSING_HINT };
+    }
+    if (isMissingTable(error.code)) return { ok: false, error: MIGRATION_HINT };
+    return { ok: false, error: describeError(error.message, error.code) };
+  }
+
+  const result = (data ?? {}) as Record<string, unknown>;
+
+  return {
+    ok: true,
+    entryCount: Number(result.entry_count ?? entries.length),
+    applied: Number(result.applied ?? 0),
+    unchanged: Number(result.unchanged ?? 0),
+    logCount: Number(result.log_count ?? 0),
   };
 }
 
@@ -221,95 +330,14 @@ export async function setCreatorLendingTermAction(
     splitRate = parsed;
   }
 
-  const writeClient = getSupabaseAdmin();
+  /* 一括保存と同じ RPC を1件で呼ぶ（書き込み経路を2本にしない） */
+  const applied = await applyLendingTerms(
+    auth.supabase,
+    [{ creatorId, targetMonth, splitRate, isActive, note: note || null }],
+    null,
+  );
 
-  /* 変更前の値を監査ログに残すため先に読む */
-  const { data: before, error: beforeError } = await writeClient
-    .from("creator_lending_terms")
-    .select("split_rate, is_active")
-    .eq("creator_id", creatorId)
-    .eq("target_month", targetMonth)
-    .maybeSingle();
-
-  if (beforeError) {
-    if (isMissingTable(beforeError.code)) return { ok: false, error: MIGRATION_HINT };
-    return { ok: false, error: describeError(beforeError.message, beforeError.code) };
-  }
-
-  const fromSplitRate = before?.split_rate == null ? null : Number(before.split_rate);
-  const fromIsActive = before == null ? null : before.is_active === true;
-
-  const nowIso = new Date().toISOString();
-
-  const { error: upsertError } = await writeClient
-    .from("creator_lending_terms")
-    .upsert(
-      {
-        creator_id: creatorId,
-        target_month: targetMonth,
-        split_rate: splitRate,
-        is_active: isActive,
-        note: note || null,
-        created_by: auth.user.id,
-        created_by_email: auth.user.email ?? null,
-        updated_at: nowIso,
-      },
-      { onConflict: "creator_id,target_month" },
-    );
-
-  if (upsertError) {
-    if (isMissingTable(upsertError.code)) return { ok: false, error: MIGRATION_HINT };
-    return { ok: false, error: describeError(upsertError.message, upsertError.code) };
-  }
-
-  /*
-    監査ログ。
-    率の変更と有効化の変更は別の出来事なので、両方動いたら2行残す。
-    ログの失敗は操作の失敗として扱わない（設定自体は成立している）が、
-    返すメッセージで必ず知らせる。
-  */
-  const logs: Array<Record<string, unknown>> = [];
-
-  if (fromSplitRate !== splitRate) {
-    logs.push({
-      creator_id: creatorId,
-      target_month: targetMonth,
-      action: splitRate == null ? "reset_rate" : "set_rate",
-      from_split_rate: fromSplitRate,
-      to_split_rate: splitRate,
-      note: note || null,
-      changed_by: auth.user.id,
-      changed_by_email: auth.user.email ?? null,
-    });
-  }
-
-  if (fromIsActive !== isActive) {
-    logs.push({
-      creator_id: creatorId,
-      target_month: targetMonth,
-      action: isActive ? "activate" : "deactivate",
-      from_is_active: fromIsActive,
-      to_is_active: isActive,
-      note: note || null,
-      changed_by: auth.user.id,
-      changed_by_email: auth.user.email ?? null,
-    });
-  }
-
-  let logWarning = "";
-
-  if (logs.length > 0) {
-    const { error: logError } = await writeClient
-      .from("creator_lending_term_logs")
-      .insert(logs);
-
-    if (logError) {
-      logWarning = `（注意: 変更履歴の記録に失敗しました: ${describeError(
-        logError.message,
-        logError.code,
-      )}）`;
-    }
-  }
+  if (!applied.ok) return { ok: false, error: applied.error };
 
   revalidateLendingViews();
 
@@ -318,12 +346,218 @@ export async function setCreatorLendingTermAction(
       ? `既定 ${Math.round(CREATOR_LENDING_SPLIT_RATE * 100)}%`
       : `${(splitRate * 100).toLocaleString("ja-JP", { maximumFractionDigits: 2 })}%`;
 
+  const unchangedNote =
+    applied.applied === 0 && applied.unchanged > 0 ? "（設定は変更前と同じでした）" : "";
+
   return {
     ok: true,
     message: `${targetMonth} の分配率を ${rateLabel}／${
       isActive ? "有効" : "無効"
-    } に設定しました。金額へ反映するには対象月を再集計してください。${logWarning}`,
+    } に設定しました${unchangedNote}。監査ログ ${applied.logCount} 行。金額へ反映するには対象月を再集計してください。`,
   };
+}
+
+/**
+ * 分配条件をまとめて有効化する（管理者のみ）。
+ *
+ * ■ クライアントの指定を信用しない（fail-closed）
+ * 画面から送られてくる人月を、サーバー側で
+ * fetchCreatorLendingSummary（本番の一覧と同じ関数）から組み直した
+ * 候補と突き合わせる。候補に無い人月・支払済み・占有中・
+ * 対象期間外の人月は書き込まずに却下する。
+ *
+ * ■ 初期精算モード
+ * scope=initial_settlement のときは INITIAL_LENDING_SETTLEMENT の
+ * 範囲（2026-02〜2026-07）に限定し、範囲外の人月を一切受け付けない。
+ * 通常運用で期間を広げたいときは scope=all を使う（範囲の限定なし）。
+ *
+ * ■ 二重実行
+ * すでに有効化されている人月は候補の段階で already_active として外れる。
+ * terms は upsert、監査ログは差分だけなので、同じ操作を繰り返しても
+ * 行は増えない。
+ */
+export async function bulkSetCreatorLendingTermsAction(
+  _prev: BulkLendingTermResult | null,
+  formData: FormData,
+): Promise<BulkLendingTermResult> {
+  const auth = await requireAdminAction();
+  if (!auth.ok) return { ok: false, error: auth.error };
+
+  const year = readText(formData, "year");
+  const scopeInput = readText(formData, "scope");
+  const rateInput = readText(formData, "split_rate");
+  const note = readText(formData, "note");
+
+  if (!isValidRewardYear(year)) {
+    return { ok: false, error: "対象年の形式が正しくありません" };
+  }
+  if (note.length > 500) {
+    return { ok: false, error: "備考は 500 文字以内で入力してください" };
+  }
+
+  const scope =
+    scopeInput === "all" ? null : INITIAL_LENDING_SETTLEMENT;
+
+  /* 率の扱いは単発保存と同じ。空欄は null（既定率はエンジンが解決する） */
+  let splitRate: number | null = null;
+
+  if (rateInput !== "") {
+    const parsed = Number(rateInput);
+
+    if (!Number.isFinite(parsed)) {
+      return { ok: false, error: "分配率は数値で入力してください（例: 0.8）" };
+    }
+    if (resolveCreatorLendingSplitRate(parsed) == null) {
+      return {
+        ok: false,
+        error: `分配率は 0 より大きく 1 以下の小数で入力してください（80% なら 0.8）。入力値: ${rateInput}`,
+      };
+    }
+
+    splitRate = parsed;
+  }
+
+  /* entries は "creatorId|targetMonth"。画面でチェックされた行だけが送られてくる */
+  const requested = formData
+    .getAll("entries")
+    .map((value) => String(value).split("|"))
+    .filter((parts) => parts.length === 2)
+    .map(([creatorId, targetMonth]) => ({
+      creatorId: creatorId.trim(),
+      targetMonth: targetMonth.trim(),
+    }))
+    .filter((entry) => isUuid(entry.creatorId) && isValidMonthKey(entry.targetMonth));
+
+  if (requested.length === 0) {
+    return { ok: false, error: "有効化する人月を1つ以上選択してください" };
+  }
+
+  const writeClient = getSupabaseAdmin();
+
+  /* サーバー側で候補を組み直す（画面の値を信用しない） */
+  const summary = await fetchCreatorLendingSummary(writeClient, year);
+
+  if (summary.tableMissing) return { ok: false, error: MIGRATION_HINT };
+  if (summary.error) return { ok: false, error: summary.error };
+
+  const selection = new Set(requested.map((entry) => lendingTermRowKey(entry)));
+  const plan = buildLendingTermChanges(summary.rows, selection, { splitRate, scope });
+
+  /* 候補にそもそも載っていない人月（対象者違い・年違いなど） */
+  const candidateKeys = new Set(
+    collectLendingTermCandidates(summary.rows, scope).map((candidate) =>
+      lendingTermRowKey(candidate),
+    ),
+  );
+  const unknown = requested.filter(
+    (entry) => !candidateKeys.has(lendingTermRowKey(entry)),
+  );
+
+  if (plan.changes.length === 0) {
+    return {
+      ok: false,
+      error:
+        "書き込む人月がありませんでした" +
+        describeRejections(plan.skipped, unknown, true),
+    };
+  }
+
+  /*
+    1回の RPC 呼び出しで全件を渡す。
+    RPC は1件でも検証に失敗したら例外を投げ、全件ロールバックされる。
+    「前半だけ有効化された」状態は作らない。
+  */
+  const applied = await applyLendingTerms(
+    auth.supabase,
+    plan.changes.map((change) => ({
+      creatorId: change.creatorId,
+      targetMonth: change.targetMonth,
+      splitRate: change.splitRate,
+      isActive: true,
+      note: note || null,
+    })),
+    scope,
+  );
+
+  const alreadyActive = plan.skipped.filter((item) => item.reason === "already_active").length;
+  const rejected = plan.skipped.length - alreadyActive + unknown.length;
+
+  if (!applied.ok) {
+    /* 全件ロールバック済み。何件書けたかではなく「0件」を返す */
+    return {
+      ok: false,
+      error:
+        `有効化できませんでした（全件を取り消しました）: ${applied.error}` +
+        describeRejections(plan.skipped, unknown, false),
+    };
+  }
+
+  revalidateLendingViews();
+
+  const summaryInfo = summarizeLendingTermPlan(plan);
+  const rateLabel =
+    splitRate == null
+      ? `既定 ${Math.round(CREATOR_LENDING_SPLIT_RATE * 100)}%`
+      : `${(splitRate * 100).toLocaleString("ja-JP", { maximumFractionDigits: 2 })}%`;
+
+  return {
+    ok: true,
+    message:
+      `${applied.applied} 人月を有効化しました（クリエイター ${summaryInfo.creatorCount} 名 / ` +
+      `対象月 ${summaryInfo.months.join(", ")} / 分配率 ${rateLabel} / 監査ログ ${applied.logCount} 行）。` +
+      `金額へ反映するには対象月を再集計してください。` +
+      describeRejections(plan.skipped, unknown, false),
+    succeededCount: applied.applied,
+    /* RPC 側で「設定が同じ」と判定された分と、画面側で外した分の合計 */
+    unchangedCount: applied.unchanged + alreadyActive,
+    rejectedCount: rejected,
+    failedCount: 0,
+    logCount: applied.logCount,
+  };
+}
+
+export type BulkLendingTermResult =
+  | {
+      ok: true;
+      message: string;
+      succeededCount: number;
+      unchangedCount: number;
+      rejectedCount: number;
+      failedCount: number;
+      logCount: number;
+    }
+  | { ok: false; error: string };
+
+/*
+  却下・未変更の内訳を文章にする。
+  黙って飲み込むと「残りだけ成功」が成功に見えて、
+  有効化できていない月に気づかないまま再集計へ進んでしまう。
+*/
+function describeRejections(
+  skipped: ReturnType<typeof buildLendingTermChanges>["skipped"],
+  unknown: Array<{ creatorId: string; targetMonth: string }>,
+  standalone: boolean,
+): string {
+  const parts: string[] = [];
+  const byReason = new Map<string, number>();
+
+  for (const item of skipped) {
+    byReason.set(item.reason, (byReason.get(item.reason) ?? 0) + 1);
+  }
+
+  for (const [reason, count] of byReason) {
+    parts.push(
+      `${LENDING_TERM_BLOCK_LABEL[reason as keyof typeof LENDING_TERM_BLOCK_LABEL]} ${count} 件`,
+    );
+  }
+
+  if (unknown.length > 0) {
+    parts.push(`対象候補に存在しない人月 ${unknown.length} 件`);
+  }
+
+  if (parts.length === 0) return "";
+
+  return standalone ? `: ${parts.join(" / ")}` : `（対象外 ${parts.join(" / ")}）`;
 }
 
 /**

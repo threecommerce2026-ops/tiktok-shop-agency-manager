@@ -793,9 +793,29 @@ test("8-6. 変更操作は管理者のみ・監査ログを残す", () => {
     const body = ACTION_SRC.slice(ACTION_SRC.indexOf(`export async function ${name}`));
     assert.match(body.slice(0, 400), /requireAdminAction\(\)/, name);
   }
-  assert.match(ACTION_SRC, /creator_lending_term_logs/);
-  assert.match(ACTION_SRC, /action: splitRate == null \? "reset_rate" : "set_rate"/);
-  assert.match(ACTION_SRC, /action: isActive \? "activate" : "deactivate"/);
+  /*
+    2026-10-19: terms の upsert と監査ログは
+    set_creator_lending_terms（RPC）の中で同一トランザクションで書くように
+    変えた。アプリ層で2回に分けるとログだけ失敗して履歴が欠落するため。
+    記録する操作種別（set_rate / reset_rate / activate / deactivate）は
+    変えていない。保証の場所が TS から SQL へ移っただけ。
+  */
+  const RPC_SQL = read("supabase/migrations/20261019100000_creator_lending_terms_rpc.sql");
+  assert.match(RPC_SQL, /insert into public\.creator_lending_term_logs/);
+  assert.match(RPC_SQL, /case when v_rate is null then 'reset_rate' else 'set_rate' end/);
+  assert.match(RPC_SQL, /case when v_is_active then 'activate' else 'deactivate' end/);
+  /* 管理者判定は DB 側でも行う */
+  assert.match(RPC_SQL, /if not public\.is_app_admin\(\) then/);
+
+  /* 単発保存・一括保存の両方が同じ RPC を通る（経路は1本） */
+  assert.match(ACTION_SRC, /async function applyLendingTerms\(/);
+  assert.match(ACTION_SRC, /userClient\.rpc\(LENDING_TERMS_RPC/);
+  const bulk = ACTION_SRC.slice(
+    ACTION_SRC.indexOf("export async function bulkSetCreatorLendingTermsAction"),
+    ACTION_SRC.indexOf("export type BulkLendingTermResult"),
+  );
+  assert.match(bulk.slice(0, 400), /requireAdminAction\(\)/);
+  assert.match(bulk, /await applyLendingTerms\(/);
 });
 
 test("8-7. 監査ログの操作種別は DB の CHECK と一致する", () => {
