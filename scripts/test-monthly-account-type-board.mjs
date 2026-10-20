@@ -432,3 +432,178 @@ test("プレビューは標準 = 紹介者あり の行だけを数える", () =
   assert.ok(b, "減る creator が出ていない");
   assert.equal(b.diff, -100);
 });
+
+// ---------------------------------------------------------------------------
+// Shop 明細のみの人月（2026-10-20 追加）
+//
+// この画面の人月の母集合は TAP 明細だけだったため、Shop の注文明細しか
+// 無い人月（本番実測 54 人月）が一覧にまったく出ず、区分を確定できなかった。
+// 月別区分は端末貸し出し報酬の対象判定にも使うので、AP しかない人月も
+// 確定できる必要がある。
+//
+// 既定の見え方（確定済みだけの一覧）は変えない。トグルで出す。
+// ---------------------------------------------------------------------------
+
+/** Shop 明細のみの行（TAP 明細が無い） */
+function shopOnlyRow(overrides) {
+  return row({
+    referralBase: 0,
+    lineCount: 0,
+    hasTapLines: false,
+    shopLineCount: 17,
+    shopAgencyRevenue: 3389,
+    ...overrides,
+  });
+}
+
+/** TAP 明細がある行 */
+function tapRow(overrides) {
+  return row({ hasTapLines: true, shopLineCount: 0, shopAgencyRevenue: 0, ...overrides });
+}
+
+test("S-1. 人月の母集合は TAP 明細・Shop 注文明細・既存の月別区分行の和集合", () => {
+  const code = codeOnly(QUERIES);
+  assert.match(code, /"affiliate_order_lines"/);
+  assert.match(code, /const pairKeys = new Set<string>\(\[/);
+  assert.match(code, /\.\.\.baseByPair\.keys\(\)/);
+  assert.match(code, /\.\.\.shopByPair\.keys\(\)/);
+  assert.match(code, /\.\.\.monthlyByPair\.keys\(\)/);
+  assert.match(code, /for \(const key of pairKeys\)/);
+});
+
+test("S-2. 紹介報酬の算定元に Shop 明細を混ぜない", () => {
+  const code = codeOnly(QUERIES);
+  /* 算定元は baseByPair（TAP 明細）のみ */
+  assert.match(code, /referralBase: sumReferralAmounts\(base\.base\)/);
+  assert.match(code, /lineCount: base\.lines/);
+  /* shop は AP の表示にだけ使う */
+  assert.match(code, /shopAgencyRevenue: sumReferralAmounts\(shop\.revenue\)/);
+  assert.equal(/referralBase: sumReferralAmounts\(shop/.test(code), false);
+  /* 再計算プレビューも TAP 由来の値だけを使う */
+  const preview = code.slice(code.indexOf("export function buildRewardPreview"));
+  assert.equal(/shopAgencyRevenue|shopLineCount/.test(preview), false);
+});
+
+test("S-3. 行に TAP 有無と Shop 明細の件数・AP を持つ", () => {
+  const code = codeOnly(QUERIES);
+  assert.match(code, /hasTapLines: base\.lines > 0/);
+  assert.match(code, /shopLineCount: shop\.lines/);
+  assert.match(code, /hasTapLines: boolean;/);
+});
+
+test("S-4. 「未確定月を現在区分で埋める」は Shop 明細のみの人月を選ばない", () => {
+  const rows = [
+    tapRow({ creatorId: "c1", targetMonth: "2026-05" }),
+    shopOnlyRow({ creatorId: "c2", targetMonth: "2026-02" }),
+    shopOnlyRow({ creatorId: "c3", targetMonth: "2026-03" }),
+  ];
+  const selection = draft.selectUnconfirmedRows(rows);
+
+  assert.equal(selection.size, 1);
+  assert.equal(selection.has(draft.boardRowKey(rows[0])), true);
+  assert.equal(selection.has(draft.boardRowKey(rows[1])), false);
+  assert.equal(selection.has(draft.boardRowKey(rows[2])), false);
+});
+
+test("S-5. includeShopOnly を渡したときだけ Shop 明細のみの人月も選ぶ", () => {
+  const rows = [
+    tapRow({ creatorId: "c1", targetMonth: "2026-05" }),
+    shopOnlyRow({ creatorId: "c2", targetMonth: "2026-02" }),
+  ];
+  const selection = draft.selectUnconfirmedRows(rows, { includeShopOnly: true });
+
+  assert.equal(selection.size, 2);
+});
+
+test("S-6. Shop 明細のみでも支払済み・確定済みは選ばない", () => {
+  const rows = [
+    shopOnlyRow({ creatorId: "c1", targetMonth: "2026-02", hasPaidReward: true }),
+    shopOnlyRow({
+      creatorId: "c2",
+      targetMonth: "2026-03",
+      source: "monthly",
+      monthlyType: "self_operated",
+    }),
+  ];
+
+  assert.equal(draft.selectUnconfirmedRows(rows, { includeShopOnly: true }).size, 0);
+});
+
+test("S-7. 旧フィクスチャ（hasTapLines 未設定）は従来どおり選ばれる", () => {
+  /* 実データでは必ず入る列。未設定を「TAP あり」側に倒して既存挙動を保つ */
+  const rows = [row({ creatorId: "c1", targetMonth: "2026-05" })];
+  assert.equal(rows[0].hasTapLines, undefined);
+  assert.equal(draft.selectUnconfirmedRows(rows).size, 1);
+});
+
+test("S-8. 選択した Shop 明細のみの人月は確定対象になる", () => {
+  const rows = [
+    shopOnlyRow({ creatorId: "c1", targetMonth: "2026-02", currentType: "account_lending" }),
+    shopOnlyRow({ creatorId: "c2", targetMonth: "2026-03", currentType: "account_lending" }),
+    shopOnlyRow({ creatorId: "c3", targetMonth: "2026-08", currentType: "account_lending" }),
+  ];
+  /* 2026-08 は選ばない（今回の精算対象外） */
+  const selection = new Set([draft.boardRowKey(rows[0]), draft.boardRowKey(rows[1])]);
+  const changes = draft.buildBoardChanges(rows, selection);
+
+  assert.equal(changes.length, 2);
+  assert.deepEqual(changes.map((c) => c.targetMonth), ["2026-02", "2026-03"]);
+  assert.ok(changes.every((c) => c.accountManagementType === "account_lending"));
+  assert.ok(changes.every((c) => c.previousType === null));
+
+  const summary = draft.summarizeBoardChanges(changes);
+  assert.equal(summary.rowCount, 2);
+  assert.equal(summary.creatorCount, 2);
+  assert.equal(summary.accountLendingCount, 2);
+  assert.equal(summary.reconfirmCount, 0);
+});
+
+test("S-9. 画面のトグルは既定オフで、件数を出す", () => {
+  assert.match(UI, /const \[showShopOnly, setShowShopOnly\] = useState\(false\)/);
+  assert.match(UI, /注文明細のみの人月も表示/);
+  assert.match(UI, /const shopOnlyCount = useMemo\(/);
+});
+
+test("S-10. トグルがオフのときは Shop 明細のみの行を出さない", () => {
+  assert.match(UI, /if \(!showShopOnly && !row\.hasTapLines\) return false;/);
+});
+
+test("S-11. 選択済みの人月は絞り込みに関わらず表示する", () => {
+  const code = codeOnly(UI);
+  assert.match(code, /const selected = selection\.has\(boardRowKey\(row\)\);/);
+  assert.match(code, /if \(selected\) return true;/);
+  /* 絞り込みの依存に selection と showShopOnly が入っている */
+  assert.match(code, /\}, \[data\.rows, month, search, stateFilter, typeFilter, showShopOnly, selection\]\);/);
+});
+
+test("S-12. トグルをオフへ戻すと、見えなくなる行の選択を外す", () => {
+  const code = codeOnly(UI);
+  assert.match(code, /setShowShopOnly\(next\);/);
+  assert.match(code, /if \(!next\) \{/);
+  assert.match(code, /if \(!row\.hasTapLines\) continue;/);
+});
+
+test("S-13. 「表示中の未確定を選択」は絞り込み結果だけを対象にする", () => {
+  const code = codeOnly(UI);
+  assert.match(code, /function selectFiltered\(\) \{/);
+  assert.match(code, /selectUnconfirmedRows\(rows, \{ includeShopOnly: true \}\)/);
+  assert.match(code, /const selectableFiltered = useMemo\(/);
+  assert.match(code, /rows\.filter\(\(row\) => !row\.hasPaidReward && row\.source === "current"\)/);
+  /* 全件を渡していない */
+  assert.equal(/selectUnconfirmedRows\(data\.rows/.test(code), false);
+});
+
+test("S-14. Shop 明細のみの行が画面で分かる", () => {
+  assert.match(UI, /Shop明細のみ/);
+  assert.match(UI, /row\.hasTapLines \? null :/);
+  assert.match(UI, /row\.shopLineCount/);
+  assert.match(UI, /row\.shopAgencyRevenue/);
+});
+
+test("S-15. 確定経路は既存の RPC のまま（変えていない）", () => {
+  assert.match(ACTIONS, /set_creator_monthly_account_management_type/);
+  assert.match(CONFIRM, /"set_creator_monthly_account_management_type"/);
+  /* 画面が直接テーブルへ書いていない */
+  assert.equal(/\.from\("creator_monthly_account_management_types"\)/.test(UI), false);
+  assert.match(UI, /bulkConfirmMonthlyAccountTypesAction/);
+});

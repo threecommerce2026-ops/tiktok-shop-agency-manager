@@ -49,12 +49,22 @@ export type BoardPlannedChange = {
  */
 export function selectUnconfirmedRows(
   rows: MonthlyAccountTypeBoardRow[],
+  options: { includeShopOnly?: boolean } = {},
 ): BoardSelection {
   const selection: BoardSelection = new Set();
 
   for (const row of rows) {
     if (row.hasPaidReward) continue;
     if (row.source === "monthly") continue;
+    /*
+      TAP 明細が無い人月（Shop 明細のみ）は自動で埋めない。
+
+      この行は 2026-10-20 に母集合へ足したばかりで、確定の是非を
+      業務として見ていない（実測 54 人月）。「未確定月を現在区分で埋める」
+      で一度に選ばれると、確認したい数件が埋もれる。
+      必要な行は画面でチェックして選ぶ。
+    */
+    if (options.includeShopOnly !== true && row.hasTapLines === false) continue;
     selection.add(boardRowKey(row));
   }
 

@@ -75,6 +75,19 @@ export type MonthlyAccountTypeBoardRow = {
   hasReferrer: boolean;
   /** その月の料率（紹介関係から。無ければ既定） */
   referralRate: number;
+  /**
+   * TAP 明細（紹介報酬の算定元）があるか。
+   *
+   * false の行は Shop の注文明細（affiliate_order_lines）だけがある人月で、
+   * 以前は一覧に出てこなかった（母集合が TAP 明細だけだったため）。
+   * 区分は端末貸し出し報酬の対象判定にも使うので、AP しかない人月も
+   * 確定できる必要がある。
+   */
+  hasTapLines: boolean;
+  /** Shop の注文明細の件数（affiliate_order_lines） */
+  shopLineCount: number;
+  /** Shop の注文明細の AP 合計（agency_revenue） */
+  shopAgencyRevenue: number;
 };
 
 export type MonthlyAccountTypeBoardData = {
@@ -132,6 +145,13 @@ type TapLine = {
   refund_status: string | null;
 };
 
+/* Shop の注文明細。人月の母集合と AP 表示にだけ使う */
+type ShopLine = {
+  creator_id: string | null;
+  target_month: string | null;
+  agency_revenue: number | string | null;
+};
+
 type RewardItem = {
   creator_id: string;
   target_month: string;
@@ -180,8 +200,14 @@ export async function fetchMonthlyAccountTypeBoard(
     error: null,
   };
 
-  const [linesResult, creatorsResult, monthlyResult, rewardResult, referralsResult] =
-    await Promise.all([
+  const [
+    linesResult,
+    creatorsResult,
+    monthlyResult,
+    rewardResult,
+    referralsResult,
+    shopResult,
+  ] = await Promise.all([
       fetchAllFrom<TapLine>(
         supabase,
         "tap_affiliate_order_lines",
@@ -216,6 +242,20 @@ export async function fetchMonthlyAccountTypeBoard(
         "creator_referrals",
         REFERRAL_RELATION_COLUMNS,
       ),
+      /*
+        Shop の注文明細。人月の母集合に足すために読む。
+
+        TAP 明細が無くても Shop の注文がある人月が存在する（実測 54 人月）。
+        月別区分は端末貸し出し報酬の対象判定にも使うため、
+        TAP 明細だけを母集合にすると、その人月を確定できない。
+        金額（AP）は表示と判断材料のために持つだけで、
+        紹介報酬の算定には一切使わない。
+      */
+      fetchAllFrom<ShopLine>(
+        supabase,
+        "affiliate_order_lines",
+        "creator_id, target_month, agency_revenue",
+      ),
     ]);
 
   const loadError =
@@ -224,6 +264,7 @@ export async function fetchMonthlyAccountTypeBoard(
     monthlyResult.error ??
     rewardResult.error ??
     referralsResult.error ??
+    shopResult.error ??
     null;
 
   if (loadError) return { ...empty, error: loadError };
@@ -304,16 +345,50 @@ export async function fetchMonthlyAccountTypeBoard(
     rewardByPair.set(key, current);
   }
 
+  /*
+    Shop の注文明細の人月。AP の表示と、母集合の補完に使う。
+    紹介報酬の算定には使わない（算定元は baseByPair のみ）。
+  */
+  const shopByPair = new Map<string, { lines: number; revenue: number[] }>();
+  for (const line of shopResult.data) {
+    if (!line.creator_id || !line.target_month) continue;
+    const key = pairKey(line.creator_id, line.target_month);
+    const current = shopByPair.get(key) ?? { lines: 0, revenue: [] };
+    current.lines += 1;
+    current.revenue.push(Number(line.agency_revenue ?? 0));
+    shopByPair.set(key, current);
+  }
+
   const referralIndex = buildReferralPeriods(referralsResult.data);
 
   const rows: MonthlyAccountTypeBoardRow[] = [];
   const months = new Set<string>();
   const creators = new Set<string>();
 
-  for (const [key, base] of baseByPair) {
+  /*
+    人月の母集合は「TAP 明細」∪「Shop 注文明細」∪「既存の月別区分行」。
+
+    TAP 明細だけを起点にしていたため、Shop の注文しか無い人月
+    （実測 54 人月）はこの画面にまったく出てこず、区分を確定できなかった。
+    月別区分は端末貸し出し報酬の対象判定にも使うので、
+    AP しかない人月も確定できる必要がある。
+
+    既存の月別区分行も入れておく（確定済みの人月が明細の入れ替えで
+    一覧から消えないようにする）。
+  */
+  const pairKeys = new Set<string>([
+    ...baseByPair.keys(),
+    ...shopByPair.keys(),
+    ...monthlyByPair.keys(),
+  ]);
+
+  for (const key of pairKeys) {
     const [creatorId, targetMonth] = key.split("|");
     const creator = creatorById.get(creatorId);
     if (!creator) continue;
+
+    const base = baseByPair.get(key) ?? { base: [], lines: 0 };
+    const shop = shopByPair.get(key) ?? { lines: 0, revenue: [] };
 
     const resolved = resolveMonthlyAccountManagementType({
       creatorId,
@@ -349,6 +424,9 @@ export async function fetchMonthlyAccountTypeBoard(
       settlementFinalized: finalizedMonths.has(targetMonth),
       hasReferrer: relation.period?.referrerId != null,
       referralRate: resolveReferralRate(relation.period?.referralRate),
+      hasTapLines: base.lines > 0,
+      shopLineCount: shop.lines,
+      shopAgencyRevenue: sumReferralAmounts(shop.revenue),
     });
   }
 

@@ -93,10 +93,33 @@ export function MonthlyAccountTypeBoardClient({
   const [stateFilter, setStateFilter] =
     useState<(typeof STATE_FILTERS)[number]["key"]>("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  /*
+    Shop の注文明細しか無い人月を表示するか。既定はオフ。
+
+    この画面は紹介報酬の区分確定のために作られ、人月の母集合は
+    TAP 明細だった。月別区分は端末貸し出し報酬の対象判定にも使うので
+    AP しかない人月も確定できる必要があるが、既定で出すと
+    見慣れた件数（確定済みだけの一覧）が変わるのでトグルにしてある。
+  */
+  const [showShopOnly, setShowShopOnly] = useState(false);
+
+  const shopOnlyCount = useMemo(
+    () => data.rows.filter((row) => !row.hasTapLines).length,
+    [data.rows],
+  );
 
   const rows = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return data.rows.filter((row) => {
+      /*
+        選択済みの人月は絞り込みに関わらず必ず出す。
+        検索語を変えたときに「選択したはずの行が見えない」状態を作らない
+        （見えないまま確定すると、何を確定したのか画面から追えない）。
+      */
+      const selected = selection.has(boardRowKey(row));
+      if (selected) return true;
+      /* トグルがオフのときは Shop 明細のみの人月を出さない（従来の見え方） */
+      if (!showShopOnly && !row.hasTapLines) return false;
       if (month !== "all" && row.targetMonth !== month) return false;
       if (keyword && !row.tiktokId.toLowerCase().includes(keyword)) return false;
       if (stateFilter === "provisional" && row.source !== "current") return false;
@@ -104,7 +127,7 @@ export function MonthlyAccountTypeBoardClient({
       if (typeFilter !== "all" && row.effectiveType !== typeFilter) return false;
       return true;
     });
-  }, [data.rows, month, search, stateFilter, typeFilter]);
+  }, [data.rows, month, search, stateFilter, typeFilter, showShopOnly, selection]);
 
   /* 確定対象は画面の絞り込みではなく、選択した行そのもの */
   const changes = useMemo(
@@ -115,6 +138,12 @@ export function MonthlyAccountTypeBoardClient({
   const impact = useMemo(
     () => pickRewardImpactRows(data.rows, changes),
     [data.rows, changes],
+  );
+
+  /* いま表示されている行のうち、確定できる未確定行 */
+  const selectableFiltered = useMemo(
+    () => rows.filter((row) => !row.hasPaidReward && row.source === "current"),
+    [rows],
   );
 
   const blocked = useMemo(
@@ -145,6 +174,15 @@ export function MonthlyAccountTypeBoardClient({
    */
   function fillUnconfirmed() {
     setSelection(selectUnconfirmedRows(rows));
+    setStage("edit");
+  }
+
+  /*
+    いま表示されている未確定の行だけを選ぶ。
+    Shop 明細のみの人月を選ぶときはこちらを使う（絞り込んでから押す）。
+  */
+  function selectFiltered() {
+    setSelection(selectUnconfirmedRows(rows, { includeShopOnly: true }));
     setStage("edit");
   }
 
@@ -249,6 +287,38 @@ export function MonthlyAccountTypeBoardClient({
           />
         </div>
 
+        {/*
+          Shop 明細のみの人月の表示。既定はオフ。
+          オフへ戻すときは、見えなくなる行の選択を外す
+          （見えない行を確定してしまわないため）。
+        */}
+        <label className="flex items-center gap-2 text-[11px] text-zinc-400">
+          <input
+            type="checkbox"
+            checked={showShopOnly}
+            onChange={(event) => {
+              const next = event.target.checked;
+              setShowShopOnly(next);
+              if (!next) {
+                setSelection((prev) => {
+                  const kept = new Set<string>();
+                  for (const row of data.rows) {
+                    if (!row.hasTapLines) continue;
+                    const key = boardRowKey(row);
+                    if (prev.has(key)) kept.add(key);
+                  }
+                  return kept;
+                });
+                setStage("edit");
+              }
+            }}
+          />
+          <span>
+            注文明細のみの人月も表示
+            <span className="ml-1 font-mono text-zinc-300">{int(shopOnlyCount)}</span> 件
+          </span>
+        </label>
+
         <div className="flex flex-wrap gap-1">
           {STATE_FILTERS.map((filter) => (
             <button
@@ -310,6 +380,14 @@ export function MonthlyAccountTypeBoardClient({
         </button>
         <button
           type="button"
+          onClick={selectFiltered}
+          disabled={selectableFiltered.length === 0}
+          className="min-h-[40px] rounded-lg border border-white/[0.18] px-4 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.06] disabled:opacity-40"
+        >
+          表示中の未確定を選択（{int(selectableFiltered.length)} 行）
+        </button>
+        <button
+          type="button"
           onClick={clearSelection}
           disabled={selection.size === 0}
           className="text-xs text-zinc-500 transition hover:text-zinc-300 disabled:opacity-40"
@@ -322,6 +400,11 @@ export function MonthlyAccountTypeBoardClient({
           実際に変わる <span className="font-mono text-zinc-200">{int(changes.length)}</span> 行。
           <span className="ml-1 text-zinc-600">
             この操作は選択するだけで、まだ保存しません。
+          </span>
+          <br />
+          <span className="text-zinc-600">
+            「未確定月を現在区分で埋める」は Shop 明細のみの人月を選びません。
+            その人月は行のチェックか「表示中の未確定を選択」で選んでください。
           </span>
         </p>
       </div>
@@ -381,7 +464,17 @@ export function MonthlyAccountTypeBoardClient({
                       onChange={() => toggle(key)}
                     />
                   </td>
-                  <td className={`${td} font-mono text-zinc-200`}>{row.tiktokId}</td>
+                  <td className={`${td} font-mono text-zinc-200`}>
+                    {row.tiktokId}
+                    {row.hasTapLines ? null : (
+                      <span
+                        className="ml-2 whitespace-nowrap rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 font-sans text-[10px] text-amber-200"
+                        title={`TAP 明細がなく、Shop の注文明細だけがある人月です（注文 ${int(row.shopLineCount)} 件 / AP ${int(row.shopAgencyRevenue)}）`}
+                      >
+                        Shop明細のみ
+                      </span>
+                    )}
+                  </td>
                   <td className={`${td} text-zinc-400`}>{row.creatorName || "—"}</td>
                   <td className={`${td} font-mono text-zinc-300`}>{row.targetMonth}</td>
                   <td className={td}>
