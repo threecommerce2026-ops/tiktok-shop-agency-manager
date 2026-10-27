@@ -196,7 +196,13 @@ type ApplyLendingTermResult =
     }
   | { ok: false; error: string };
 
-export const LENDING_TERMS_RPC = "set_creator_lending_terms" as const;
+/*
+  "use server" ファイルは async 関数しか export できない。
+  文字列を export すると、このモジュールを読み込む Server Action が
+  モジュール評価の時点で全部落ちる（実行時検証 E352。ビルドでは通る）。
+  2026-10-27 に /revenue の Server Action が全滅したのはこれが原因。
+*/
+const LENDING_TERMS_RPC = "set_creator_lending_terms" as const;
 
 const RPC_MISSING_HINT =
   "分配条件を保存する関数（set_creator_lending_terms）がありません。" +
